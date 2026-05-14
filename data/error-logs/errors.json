@@ -1,0 +1,22 @@
+[
+  {
+    "id": "err_20260514_764761",
+    "message": "Request timed out after NaNs: https://mydamoxing.cn/v1/images/generations",
+    "stack": "Error: Request timed out after NaNs: https://mydamoxing.cn/v1/images/generations\n    at fetchWithTimeout (file:///C:/Users/Administrator/Desktop/%E7%94%9F%E5%9B%BE%E7%BD%91%E7%AB%99/backend/server.js:628:44)\n    at async postJson (file:///C:/Users/Administrator/Desktop/%E7%94%9F%E5%9B%BE%E7%BD%91%E7%AB%99/backend/server.js:303:20)\n    at async postJsonWithRetry (file:///C:/Users/Administrator/Desktop/%E7%94%9F%E5%9B%BE%E7%BD%91%E7%AB%99/backend/server.js:287:14)\n    at async callImageGeneration (file:///C:/Users/Administrator/Desktop/%E7%94%9F%E5%9B%BE%E7%BD%91%E7%AB%99/backend/server.js:239:16)\n    at async generateImage (file:///C:/Users/Administrator/Desktop/%E7%94%9F%E5%9B%BE%E7%BD%91%E7%AB%99/backend/server.js:162:7)\n    at async Server.<anonymous> (file:///C:/Users/Administrator/Desktop/%E7%94%9F%E5%9B%BE%E7%BD%91%E7%AB%99/backend/server.js:127:22)",
+    "context": {
+      "method": "POST",
+      "url": "/api/images/generate"
+    },
+    "createdAt": 1778711481661
+  },
+  {
+    "id": "err_20260514_413c02",
+    "message": "Request timed out after NaNs: https://mydamoxing.cn/v1/images/generations",
+    "stack": "Error: Request timed out after NaNs: https://mydamoxing.cn/v1/images/generations\n    at fetchWithTimeout (file:///C:/Users/Administrator/Desktop/%E7%94%9F%E5%9B%BE%E7%BD%91%E7%AB%99/backend/server.js:628:44)\n    at async postJson (file:///C:/Users/Administrator/Desktop/%E7%94%9F%E5%9B%BE%E7%BD%91%E7%AB%99/backend/server.js:303:20)\n    at async postJsonWithRetry (file:///C:/Users/Administrator/Desktop/%E7%94%9F%E5%9B%BE%E7%BD%91%E7%AB%99/backend/server.js:287:14)\n    at async callImageGeneration (file:///C:/Users/Administrator/Desktop/%E7%94%9F%E5%9B%BE%E7%BD%91%E7%AB%99/backend/server.js:239:16)\n    at async generateImage (file:///C:/Users/Administrator/Desktop/%E7%94%9F%E5%9B%BE%E7%BD%91%E7%AB%99/backend/server.js:162:7)\n    at async Server.<anonymous> (file:///C:/Users/Administrator/Desktop/%E7%94%9F%E5%9B%BE%E7%BD%91%E7%AB%99/backend/server.js:127:22)",
+    "context": {
+      "method": "POST",
+      "url": "/api/images/generate"
+    },
+    "createdAt": 1778711562538
+  }
+]

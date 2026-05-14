@@ -1,0 +1,10 @@
+{
+  "name": "image-studio",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node backend/server.js",
+    "check": "node --check backend/server.js && node --check frontend/js/app.js"
+  }
+}
