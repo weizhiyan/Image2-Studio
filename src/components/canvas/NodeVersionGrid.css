@@ -1,0 +1,31 @@
+/* 版本宫格右上角一行：展开角标 + 下载 / 置顶同排（绘板自有增量）。
+ *
+ * ImageNodes.css 是灵枢原封拷贝、禁改；那里把「当前版本卡」的操作钮压到
+ * .image-node-version-actions { top: 38px }（给右上角「总数 + 箭头」角标让位），
+ * 于是主图卡的下载 / 置顶掉到第二行，和角标对不齐。
+ * 这里在外面套一层 flex 排，把两者拉回同一行——选择器一律「类名 + 类名」两级，
+ * 特异性稳压同名基础规则，不依赖两个文件的注入顺序。
+ *
+ * 角标与操作钮都改 position: static：它们原本各自 absolute 到卡片角，
+ * 现在作为 flex 项并排，间距由本文件的 gap 统一管。 */
+
+.image-node-version-top {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  z-index: 4;
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-2);
+}
+
+.image-node-version-top .image-node-version-badge,
+.image-node-version-top .image-node-version-actions {
+  position: static;
+}
+
+/* 置顶整块不渲染后，主图卡只剩下载：贴回角标右侧仍然是一行，
+   非主图卡的下载 + 置顶同理，不会被 flex 挤到换行。 */
+.image-node-version-top .image-node-version-actions {
+  flex: 0 0 auto;
+}

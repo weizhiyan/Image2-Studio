@@ -1,0 +1,23 @@
+/* ── 生成矩阵：canvas 外壳（FlowImageNode 运行态用） ───────────────────────────────────────────────────
+   只负责「铺一块带圆角的深色底 + 让 canvas 铺满」，颜色与形状全在 RunningMatrixField.tsx 里画。
+   is-inline = 嵌进「生成中」卡片里用：和原来的点阵层一样 inset 2px、不吃事件、不挡文案。 */
+
+.running-matrix {
+  position: relative;
+  overflow: hidden;
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--color-bg-base) 88%, var(--color-ui-panel));
+}
+
+.running-matrix canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.running-matrix.is-inline {
+  position: absolute;
+  inset: 2px;
+  border-radius: inherit;
+  pointer-events: none;
+}

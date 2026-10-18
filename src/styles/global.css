@@ -1,0 +1,162 @@
+@import './tokens.css';
+@import './animations.css';
+
+/* ── Reset ── */
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html, body, #root {
+  height: 100%;
+  overflow: hidden;
+  background: var(--color-bg-base);
+  color: var(--color-text-primary);
+  font-family: var(--font-sans);
+  font-size: var(--font-size-base);
+  line-height: var(--line-height-relaxed);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+button,
+input,
+textarea,
+select {
+  font-family: var(--font-sans);
+}
+
+/* ── 自定义滚动条 ── */
+::-webkit-scrollbar {
+  width: var(--scrollbar-size);
+  height: var(--scrollbar-size);
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  border: var(--scrollbar-thumb-inset) solid transparent;
+  border-radius: var(--radius-full);
+  background: var(--scrollbar-thumb-rest);
+  background-clip: content-box;
+  transition: background-color var(--motion-fast) var(--ease-out);
+}
+::-webkit-scrollbar-thumb:hover {
+  border-width: 0;
+  background: var(--color-ui-border-strong);
+  background-clip: content-box;
+}
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+code, pre, kbd {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-code);
+}
+
+/* ── 应用外壳 ── */
+.hb-shell {
+  display: flex;
+  flex-direction: column;
+  height: 100dvh;
+  width: 100vw;
+  overflow: hidden;
+  /* 与画布同色：顶栏透明后才不会透出更浅的页面底色形成一道亮带 */
+  background: var(--color-bg-canvas);
+}
+
+/* 导航是画布内部的浮层：贴在 .hb-canvas-wrap 最顶部，无背景、无描边，
+   网点直接从控件间隙透出来。pointer-events 分层：容器本身点击穿透，
+   只有真正的内容（切换控件 / 提示 / 按钮）吃事件，画布空白区照样能拖。 */
+.hb-topbar {
+  position: absolute;
+  top: 0;
+  right: 0;
+  left: 0;
+  z-index: 120;
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-2);
+  height: var(--top-nav-height);
+  padding: 0 var(--spacing-3);
+  border-bottom: none;
+  background: transparent;
+  pointer-events: none;
+  transition: padding-right var(--motion-slower) var(--ease-emphasized);
+}
+
+/* AI 对话从右下角展开时，顶部右侧控件同步让位；面板尺寸由 ChatPanel 的默认宽度决定。 */
+.image-canvas-page.is-chat-open .hb-topbar {
+  padding-right: calc(var(--spacing-3) + var(--hb-chat-layout-width, 360px) + var(--spacing-3));
+}
+
+.image-canvas-page:not(.is-chat-open) .hb-topbar {
+  transition-timing-function: var(--ease-chat-collapse);
+}
+
+.hb-topbar > * {
+  pointer-events: auto;
+}
+
+.hb-topbar-spacer {
+  flex: 1;
+}
+
+.hb-canvas-wrap {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+}
+
+.hb-input {
+  height: var(--control-height-compact);
+  padding: 0 var(--spacing-2);
+  border: 1px solid var(--control-border);
+  border-radius: var(--radius-sm);
+  background: var(--control-bg);
+  color: var(--color-text-primary);
+  font-size: var(--font-size-sm);
+}
+
+.hb-input:focus-visible {
+  outline: none;
+  border-color: var(--control-border-focus);
+}
+
+
+
+.hb-hint {
+  font-size: var(--font-size-xs);
+  color: var(--color-text-tertiary);
+  line-height: var(--line-height-normal);
+}
+
+.hb-empty-hint {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--spacing-2);
+  pointer-events: none;
+  color: var(--color-text-tertiary);
+  font-size: var(--font-size-sm);
+}
+
+.hb-toast {
+  position: absolute;
+  left: 50%;
+  bottom: var(--spacing-6);
+  transform: translateX(-50%);
+  z-index: 30;
+  padding: var(--spacing-2) var(--spacing-4);
+  border-radius: var(--radius-sm);
+  background: var(--toast-bg);
+  border: 1px solid var(--toast-border);
+  box-shadow: var(--toast-shadow);
+  font-size: var(--font-size-sm);
+  color: var(--color-text-primary);
+}

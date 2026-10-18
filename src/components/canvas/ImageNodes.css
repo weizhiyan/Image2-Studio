@@ -1,0 +1,2364 @@
+.image-canvas-page.is-entering .image-canvas-flow .react-flow__nodes,
+.image-canvas-page.is-entering .image-canvas-flow .react-flow__edges {
+  /* 生图页入场编排：画布 660ms → 顶栏 960ms → 工具条 1080ms → 顶栏动作 1230ms → 侧栏 1560ms。
+     这条时间线跨 TopNav.css / FloatingChatPanel.css / 本文件，改一处要同步。 */
+  --image-canvas-enter-delay: 660ms;
+  --image-canvas-graph-duration: 640ms;
+  animation: fade-in var(--image-canvas-graph-duration) var(--ease-in-out) var(--image-canvas-enter-delay) both;
+}
+
+.image-canvas-page.is-entering .canvas-dock,
+.image-canvas-page.is-entering .canvas-rail {
+  --enter-y: 5px;
+  --image-canvas-enter-delay: 1080ms;
+  animation: msg-enter var(--motion-slower) var(--ease-out) var(--image-canvas-enter-delay) both;
+}
+
+.image-canvas-flow {
+  --color-canvas-edge: color-mix(in srgb, var(--color-text-tertiary) 62%, transparent);
+  width: 100%;
+  height: 100%;
+  /* 与外壳底色同一档（--color-bg-canvas），整屏更沉，节点更突出 */
+  background: var(--color-bg-canvas) !important;
+}
+
+.image-canvas-flow .react-flow__edge-path {
+  stroke: var(--color-canvas-edge) !important;
+  stroke-width: 1.5 !important;
+  stroke-dasharray: none !important;
+  animation: none !important;
+}
+
+.image-canvas-flow .react-flow__edge.animated .react-flow__edge-path {
+  stroke-dasharray: none !important;
+  animation: none !important;
+}
+
+/* 断开 / 改接的抓手（.react-flow__edgeupdater）：xyflow 在线条两端各放一个半径 = reconnectRadius
+   的透明圆作为命中区，从圆内拖到空白处即断开连接。视觉上不画描边（用户实测后要求隐藏），
+   只留 grab 光标暗示"这里能捏住"。
+   注意 fill 必须保持 transparent —— 填 none 会让 SVG 命中测试失效，抓手就捏不住了。 */
+.image-canvas-flow .react-flow__edgeupdater {
+  fill: transparent;
+  cursor: grab;
+}
+
+.image-canvas-flow .react-flow__edgeupdater:active {
+  cursor: grabbing;
+}
+
+.image-canvas-flow .react-flow__edges {
+  z-index: 3 !important;
+}
+
+.image-canvas-flow .react-flow__renderer {
+  z-index: 95 !important;
+}
+
+.image-canvas-flow .react-flow__nodes {
+  z-index: 95 !important;
+}
+
+.image-canvas-flow .react-flow__node.selected {
+  z-index: 96 !important;
+}
+
+.image-canvas-flow .canvas-edge-beam {
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  opacity: 0.34;
+  pointer-events: none;
+  filter: drop-shadow(0 0 2px color-mix(in srgb, var(--color-text-secondary) 9%, transparent));
+}
+
+.image-canvas-flow .canvas-edge-beam-glow {
+  stroke-width: 4.2;
+  opacity: 0.07;
+  filter: blur(1.8px);
+}
+
+/* 线条两端的断开剪刀：指针进入线条命中区（整条线都是触发面）才浮出，平时藏起来，
+   免得画布上到处是图标。底板取控制色、剪刀取次级文字色；悬停剪刀本身转红并把靠近
+   那一头的线段染一段红——暗示"剪的是这头、这是破坏性操作"，选中与否都有这效果。
+   与两端拖拽断开互补：拖端点适合改接，剪刀适合就是不要这条线。 */
+/* xyflow 给 .react-flow__edge 设了 pointer-events: visibleStroke 并被子元素继承：不显式改回来的话，
+   剪刀组只有"描边"可点——底板填充和整块命中圈都吃不到指针，剪刀就成了摆设（悬停十有八不灵）。
+   所以默认态连事件也不给（看不见时别误伤线条点击），只有边被悬停 / 选中才放开。 */
+.image-canvas-flow .image-edge-cut {
+  cursor: pointer;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--motion-fast) var(--ease-out);
+}
+
+.image-canvas-flow .react-flow__edge:hover .image-edge-cut,
+.image-canvas-flow .react-flow__edge.selected .image-edge-cut {
+  opacity: 1;
+  pointer-events: all;
+}
+
+/* 靠近端点那段红色提示线：默认不占事件，只露给眼睛看 */
+.image-canvas-flow .image-edge-cut-segment {
+  fill: none;
+  stroke: var(--color-accent-red);
+  stroke-width: 2.5;
+  stroke-linecap: round;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--motion-fast) var(--ease-out);
+}
+
+.image-canvas-flow .image-edge-cut:hover .image-edge-cut-segment {
+  opacity: 0.95;
+}
+
+.image-canvas-flow .image-edge-cut-hit {
+  fill: transparent;
+}
+
+.image-canvas-flow .image-edge-cut-plate {
+  fill: var(--color-ui-control);
+  stroke: var(--divider-subtle);
+  stroke-width: 1px;
+  transition: fill var(--motion-fast) var(--ease-out), stroke var(--motion-fast) var(--ease-out);
+}
+
+.image-canvas-flow .image-edge-cut-icon {
+  fill: none;
+  stroke: var(--color-text-secondary);
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  transform: scale(0.72);
+  transform-box: fill-box;
+  transform-origin: center;
+  opacity: 0;
+  transition: transform var(--motion-normal) var(--ease-out), opacity var(--motion-fast) var(--ease-out),
+    stroke var(--motion-fast) var(--ease-out);
+}
+
+.image-canvas-flow .react-flow__edge:hover .image-edge-cut-icon {
+  transform: scale(1);
+  opacity: 1;
+}
+
+.image-canvas-flow .image-edge-cut:hover .image-edge-cut-plate {
+  fill: color-mix(in srgb, var(--color-accent-red) 26%, var(--color-ui-control));
+  stroke: var(--color-accent-red);
+}
+
+.image-canvas-flow .image-edge-cut:hover .image-edge-cut-icon {
+  stroke: var(--color-accent-red);
+}
+
+/* related = 与选中节点相连（76%），selected = 边自身被选中（72%，后定义覆盖） */
+.image-canvas-flow .react-flow__edge.edge-related .react-flow__edge-path {
+  stroke: color-mix(in srgb, var(--color-text-secondary) 76%, transparent) !important;
+  stroke-width: 2 !important;
+  filter: drop-shadow(0 0 4px color-mix(in srgb, var(--color-text-secondary) 24%, transparent));
+}
+
+.image-canvas-flow .react-flow__edge.selected .react-flow__edge-path {
+  stroke: color-mix(in srgb, var(--color-text-secondary) 72%, transparent) !important;
+  stroke-width: 2 !important;
+}
+
+.image-canvas-flow .react-flow__edge.edge-related .canvas-edge-beam,
+
+.image-canvas-flow .react-flow__edge.selected .canvas-edge-beam {
+  stroke-width: 2.3;
+  opacity: 0.78;
+  filter: drop-shadow(0 0 4px color-mix(in srgb, var(--color-text-primary) 36%, transparent));
+}
+
+.image-canvas-flow .react-flow__edge.edge-related .canvas-edge-beam-glow,
+
+.image-canvas-flow .react-flow__edge.selected .canvas-edge-beam-glow {
+  stroke-width: 6;
+  opacity: 0.17;
+  filter: blur(2.2px);
+}
+
+.image-canvas-flow .react-flow__selection {
+  border: 1px solid color-mix(in srgb, var(--color-text-primary) 72%, transparent);
+  border-radius: var(--radius-xs);
+  background: color-mix(in srgb, var(--color-text-primary) 8%, transparent);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--color-bg-base) 62%, transparent);
+}
+
+.image-canvas-btn {
+  height: 34px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--color-ui-control) 88%, transparent);
+  color: var(--color-text-secondary);
+  padding: 0 var(--spacing-3);
+  font-family: var(--font-sans);
+  font-size: var(--font-size-sm);
+  cursor: pointer;
+  backdrop-filter: blur(16px) saturate(140%);
+  -webkit-backdrop-filter: blur(16px) saturate(140%);
+  transition: background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out), opacity var(--motion-fast) var(--ease-out);
+}
+
+.image-canvas-btn input {
+  display: none;
+}
+
+.image-canvas-btn:hover,
+
+.image-canvas-btn.active {
+  background: var(--color-ui-control-hover);
+  color: var(--color-text-primary);
+}
+
+.image-canvas-btn.primary {
+  color: var(--color-text-primary);
+  box-shadow: inset 0 0 0 1px var(--color-ui-border-subtle);
+}
+
+.image-canvas-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.image-flow-node {
+  position: relative;
+  width: var(--image-node-width, 260px);
+  box-sizing: border-box;
+  overflow: visible;
+  border-radius: var(--radius-lg);
+  corner-shape: var(--corner-smooth);
+  border: 0;
+  background: transparent;
+  color: var(--color-text-primary);
+  font-family: var(--font-sans);
+  cursor: pointer;
+  box-shadow: none;
+  transition: filter var(--motion-normal) var(--ease-out);
+}
+
+.image-flow-node:hover:not(.selected) {
+  transform: none;
+}
+
+/* 悬停：内容外一圈 20% 纯白描边，比内容大一圈并稍粗，密集画布上也能看清 */
+.image-flow-node:hover:not(.selected) .image-node-media,
+
+.image-flow-node:hover:not(.selected) .image-node-placeholder,
+
+.image-flow-node:hover:not(.selected) .image-node-composer-shell {
+  outline: 2px solid color-mix(in srgb, var(--color-paper) 20%, transparent);
+  outline-offset: 4px;
+}
+
+/* 悬停节点抬升一层，避免 20% 描边被相邻节点压住 */
+.image-canvas-flow .react-flow__node:hover {
+  z-index: 96 !important;
+}
+
+/* 选中：描边变为 80% 纯白（避免满白在深色底上过曝），同时节点放大一档作为"放大效果" */
+.image-flow-node.selected {
+  filter: none;
+  transform: none;
+}
+
+.image-flow-node.selected .image-node-media,
+
+.image-flow-node.selected .image-node-placeholder,
+
+.image-flow-node.selected .image-node-composer-shell {
+  outline: 2px solid color-mix(in srgb, var(--color-paper) 80%, transparent);
+  outline-offset: 4px;
+}
+
+/* 入场错相延迟：flowNodes memo 按同批 index 内联注入，缺省 0 */
+.image-canvas-flow .react-flow__node {
+  --image-node-enter-delay: 0ms;
+}
+
+/* 新增节点：放大入场（--image-node-enter-delay 支持批量错相）；
+   与高亮脉冲同时命中时两条动画并行播放（各自动画不同属性） */
+.image-canvas-flow .react-flow__node.is-entering .image-flow-node {
+  animation: image-node-enter var(--motion-slow) var(--ease-out) var(--image-node-enter-delay, 0ms) both;
+  /* 提升为独立合成层：缩放入场只走 GPU，避免新建节点瞬间主线程掉帧 */
+  will-change: transform, opacity;
+}
+
+.image-canvas-flow .react-flow__node.is-entering.is-fresh-result .image-flow-node {
+  animation:
+    image-node-enter var(--motion-slow) var(--ease-out) var(--image-node-enter-delay, 0ms) both,
+    image-node-fresh-pulse calc(var(--motion-loop-slow) * 2) var(--ease-out) var(--image-node-enter-delay, 0ms) 1;
+}
+
+/* 删除节点：缩小退场（onBeforeDelete 推迟真实移除把这段时间留出来） */
+.image-canvas-flow .react-flow__node.is-exiting .image-flow-node {
+  animation: image-node-exit var(--motion-fast) var(--ease-in) both;
+  will-change: transform, opacity;
+  pointer-events: none;
+}
+
+/* 入场水波：按当前视角的 16px 点阵从中心荡开一圈，配合 is-entering 逐层展开 */
+.image-canvas-entry-wave {
+  position: absolute;
+  inset: 0;
+  z-index: 94;
+  display: block;
+  pointer-events: none;
+}
+
+/* 刚出图节点的一次性高亮脉冲：在密集画布上快速标识"当前图片" */
+.image-canvas-flow .react-flow__node.is-fresh-result .image-flow-node {
+  animation: image-node-fresh-pulse calc(var(--motion-loop-slow) * 2) var(--ease-out) 1;
+}
+
+@keyframes image-node-enter {
+  from {
+    opacity: 0;
+    transform: scale(0.72);
+  }
+
+  60% {
+    opacity: 1;
+  }
+
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes image-node-exit {
+  from {
+    opacity: 1;
+    transform: scale(1);
+  }
+
+  to {
+    opacity: 0;
+    transform: scale(0.72);
+  }
+}
+
+@keyframes image-node-fresh-pulse {
+  0% {
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--color-brand) 50%, transparent);
+    filter: brightness(1.07);
+  }
+
+  30% {
+    box-shadow: 0 0 0 12px color-mix(in srgb, var(--color-brand) 20%, transparent);
+    filter: brightness(1.04);
+  }
+
+  100% {
+    box-shadow: 0 0 0 22px transparent;
+    filter: brightness(1);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  /* 减弱动效：水波不画，逐层入场与节点脉冲一律直接落到终态 */
+  .image-canvas-entry-wave {
+    display: none;
+  }
+
+  .image-canvas-page.is-entering .image-canvas-flow .react-flow__nodes,
+  .image-canvas-page.is-entering .image-canvas-flow .react-flow__edges,
+  .image-canvas-page.is-entering .canvas-dock,
+  .image-canvas-page.is-entering .canvas-rail {
+    animation: none !important;
+    opacity: 1;
+    transform: none;
+  }
+
+  .image-canvas-flow .react-flow__node.is-entering .image-flow-node,
+  .image-canvas-flow .react-flow__node.is-entering.is-fresh-result .image-flow-node,
+  .image-canvas-flow .react-flow__node.is-exiting .image-flow-node,
+  .image-node-running-glow,
+  .image-node-running-meta strong,
+  .image-node-running-timer {
+    animation: none;
+  }
+
+  .image-canvas-flow .react-flow__node.is-fresh-result .image-flow-node {
+    animation: none;
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-brand) 60%, transparent);
+  }
+}
+
+.image-node-reference,
+
+.image-node-output {
+  border-top: 0;
+}
+
+.image-node-header {
+  min-height: 36px;
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-2);
+  padding: 0 var(--spacing-3);
+  background: var(--color-interaction-subtle);
+}
+
+.image-node-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: var(--radius-full);
+  flex-shrink: 0;
+}
+
+.image-node-header span:last-child {
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-medium);
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+}
+
+.image-node-body {
+  position: relative;
+  width: 100%;
+  min-width: 0;
+  display: grid;
+  gap: 0;
+  padding: 0;
+}
+
+.image-node-body em {
+  width: fit-content;
+  max-width: 100%;
+  min-height: 22px;
+  display: inline-flex;
+  align-items: center;
+  border-radius: var(--radius-2xs);
+  background: var(--color-ui-control-hover);
+  color: var(--color-text-secondary);
+  padding: 0 8px;
+  overflow: hidden;
+  font-size: var(--font-size-xs);
+  font-style: normal;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.image-node-media {
+  position: relative;
+  width: 100%;
+  aspect-ratio: var(--image-aspect-ratio, 1);
+  overflow: hidden;
+  border-radius: var(--radius-lg);
+  corner-shape: var(--corner-smooth);
+  background: var(--color-ui-panel);
+}
+
+.image-node-composer-card {
+  cursor: grab;
+}
+
+.image-node-composer-shell {
+  position: relative;
+  width: 100%;
+  max-width: none;
+  min-width: 0;
+  align-self: stretch;
+  box-sizing: border-box;
+  min-height: 0;
+  height: var(--image-node-height, auto);
+  max-height: var(--image-node-height, 620px);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  overflow: hidden;
+  border-radius: var(--radius-lg);
+  corner-shape: var(--corner-smooth);
+  background: var(--color-ui-control);
+  color: var(--color-text-primary);
+  padding: 12px 4px 12px 12px;
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-ui-border-subtle) 72%, transparent);
+}
+
+.image-flow-node.selected .image-node-composer-shell {
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-ui-border-subtle) 72%, transparent);
+}
+
+/* 默认（未手动拉伸）的生成节点保持更舒展的默认高度，给提示词输入留足空间 */
+.image-flow-node:not(.has-manual-height) .image-node-composer-shell {
+  min-height: 280px;
+}
+
+.image-node-composer-content {
+  width: 100%;
+  max-width: none;
+  min-width: 0;
+  min-height: 0;
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding-right: 0;
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in srgb, var(--color-ui-border) 50%, transparent) transparent;
+}
+
+.image-node-composer-content::-webkit-scrollbar {
+  width: 3px;
+}
+
+.image-node-composer-content::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--color-ui-border) 50%, transparent);
+  border-radius: var(--radius-full);
+}
+
+.image-node-composer-shell textarea {
+  width: 100%;
+  flex: 0 0 auto;
+  min-height: 72px;
+  max-height: 220px;
+  border: 0;
+  outline: 0;
+  resize: none;
+  background: transparent;
+  color: var(--color-text-primary);
+  padding: 0;
+  padding-right: 4px;
+  font-family: var(--font-sans);
+  font-size: var(--font-size-md);
+  line-height: 1.45;
+  overflow-y: auto;
+  scrollbar-gutter: auto;
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in srgb, var(--color-ui-border) 50%, transparent) transparent;
+  pointer-events: none;
+  cursor: grab;
+  user-select: none;
+}
+
+/* 选中后再次点击输入区才进入编辑态：光标、选中、键盘都只在这一刻交出来 */
+.image-node-composer-shell.editing textarea {
+  pointer-events: auto;
+  cursor: text;
+  user-select: text;
+}
+
+.image-flow-node.has-manual-height .image-node-composer-content {
+  overflow-y: hidden;
+}
+
+.image-flow-node.has-manual-height .image-node-composer-shell textarea {
+  flex: 1 1 auto;
+  min-height: 72px;
+  max-height: none;
+  height: auto !important;
+  overflow-y: auto;
+}
+
+.image-node-composer-shell textarea::-webkit-scrollbar {
+  width: 3px;
+}
+
+.image-node-composer-shell textarea::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.image-node-composer-shell textarea::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--color-ui-border) 50%, transparent);
+  border-radius: var(--radius-full);
+}
+
+.image-node-composer-shell textarea::placeholder {
+  color: var(--color-text-tertiary);
+}
+
+.image-node-composer-shell.running textarea {
+  opacity: 0;
+}
+
+.image-node-composer-running {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  overflow: hidden;
+  border-radius: inherit;
+  background: color-mix(in srgb, var(--color-ui-panel) 88%, var(--color-bg-base));
+  pointer-events: none;
+}
+
+.image-node-composer-ref-text {
+  width: 56px;
+  height: 56px;
+  min-width: 56px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  margin: 0;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: var(--color-ui-control-active);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-ui-border-subtle) 60%, transparent);
+  cursor: pointer;
+  pointer-events: auto;
+}
+
+.image-node-composer-ref-text:hover {
+  background: var(--color-ui-control-hover);
+}
+
+.image-node-composer-ref-text .image-node-composer-ref-remove {
+  right: 2px;
+  top: 2px;
+}
+
+.image-node-composer-ref-text-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: var(--radius-2xs);
+  color: var(--color-text-secondary);
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: var(--font-size-md);
+  font-weight: var(--font-weight-semibold);
+  line-height: 1;
+}
+
+.image-node-composer-ref {
+  position: relative;
+  width: 56px;
+  height: 56px;
+  margin: 0;
+  overflow: visible;
+  border-radius: var(--radius-sm);
+  background: var(--color-ui-control-active);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-ui-border-subtle) 60%, transparent);
+}
+
+.image-node-composer-refs {
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-content: flex-start;
+  flex: 0 0 auto;
+  /* 上下左右都留出 8px：关闭箭头探出卡片外一截（-8px），不再被 composer-shell 的 overflow 裁切 */
+  padding: 8px 8px 2px 0;
+}
+
+/* 缩放手柄探出节点右下角一截，避开同一区域的发送按钮，两者不再互相遮挡。
+   手柄本身完全透明（不画方块、不画斜纹），只保留命中区域与 nwse-resize 光标提示；
+   节点未选中时也同样生效，用户靠近右下角就能直接拖拽宽高。 */
+.image-node-resize-handle {
+  position: absolute;
+  right: -20px;
+  bottom: -20px;
+  z-index: 8;
+  width: 28px;
+  height: 28px;
+  border: 0;
+  background: transparent;
+  color: transparent;
+  padding: 0;
+  cursor: nwse-resize;
+  touch-action: none;
+  opacity: 1;
+}
+
+.image-node-composer-ref img {
+  width: 100%;
+  height: 100%;
+  display: block;
+  object-fit: cover;
+  border-radius: var(--radius-sm);
+  background: var(--color-ui-panel);
+}
+
+.image-node-composer-ref-remove {
+  position: absolute;
+  right: -8px;
+  top: -8px;
+  width: 20px;
+  height: 20px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: var(--radius-full);
+  background: var(--media-chrome-bg);
+  color: var(--media-chrome-fg);
+  padding: 0;
+  cursor: pointer;
+  opacity: 0;
+  z-index: 4;
+  transition: opacity var(--motion-fast) var(--ease-out), transform var(--motion-fast) var(--ease-out);
+}
+
+.image-node-composer-ref:hover .image-node-composer-ref-remove,
+
+.image-node-composer-ref-remove:focus-visible {
+  opacity: 1;
+}
+
+.image-node-composer-ref-remove:hover {
+  transform: scale(1.06);
+}
+
+.image-node-composer-ref-remove svg {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+}
+
+.image-node-composer-foot {
+  height: 40px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: var(--spacing-2);
+  padding-right: var(--spacing-2);
+  box-sizing: border-box;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--motion-fast) var(--ease-out);
+}
+
+.image-flow-node.selected .image-node-composer-foot,
+.image-node-composer-shell.editing .image-node-composer-foot {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.image-node-composer-add,
+
+.image-node-composer-send {
+  flex: 0 0 32px;
+  width: 32px;
+  height: 32px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  cursor: pointer;
+  font-family: var(--font-sans);
+  border-radius: var(--radius-sm);
+  padding: 0;
+  box-sizing: border-box;
+  transition: background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out);
+}
+
+.image-node-composer-add {
+  background: transparent;
+  color: var(--color-text-tertiary);
+}
+
+.image-node-composer-add:hover {
+  background: var(--color-ui-control-hover);
+  color: var(--color-text-primary);
+}
+
+.image-node-composer-add svg {
+  width: 16px;
+  height: 16px;
+}
+
+.image-node-composer-send {
+  background: var(--color-action-send);
+  color: var(--color-action-send-icon);
+  transition: opacity var(--motion-fast) var(--ease-out), transform var(--motion-fast) var(--ease-out), background var(--motion-fast) var(--ease-out);
+}
+
+.image-node-composer-send:hover:not(:disabled) {
+  background: var(--color-action-send-hover);
+  transform: translateY(-1px);
+}
+
+.image-node-composer-send:disabled {
+  background: var(--color-action-send-disabled);
+  cursor: not-allowed;
+}
+
+.image-node-composer-send svg {
+  width: 16px;
+  height: 16px;
+  display: block;
+}
+
+.image-node-composer-error {
+  position: absolute;
+  left: 20px;
+  bottom: 16px;
+  max-width: calc(100% - 72px);
+  color: color-mix(in srgb, var(--color-accent-red) 78%, var(--color-text-primary));
+  font-size: var(--font-size-xs);
+  font-style: normal;
+}
+
+.image-node-size-badge {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  z-index: 4;
+  min-height: 24px;
+  display: inline-flex;
+  align-items: center;
+  border-radius: var(--radius-2xs);
+  background: color-mix(in srgb, var(--color-bg-base) 64%, transparent);
+  color: var(--color-text-secondary);
+  padding: 0 8px;
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-ui-border-subtle) 54%, transparent);
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: var(--font-size-xs);
+  line-height: 1;
+  pointer-events: none;
+}
+
+.image-node-meta-badges {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  z-index: 4;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.image-node-meta-badges .image-node-size-badge {
+  position: static;
+}
+
+.image-node-copy-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 1px solid color-mix(in srgb, var(--color-ui-border-subtle) 70%, transparent);
+  border-radius: var(--radius-2xs);
+  background: color-mix(in srgb, var(--color-bg-base) 64%, transparent);
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  transition: background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out);
+}
+
+.image-node-copy-button:hover,
+.image-node-copy-button:focus-visible {
+  background: color-mix(in srgb, var(--color-bg-base) 80%, transparent);
+  color: var(--color-text-primary);
+}
+
+.image-node-copy-button svg {
+  width: 15px;
+  height: 15px;
+}
+
+.image-node-body img {
+  width: 100%;
+  height: 100%;
+  display: block;
+  object-fit: cover;
+  background: var(--color-ui-panel);
+}
+
+/* 图片区跟随节点的 grab 光标（可整块拖拽）；双击开大图由页面层 onNodeDoubleClick 处理 */
+.image-node-media {
+  outline: none;
+}
+
+/* 生成结果图加一圈微弱描边，压在深色画布上更"实" */
+.image-node-media img {
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-ui-border-subtle) 60%, transparent);
+}
+
+/* 图片文件丢失占位：接替 <img> 的位置（与 .image-node-body img / .image-node-version img 同款盒模型），
+   把浏览器裂图图标换成虚线卡——图标 + "图片文件丢失" + 提示词说明，卡片尺寸与布局不变。 */
+.canvas-image-missing {
+  display: flex;
+  width: 100%;
+  height: 100%;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  box-sizing: border-box;
+  padding: 8px;
+  overflow: hidden;
+  background:
+    repeating-linear-gradient(-45deg, color-mix(in srgb, var(--color-ui-border-subtle) 6%, transparent) 0 6px, transparent 6px 12px),
+    var(--color-ui-control);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-ui-border-subtle) 55%, transparent);
+  color: var(--color-text-secondary);
+  user-select: none;
+}
+
+.canvas-image-missing-icon {
+  width: 18px;
+  height: 18px;
+  flex: none;
+  stroke: currentColor;
+  stroke-width: 1.4;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  opacity: 0.75;
+}
+
+.canvas-image-missing-text {
+  font-size: var(--font-size-2xs);
+  line-height: 1.2;
+}
+
+.canvas-image-missing-note {
+  max-width: 100%;
+  overflow: hidden;
+  font-size: var(--font-size-2xs);
+  line-height: 1.2;
+  color: var(--color-text-tertiary);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.image-node-connect-add {
+  position: absolute;
+  top: 50%;
+  right: -40px;
+  z-index: 8;
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transform: translateY(-50%);
+  border: 0;
+  border-radius: var(--radius-xs);
+  background: transparent;
+  color: var(--color-text-tertiary);
+  padding: 0;
+  cursor: pointer;
+  opacity: 0;
+  /* 磁吸跟随走 translate（与 transform 各管一个属性，动画缩放不抢位移） */
+  translate: var(--hb-magnet-target-x, 0px) var(--hb-magnet-target-y, 0px);
+}
+
+/* 过渡单独擇两个类名：.image-handle 也写了 transition … !important，同 important 时拼特异性，
+   只写一个类名会按源码顺序输给它，translate 不在它的清单里会直接跳变、"延迟半拍"就没了 */
+.image-node-connect-add.image-handle {
+  transition: opacity var(--motion-fast) var(--ease-out), background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out), transform var(--motion-fast) var(--ease-out), translate var(--motion-slow) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out) !important;
+}
+
+/* 「从里到外」的光环：悬停节点时从把手中心荡开一圈再淡掉（跟入场弹出同一次触发） */
+.image-node-connect-ring {
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  box-shadow: 0 0 0 0 color-mix(in srgb, var(--color-ui-border) 0%, transparent);
+}
+
+.image-node-connect-add.image-handle-target .image-node-connect-ring,
+.image-node-connect-add.image-handle-source .image-node-connect-ring {
+  opacity: 0;
+}
+
+/* 入场弹出：从 0.55 倍由里向外长出来；不带 fill，落幕后 hover 的 transform 立刻接手 */
+@keyframes hb-handle-in {
+  from {
+    opacity: 0;
+    transform: translateY(-50%) scale(0.55);
+  }
+
+  60% {
+    opacity: 1;
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(-50%) scale(1);
+  }
+}
+
+@keyframes hb-handle-ring {
+  from {
+    opacity: 1;
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--color-ui-border) 60%, transparent);
+  }
+
+  to {
+    opacity: 0;
+    box-shadow: 0 0 0 7px color-mix(in srgb, var(--color-ui-border) 0%, transparent);
+  }
+}
+
+.image-flow-node:hover .image-node-connect-add,
+
+.image-flow-node.selected .image-node-connect-add {
+  opacity: 1;
+  animation: hb-handle-in var(--motion-normal) var(--ease-emphasized);
+}
+
+.image-flow-node:hover .image-node-connect-ring,
+
+.image-flow-node.selected .image-node-connect-ring {
+  animation: hb-handle-ring var(--motion-slower) var(--ease-out);
+}
+
+/* 悬停把手本体：大一圈 + 底色提亮 + 外扩一圈柔光（.image-handle 的 background/box-shadow 是
+   !important，这边必须同样 !important 才压得住，否则"亮度加深"从来没生效过） */
+.image-node-connect-add:hover {
+  transform: translateY(-50%) scale(1.14);
+  background: var(--color-ui-control-hover) !important;
+  color: var(--color-text-primary);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-ui-border) 64%, transparent), 0 0 0 5px color-mix(in srgb, var(--color-ui-control-hover) 34%, transparent) !important;
+}
+
+.image-node-connect-add.image-handle-source {
+  translate: var(--hb-magnet-source-x, 0px) var(--hb-magnet-source-y, 0px);
+}
+
+.image-empty-dropzone {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  z-index: 82;
+  width: min(360px, calc(100vw - 48px));
+  min-height: 190px;
+  display: grid;
+  place-items: center;
+  gap: 8px;
+  transform: translate(-50%, -50%);
+  border: 1px dashed color-mix(in srgb, var(--color-ui-border-subtle) 72%, transparent);
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--color-ui-control) 70%, transparent);
+  color: var(--color-text-secondary);
+  padding: 24px;
+  cursor: default;
+  font-family: var(--font-sans);
+  text-align: center;
+  box-shadow: 0 18px 48px var(--shadow-ink);
+  backdrop-filter: blur(16px) saturate(130%);
+  -webkit-backdrop-filter: blur(16px) saturate(130%);
+  pointer-events: none;
+}
+
+.image-empty-dropzone:hover {
+  border-color: color-mix(in srgb, var(--color-border-focus) 72%, transparent);
+  background: color-mix(in srgb, var(--color-ui-control-hover) 76%, transparent);
+  color: var(--color-text-primary);
+}
+
+.image-empty-dropzone strong {
+  color: var(--color-text-primary);
+  font-size: var(--font-size-md);
+  font-weight: var(--font-weight-semibold);
+}
+
+.image-empty-dropzone span {
+  color: var(--color-text-tertiary);
+  font-size: var(--font-size-sm);
+  line-height: 1.5;
+}
+
+.image-node-placeholder {
+  position: relative;
+  width: 100%;
+  aspect-ratio: var(--image-aspect-ratio, 1);
+  display: grid;
+  grid-auto-rows: max-content;
+  place-content: center;
+  place-items: center;
+  gap: 8px;
+  border: 1px solid color-mix(in srgb, var(--color-ui-border-subtle) 52%, transparent);
+  border-radius: var(--radius-sm);
+  background: var(--color-ui-panel);
+  color: var(--color-text-tertiary);
+}
+
+.image-node-placeholder svg {
+  width: 34px;
+  height: 34px;
+  opacity: 0.42;
+}
+
+.image-node-placeholder.running {
+  overflow: hidden;
+  color: var(--color-text-primary);
+  border-color: color-mix(in srgb, var(--color-text-primary) 16%, transparent);
+  background: color-mix(in srgb, var(--color-ui-panel) 88%, var(--color-bg-base));
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-text-primary) 8%, transparent);
+}
+
+.image-node-running-dots,
+
+.image-node-running-glow {
+  position: absolute;
+  inset: 2px;
+  pointer-events: none;
+}
+
+.image-node-running-dots {
+  background-image: radial-gradient(circle, color-mix(in srgb, var(--color-text-primary) 46%, transparent) 0.7px, transparent 1.3px);
+  background-position: center;
+  background-repeat: space;
+  background-size: 11px 11px;
+  opacity: 0.22;
+}
+
+.image-node-running-glow {
+  background-image: radial-gradient(circle, var(--color-text-primary) 1.1px, transparent 1.6px);
+  background-position: center;
+  background-repeat: space;
+  background-size: 11px 11px;
+  opacity: 0.7;
+  -webkit-mask-image:
+    radial-gradient(ellipse at center, #000 0%, transparent 60%),
+    radial-gradient(ellipse at center, #000 0%, transparent 62%);
+  mask-image:
+    radial-gradient(ellipse at center, #000 0%, transparent 60%),
+    radial-gradient(ellipse at center, #000 0%, transparent 62%);
+  -webkit-mask-position: 16% 20%, 30% 32%;
+  mask-position: 16% 20%, 30% 32%;
+  -webkit-mask-repeat: no-repeat, no-repeat;
+  mask-repeat: no-repeat, no-repeat;
+  -webkit-mask-size: 52% 46%, 40% 40%;
+  mask-size: 52% 46%, 40% 40%;
+  --image-morph-duration: 4.2s;
+  --image-morph-ease: cubic-bezier(0.35, 1.55, 0.65, 1);
+  --image-breathe-duration: 1.9s;
+  --image-breathe-ease: cubic-bezier(0.66, 0, 0.34, 1);
+  --pulse-from: 0.55;
+  animation:
+    image-generation-morph var(--image-morph-duration) var(--image-morph-ease) infinite,
+    pulse-opacity var(--image-breathe-duration) var(--image-breathe-ease) infinite;
+}
+
+/* 智能生成使用不规则的多段轨迹，保持对话生成那种随机感；直连继续沿用上面的矩阵轨迹。 */
+.image-node-running-glow.is-running-enhanced {
+  animation:
+    image-generation-random-morph var(--image-morph-duration) var(--image-morph-ease) infinite,
+    pulse-opacity var(--image-breathe-duration) var(--image-breathe-ease) infinite;
+}
+
+.image-composer-submit-spinner {
+  content: "";
+  width: 22px;
+  height: 22px;
+  border: 2px solid color-mix(in srgb, currentColor 24%, transparent);
+  border-top-color: currentColor;
+  border-radius: var(--radius-full);
+  animation: spin var(--motion-loop-fast) var(--ease-linear) infinite;
+}
+
+.image-node-running-meta {
+  position: absolute;
+  left: 12px;
+  bottom: 12px;
+  z-index: 2;
+  max-width: calc(100% - 24px);
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  pointer-events: none;
+}
+
+.image-node-running-meta strong {
+  background: linear-gradient(
+    90deg,
+    var(--color-text-primary) 0%,
+    var(--color-text-primary) 30%,
+    color-mix(in srgb, var(--color-text-primary) 38%, transparent) 45%,
+    color-mix(in srgb, var(--color-text-primary) 38%, transparent) 55%,
+    var(--color-text-primary) 70%,
+    var(--color-text-primary) 100%
+  );
+  background-clip: text;
+  background-size: 300% 100%;
+  color: transparent;
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  --image-text-duration: 2.25s;
+  animation: image-generation-text var(--image-text-duration) var(--ease-in-out) infinite;
+  font-size: var(--font-size-md);
+  font-weight: var(--font-weight-regular, 400);
+  line-height: 1.4;
+  white-space: nowrap;
+}
+
+/* 计时脉冲点：与计时数字同行的呼吸圆点，直观表达"正在计时" */
+.image-node-running-timer {
+  width: 6px;
+  height: 6px;
+  align-self: center;
+  border-radius: var(--radius-full);
+  background: var(--color-text-tertiary);
+  animation: image-node-timer-pulse var(--motion-loop) var(--ease-in-out) infinite;
+}
+
+@keyframes image-node-timer-pulse {
+  0%,
+  100% {
+    opacity: 0.25;
+    transform: scale(0.8);
+  }
+
+  50% {
+    opacity: 1;
+    transform: scale(1.15);
+  }
+}
+
+.image-node-running-meta time {
+  color: var(--color-text-tertiary);
+  font-size: var(--font-size-md);
+  font-variant-numeric: tabular-nums;
+  line-height: 1.4;
+  white-space: nowrap;
+}
+
+.image-node-running-size {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  left: auto;
+  z-index: 2;
+  display: inline-flex;
+  align-items: center;
+  color: var(--color-text-tertiary);
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: var(--font-size-xs);
+  font-variant-numeric: tabular-nums;
+  line-height: 1.4;
+  pointer-events: none;
+}
+
+.image-node-placeholder.failed {
+  color: color-mix(in srgb, var(--color-accent-red) 82%, var(--color-text-primary));
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-accent-red) 30%, transparent);
+}
+
+.image-node-placeholder.failed em {
+  background: color-mix(in srgb, var(--color-accent-red) 14%, transparent);
+  color: inherit;
+}
+
+/* 选中图片节点时浮在节点上方的工具栏（灵枢 CanvasSelectionToolbar 同款） */
+.image-selection-toolbar {
+  position: absolute;
+  z-index: 98;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  transform: translateX(-50%);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--color-ui-panel) 92%, transparent);
+  padding: 4px;
+  box-shadow:
+    0 18px 48px var(--shadow-ink-deep),
+    inset 0 0 0 1px var(--color-ui-border-subtle);
+  backdrop-filter: blur(18px) saturate(140%);
+  -webkit-backdrop-filter: blur(18px) saturate(140%);
+  animation: fade-in var(--motion-normal) var(--ease-out);
+}
+
+.image-selection-toolbar button {
+  width: 32px;
+  height: 32px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: var(--radius-xs);
+  background: transparent;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+}
+
+.image-selection-toolbar button:hover:not(:disabled) {
+  background: var(--color-ui-control-hover);
+  color: var(--color-text-primary);
+}
+
+.image-selection-toolbar button:disabled {
+  opacity: 0.38;
+  cursor: not-allowed;
+}
+
+.image-selection-toolbar > span {
+  width: 1px;
+  height: 20px;
+  background: color-mix(in srgb, var(--color-ui-border-subtle) 48%, transparent);
+}
+
+.image-selection-toolbar button svg {
+  width: 17px;
+  height: 17px;
+}
+
+/* 带文字的按钮（如二次编辑）：宽度跟内容走，不再是固定方钮 */
+.image-selection-toolbar .image-selection-toolbar-text {
+  width: auto;
+  gap: 5px;
+  padding: 0 9px;
+  font-size: var(--font-size-xs);
+  line-height: 1;
+}
+
+.image-node-toolbar {
+  position: absolute;
+  z-index: 98;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  transform: translateX(-50%);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--surface-popover-bg) 97%, transparent);
+  padding: 4px;
+  box-shadow:
+    0 12px 32px var(--shadow-ink),
+    inset 0 0 0 1px var(--color-ui-border-subtle);
+  /* 这里绝不加 backdrop-filter：工具栏自身就是后代弹窗（比例 / 整理强度）的 backdrop root，
+     一旦它带模糊，弹窗的玻璃就只能采样工具栏内部那片 97% 不透明底色——等于没有模糊。
+     而工具栏底色本来就 97% 不透明，自己的模糊也看不出来，不如让给弹窗用。 */
+  animation: fade-in var(--motion-fast) var(--ease-out);
+}
+
+.image-node-toolbar-item {
+  height: 32px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text-secondary);
+  padding: 0 8px;
+  cursor: pointer;
+  font-family: var(--font-sans);
+  font-size: var(--font-size-sm);
+  white-space: nowrap;
+}
+
+.image-node-toolbar-item:hover,
+
+.image-node-toolbar-item.active {
+  background: var(--color-ui-control-hover);
+  color: var(--color-text-primary);
+}
+
+.image-node-toolbar-item svg {
+  flex: 0 0 auto;
+}
+
+/* 直连开关：工具栏里的独立开关（轨道 + 滑块），语义与设置弹窗 switch 一致 */
+.image-node-toolbar-switch {
+  gap: 6px;
+  padding: 0 8px 0 10px;
+}
+
+.image-node-toolbar-switch-track {
+  width: 30px;
+  height: 18px;
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  padding: 2px;
+  border: 1px solid var(--color-ui-border);
+  border-radius: var(--radius-full);
+  background: var(--color-ui-control);
+  transition: background var(--motion-normal) var(--ease-out), border-color var(--motion-normal) var(--ease-out);
+}
+
+.image-node-toolbar-switch-track > i {
+  width: 12px;
+  height: 12px;
+  border-radius: var(--radius-full);
+  background: var(--color-text-tertiary);
+  transition: transform var(--motion-normal) var(--ease-out), background var(--motion-normal) var(--ease-out);
+}
+
+.image-node-toolbar-switch.on {
+  color: var(--color-text-primary);
+}
+
+.image-node-toolbar-switch.on .image-node-toolbar-switch-track {
+  border-color: var(--color-brand);
+  background: var(--color-brand);
+}
+
+.image-node-toolbar-switch.on .image-node-toolbar-switch-track > i {
+  transform: translateX(12px);
+  background: var(--color-on-accent);
+}
+
+.image-node-toolbar-item span {
+  max-width: 124px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+
+/* 模型选择器（灵枢 ImageCanvasPage.css 原样搬来：节点工具栏里选模型）。 */
+.image-model-picker {
+  position: absolute;
+  left: 0;
+  bottom: calc(100% + 8px);
+  width: min(280px, calc(100vw - 48px));
+  display: grid;
+  gap: 6px;
+  border-radius: var(--radius-lg);
+  corner-shape: var(--corner-smooth);
+  background: var(--surface-popover-glass-bg);
+  backdrop-filter: var(--surface-popover-glass-blur);
+  -webkit-backdrop-filter: var(--surface-popover-glass-blur);
+  padding: 6px;
+  box-shadow: 0 18px 42px color-mix(in srgb, var(--color-shadow) 18%, transparent), var(--shadow-md);
+  border: 1px solid var(--surface-popover-border);
+}
+
+.image-model-options {
+  display: grid;
+  gap: 4px;
+}
+
+.image-model-options button {
+  border: 0;
+  border-radius: var(--radius-xs);
+  background: transparent;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  font-family: var(--font-sans);
+}
+
+.image-model-options button.active {
+  background: var(--color-ui-control-active);
+  color: var(--color-text-primary);
+}
+
+.image-model-empty {
+  min-height: 58px;
+  display: flex;
+  align-items: center;
+  border-radius: var(--radius-xs);
+  background: color-mix(in srgb, var(--color-ui-control) 58%, transparent);
+  color: var(--color-text-tertiary);
+  padding: 0 10px;
+  font-size: var(--font-size-sm);
+}
+
+.image-model-options button {
+  min-height: 44px;
+  display: grid;
+  gap: 2px;
+  padding: 7px 9px;
+  text-align: left;
+}
+
+.image-model-options button:hover {
+  background: color-mix(in srgb, var(--color-ui-control-hover) 82%, transparent);
+}
+
+.image-model-options button.empty {
+  cursor: default;
+}
+
+.image-model-options strong,
+.image-model-options small {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.image-model-options strong {
+  color: var(--color-text-primary);
+  font-size: var(--font-size-sm);
+}
+
+.image-model-options small {
+  color: var(--color-text-tertiary);
+  font-size: var(--font-size-xs);
+}
+
+.image-node-model-picker {
+  bottom: auto;
+  top: calc(100% + 8px);
+  width: 260px;
+  z-index: 100;
+}
+
+.image-node-model-picker .image-model-options {
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.image-node-settings-popover {
+  /* 节点工具栏弹窗比画布下拉更小、更贴内容：底色在共享玻璃 token 之上再透一档
+     （L2 局部 token 从 L1 派生），backdrop 模糊才看得出来，不然 88% 实色盖着等于没有 */
+  --hb-node-popover-bg: color-mix(in srgb, var(--color-ui-control) 52%, transparent);
+  position: absolute;
+  left: 50%;
+  top: calc(100% + 8px);
+  z-index: 2;
+  width: max-content;
+  min-width: 152px;
+  display: grid;
+  gap: 10px;
+  transform: translateX(-50%);
+  border: 1px solid var(--surface-popover-border);
+  border-radius: var(--radius-md);
+  background: var(--hb-node-popover-bg);
+  backdrop-filter: var(--surface-popover-glass-blur);
+  -webkit-backdrop-filter: var(--surface-popover-glass-blur);
+  padding: 10px;
+  box-shadow: 0 18px 42px var(--shadow-ink-deep);
+}
+
+/* 模型优化开关 + 整理强度合并为一个控件组：共享淡底，中间 1px 分隔 */
+.image-node-toolbar-merge {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 0 2px;
+  border-radius: var(--radius-sm);
+  background: var(--color-ui-control);
+}
+
+.image-node-toolbar-merge > .image-node-toolbar-switch {
+  border-radius: var(--radius-sm) 0 0 var(--radius-sm);
+}
+
+.image-node-toolbar-merge > span:last-child > .image-node-toolbar-item {
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+  border-left: 1px solid var(--color-ui-border-subtle);
+}
+
+/* 整理强度弹窗：上下列表（不再宫格），选中项右侧一个勾 */
+.image-node-level-popover {
+  min-width: 128px;
+  gap: 2px;
+}
+
+.image-node-level-option {
+  width: 100%;
+  height: 30px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--spacing-3);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text-secondary);
+  padding: 0 8px;
+  cursor: pointer;
+  font-family: var(--font-sans);
+  font-size: var(--font-size-xs);
+}
+
+.image-node-level-option:hover {
+  background: var(--color-ui-control-hover);
+  color: var(--color-text-primary);
+}
+
+.image-node-level-option.active {
+  background: var(--color-ui-control-active);
+  color: var(--color-text-primary);
+}
+
+.image-node-settings-group {
+  display: grid;
+  gap: 6px;
+}
+
+.image-node-settings-group > span {
+  color: var(--color-text-tertiary);
+  font-size: var(--font-size-xs);
+}
+
+.image-node-settings-group > div {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.image-node-settings-group button {
+  height: 30px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: var(--color-ui-control);
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  font-family: var(--font-sans);
+  font-size: var(--font-size-xs);
+}
+
+.image-node-settings-group button:hover,
+
+.image-node-settings-group button.active {
+  background: var(--color-ui-control-active);
+  color: var(--color-text-primary);
+}
+
+.image-composer-add,
+
+.image-composer-ref,
+
+.image-composer-submit {
+  pointer-events: auto;
+}
+
+.image-composer-refs {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 44px;
+}
+
+.image-composer-add,
+
+.image-composer-voice,
+
+.image-composer-submit {
+  flex: 0 0 auto;
+  border: 0;
+  cursor: pointer;
+  font-family: var(--font-sans);
+}
+
+.image-composer-add {
+  width: 38px;
+  height: 38px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-sm);
+  background: var(--color-ui-control);
+  color: var(--color-text-secondary);
+}
+
+.image-composer-add:hover,
+
+.image-composer-voice:hover {
+  background: var(--color-ui-control-hover);
+  color: var(--color-text-primary);
+}
+
+.image-composer-ref {
+  position: relative;
+  width: 64px;
+  height: 64px;
+  margin: 0;
+  overflow: hidden;
+  border-radius: var(--radius-xs);
+  background: var(--color-ui-control);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--color-border-focus) 64%, transparent);
+}
+
+.image-composer-ref img {
+  width: 100%;
+  height: 100%;
+  display: block;
+  object-fit: cover;
+}
+
+.image-composer-ref-remove {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 18px;
+  height: 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 50%;
+  background: var(--media-chrome-bg);
+  color: var(--media-chrome-fg);
+  cursor: pointer;
+  font-family: var(--font-sans);
+  font-size: var(--font-size-md);
+  line-height: 1;
+  opacity: 0.84;
+  transition: opacity var(--motion-fast) var(--ease-out), background var(--motion-fast) var(--ease-out);
+}
+
+.image-composer-ref:hover .image-composer-ref-remove,
+
+.image-composer-ref-remove:focus-visible {
+  opacity: 1;
+}
+
+.image-composer-ref-remove:hover {
+  background: var(--media-chrome-bg-strong);
+}
+
+.image-composer-foot {
+  min-height: 36px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+}
+
+.image-composer-left,
+
+.image-composer-right {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.image-composer-notice {
+  color: var(--color-text-tertiary);
+  font-size: var(--font-size-xs);
+}
+
+.image-composer-divider {
+  width: 1px;
+  height: 18px;
+  background: color-mix(in srgb, var(--color-ui-border-subtle) 46%, transparent);
+}
+
+.image-composer-voice {
+  width: 30px;
+  height: 30px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-xs);
+  background: transparent;
+  color: var(--color-text-tertiary);
+}
+
+.image-composer-submit {
+  width: 36px;
+  height: 36px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-sm);
+  background: var(--color-text-primary);
+  color: var(--color-text-inverse);
+  padding: 0;
+  font-size: 0;
+  line-height: 1;
+  transition: opacity var(--motion-fast) var(--ease-out), transform var(--motion-fast) var(--ease-out);
+}
+
+.image-composer-submit img {
+  width: 20px;
+  height: 20px;
+  display: block;
+}
+
+.image-composer-submit:hover:not(:disabled) {
+  transform: translateY(-1px);
+  opacity: 0.85;
+}
+
+.image-composer-submit:disabled {
+  opacity: 0.3;
+  cursor: not-allowed;
+}
+
+.image-composer-submit-spinner {
+  width: 16px;
+  height: 16px;
+  border-width: 2px;
+}
+
+.image-composer-notice {
+  min-height: 24px;
+  display: flex;
+  align-items: center;
+  border-radius: var(--radius-2xs);
+  background: color-mix(in srgb, var(--color-ui-control) 78%, transparent);
+  padding: 0 9px;
+}
+
+.image-handle {
+  width: 24px !important;
+  height: 24px !important;
+  display: inline-flex !important;
+  align-items: center;
+  justify-content: center;
+  border: 0 !important;
+  border-radius: var(--radius-xs) !important;
+  background: color-mix(in srgb, var(--color-ui-control) 88%, var(--color-bg-base)) !important;
+  color: var(--color-text-tertiary);
+  opacity: 0;
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-ui-border-subtle) 44%, transparent) !important;
+  transition: background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out), opacity var(--motion-fast) var(--ease-out) !important;
+}
+
+.image-handle::before,
+
+.image-handle::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 12px;
+  height: 1.6px;
+  border-radius: var(--radius-full);
+  background: currentColor;
+  transform: translate(-50%, -50%);
+}
+
+.image-handle-target {
+  pointer-events: auto;
+  cursor: pointer;
+}
+
+.image-handle-source {
+  pointer-events: auto;
+  cursor: pointer;
+}
+
+.image-handle::after {
+  transform: translate(-50%, -50%) rotate(90deg);
+}
+
+.image-flow-node .react-flow__handle-left {
+  left: -40px !important;
+  right: auto !important;
+}
+
+.image-flow-node .react-flow__handle-right {
+  right: -40px !important;
+}
+
+.image-flow-node:hover .image-handle-target,
+
+.image-flow-node.selected .image-handle-target {
+  opacity: 1;
+}
+
+.image-handle:hover {
+  background: var(--color-ui-control-hover) !important;
+  color: var(--color-text-primary);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-ui-border-subtle) 44%, transparent) !important;
+}
+
+.image-handle.reference,
+
+.image-handle.output {
+  background: color-mix(in srgb, var(--color-ui-control) 88%, var(--color-bg-base)) !important;
+}
+
+@keyframes image-generation-morph {
+  0% {
+    -webkit-mask-position: 16% 20%, 30% 32%;
+    mask-position: 16% 20%, 30% 32%;
+    -webkit-mask-size: 52% 46%, 40% 40%;
+    mask-size: 52% 46%, 40% 40%;
+  }
+  25% {
+    -webkit-mask-position: 84% 16%, 66% 30%;
+    mask-position: 84% 16%, 66% 30%;
+    -webkit-mask-size: 46% 58%, 44% 38%;
+    mask-size: 46% 58%, 44% 38%;
+  }
+  50% {
+    -webkit-mask-position: 82% 84%, 62% 68%;
+    mask-position: 82% 84%, 62% 68%;
+    -webkit-mask-size: 60% 44%, 38% 46%;
+    mask-size: 60% 44%, 38% 46%;
+  }
+  75% {
+    -webkit-mask-position: 14% 82%, 34% 66%;
+    mask-position: 14% 82%, 34% 66%;
+    -webkit-mask-size: 48% 54%, 46% 40%;
+    mask-size: 48% 54%, 46% 40%;
+  }
+  100% {
+    -webkit-mask-position: 16% 20%, 30% 32%;
+    mask-position: 16% 20%, 30% 32%;
+    -webkit-mask-size: 52% 46%, 40% 40%;
+    mask-size: 52% 46%, 40% 40%;
+  }
+}
+
+@keyframes image-generation-random-morph {
+  0% {
+    -webkit-mask-position: 12% 28%, 42% 16%;
+    mask-position: 12% 28%, 42% 16%;
+    -webkit-mask-size: 44% 38%, 28% 34%;
+    mask-size: 44% 38%, 28% 34%;
+  }
+  14% {
+    -webkit-mask-position: 64% 12%, 82% 42%;
+    mask-position: 64% 12%, 82% 42%;
+    -webkit-mask-size: 32% 52%, 42% 30%;
+    mask-size: 32% 52%, 42% 30%;
+  }
+  31% {
+    -webkit-mask-position: 88% 66%, 54% 78%;
+    mask-position: 88% 66%, 54% 78%;
+    -webkit-mask-size: 38% 30%, 34% 46%;
+    mask-size: 38% 30%, 34% 46%;
+  }
+  47% {
+    -webkit-mask-position: 38% 84%, 10% 58%;
+    mask-position: 38% 84%, 10% 58%;
+    -webkit-mask-size: 52% 32%, 30% 42%;
+    mask-size: 52% 32%, 30% 42%;
+  }
+  66% {
+    -webkit-mask-position: 8% 46%, 62% 22%;
+    mask-position: 8% 46%, 62% 22%;
+    -webkit-mask-size: 30% 44%, 48% 34%;
+    mask-size: 30% 44%, 48% 34%;
+  }
+  83% {
+    -webkit-mask-position: 72% 88%, 90% 24%;
+    mask-position: 72% 88%, 90% 24%;
+    -webkit-mask-size: 42% 34%, 26% 48%;
+    mask-size: 42% 34%, 26% 48%;
+  }
+  100% {
+    -webkit-mask-position: 12% 28%, 42% 16%;
+    mask-position: 12% 28%, 42% 16%;
+    -webkit-mask-size: 44% 38%, 28% 34%;
+    mask-size: 44% 38%, 28% 34%;
+  }
+}
+
+@keyframes image-generation-text {
+  0%,
+  18% { background-position: 100% 0; }
+  82%,
+  100% { background-position: 0% 0; }
+}
+
+@keyframes image-running-orb {
+  0%,
+  100% {
+    opacity: 0.34;
+    transform: translateY(0);
+  }
+  50% {
+    opacity: 0.86;
+    transform: translateY(-4px);
+  }
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   结果节点的版本链（二次编辑）
+   同一节点上历次生成摞成一条版本链：默认只展示主图，背后两张错位旋转的
+   “复印件”暗示还有别的版本；点右上角数字箭头，节点摊开成宫格，V1/V2/V3
+   历数在目， hover 可下载 / 设为主图。点空白、Esc、换选节点都会收起。
+   ══════════════════════════════════════════════════════════════════════════ */
+
+/* deg / px / scale 在 Token 体系里没有对应档，这里按局部 Token 定义（只在本节用）。 */
+.image-flow-node.has-versions {
+  --hb-version-stack-rotate: -4deg;
+  --hb-version-stack-shift: 10px;
+  --hb-version-stack-scale: 0.985;
+  --hb-version-stack-lift: 14px;
+  /* 展开位移缓动：整条 linear() 曲线照搬灵枢 Figma 原型的 0%→40% 那一段（三个图层
+     从原位飞入各自格子）——26% 首次到位、34% 过冲 7.27%、68% 回落 0.53%、90% 收稳，
+     前 10% 就冲到峰值速度。收起缓动照搬原型的 60%→75% 那一段：cubic-bezier 第一个
+     控制点 y=-0.569，会先反向蓄力约 12% 再归位。时长也按原型分段对齐：
+     展开 800ms = 0%→40%，收起 300ms = 60%→75%，渐入 200ms = 0%→10%。
+     位移全程只有一条 from→to 插值，中途不重启缓动，所以有弹性但不顿挫 */
+  --hb-version-card-duration: 800ms;
+  --hb-version-card-fade-duration: 200ms;
+  --hb-version-card-exit-duration: 300ms;
+  --hb-version-card-exit-ease: cubic-bezier(0.661, -0.569, 0.458, 1.002);
+  /* 收起尾段的淡出：原型 71.5%→78.5%，折到收起窗口（60%→75%）里就是
+     「走了 76.7% 才起淡、比归位晚 70ms 才淡完」，时长 140ms */
+  --hb-version-card-exit-fade-duration: 140ms;
+  --hb-version-card-exit-fade-ease: cubic-bezier(0.5, 0, 0.5, 1);
+  --hb-version-card-exit-fade-delay: 230ms;
+  --hb-version-card-ease: linear(0, 0.0249, 0.0895, 0.1806, 0.2868, 0.3993, 0.511, 0.6169, 0.7135, 0.7986, 0.8711, 0.931, 0.9785, 1.0148, 1.0409, 1.0583, 1.0684, 1.0727, 1.0724, 1.0687, 1.0628, 1.0554, 1.0473, 1.0391, 1.0311, 1.0237, 1.0172, 1.0115, 1.0067, 1.0029, 0.9999, 0.9977, 0.9962, 0.9952, 0.9948, 0.9947, 0.9948, 0.9952, 0.9957, 0.9963, 0.9969, 0.9975, 0.998, 0.9986, 0.999, 0.9994, 0.9997, 0.9999, 1.0001, 1.0002, 1.0003);
+  /* 宫格节奏：间距翻倍；列步 = 卡宽 + 间距，行步 = 卡高 + 间距（卡高 = 宽 / 比例） */
+  --hb-version-grid-gap: calc(var(--spacing-2) * 2);
+  --hb-version-card-height: calc(var(--image-node-width, 320px) / var(--image-aspect-ratio, 1));
+  --hb-version-step-x: calc(var(--image-node-width, 320px) + var(--hb-version-grid-gap));
+  --hb-version-step-y: calc(var(--hb-version-card-height) + var(--hb-version-grid-gap));
+}
+
+/* 卡片背后的叠层：两张复印件各偏转一点，hover / 选中时再散开些 */
+.image-node-version-stack {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  border-radius: var(--radius-lg);
+  corner-shape: var(--corner-smooth);
+}
+
+.image-node-version-stack i {
+  position: absolute;
+  inset: 0;
+  display: block;
+  border-radius: inherit;
+  corner-shape: inherit;
+  /* 复印件比底板提亮一档：往纸色混 15%，暗示「底下还有版本」又不抢主图。
+     描边走边框色而不是边框弱色：版本叠层的轮廓要在画布上能被看见，但不构成边框噪音。 */
+  background: color-mix(in srgb, var(--color-ui-panel) 85%, var(--color-paper));
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-ui-border) 88%, transparent);
+  transform-origin: 50% 50%;
+  transition: transform var(--motion-normal) var(--ease-out), opacity var(--motion-normal) var(--ease-out);
+}
+
+.image-node-version-stack i:nth-child(1) {
+  transform: rotate(var(--hb-version-stack-rotate)) translate(var(--hb-version-stack-shift), 0) scale(var(--hb-version-stack-scale));
+}
+
+.image-node-version-stack i:nth-child(2) {
+  transform: rotate(calc(var(--hb-version-stack-rotate) * 2)) translate(calc(var(--hb-version-stack-shift) * 2), 0) scale(calc(var(--hb-version-stack-scale) - 0.012));
+  opacity: 0.72;
+}
+
+.image-flow-node.has-versions:hover:not(.selected) .image-node-version-stack i:nth-child(1) {
+  transform: rotate(calc(var(--hb-version-stack-rotate) * 1.5)) translate(calc(var(--hb-version-stack-shift) * 1.6), 0) scale(var(--hb-version-stack-scale));
+}
+
+.image-flow-node.has-versions:hover:not(.selected) .image-node-version-stack i:nth-child(2) {
+  transform: rotate(calc(var(--hb-version-stack-rotate) * 3)) translate(calc(var(--hb-version-stack-shift) * 3.2), 0) scale(calc(var(--hb-version-stack-scale) - 0.024));
+  opacity: 0.4;
+}
+
+/* 主图内容压在叠层之上 */
+.image-flow-node.has-versions .image-node-body {
+  z-index: 1;
+}
+
+/* 右上角「图片总数 + 箭头」角标：展开态箭头翻转 */
+.image-node-version-badge {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 5;
+  min-height: 24px;
+  display: inline-flex;
+  align-items: center;
+  gap: 1px;
+  border: 0;
+  cursor: pointer;
+  border-radius: var(--radius-2xs);
+  background: color-mix(in srgb, var(--color-bg-base) 64%, transparent);
+  color: var(--color-text-primary);
+  padding: 0 5px 0 7px;
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-ui-border-subtle) 54%, transparent);
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: var(--font-size-xs);
+  line-height: 1;
+  transition: background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out), transform var(--motion-fast) var(--ease-out);
+}
+
+.image-node-version-badge:hover {
+  background: color-mix(in srgb, var(--color-bg-base) 86%, transparent);
+  transform: translateY(-1px);
+}
+
+.image-node-version-badge svg {
+  width: 13px;
+  height: 13px;
+  display: block;
+  transition: transform var(--motion-normal) var(--ease-out);
+}
+
+.image-flow-node.versions-expanded .image-node-version-badge svg {
+  transform: rotate(180deg);
+}
+
+/* ── 展开态：整块替换成版本宫格——主图并进宫格（当前版本打头），
+     背后暗示“还有别的版本”的叠层也撤掉，不再需要 ── */
+.image-flow-node.versions-expanded,
+.image-flow-node.versions-leaving {
+  width: calc(var(--image-node-width, 320px) * 2 + var(--hb-version-grid-gap));
+}
+
+/* 展开态：整块换成宫格，主图和叠层都撤掉。
+   注意 leaving（收起中）不再藏主图——见下面 .versions-leaving .image-node-media 的说明。 */
+.image-flow-node.versions-expanded .image-node-media,
+.image-flow-node.versions-expanded .image-node-version-stack,
+.image-flow-node.versions-leaving .image-node-version-stack {
+  display: none;
+}
+
+/* 收起中：主图绝对定位垫在宫格第一格（= 当前版本卡那块）。卡片是收敛回这里、
+   到位后再淡出的，主图垫在底下正好一片片接住，不会出现「卡片淡完后 unmount 才显示
+   主图」中间那一帧空窗——120Hz 屏上一帧只有 8.3ms，那个洞肉眼就是闪一下。
+   absolute 不占流高，节点不会被撑高；宫格提 z-index，卡片仍压在垫图上。 */
+.image-flow-node.versions-leaving .image-node-media {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: var(--image-node-width, 320px);
+}
+
+.image-flow-node.versions-leaving .image-node-versions {
+  position: relative;
+  z-index: 1;
+}
+
+/* 两列等宽卡：每张都和收起时的主图一样大（宽度走 --image-node-width，比例走位图比例） */
+.image-node-versions {
+  display: grid;
+  grid-template-columns: repeat(2, var(--image-node-width, 320px));
+  gap: var(--hb-version-grid-gap);
+  align-content: start;
+  min-width: 0;
+}
+
+.image-node-version {
+  position: relative;
+  margin: 0;
+  width: var(--image-node-width, 320px);
+  min-width: 0;
+  border-radius: var(--radius-md);
+  corner-shape: var(--corner-smooth);
+  overflow: hidden;
+  background: var(--color-ui-panel);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-ui-border-subtle) 60%, transparent);
+  aspect-ratio: var(--image-aspect-ratio, 1);
+  /* 两条动画各管一个属性、各两个关键帧：位移跑满 1000ms，渐入只跑前 200ms。
+     合成在一行里，后一条不与前一条抢 transform，互不干扰 */
+  animation:
+    hb-version-card-enter var(--hb-version-card-duration) var(--hb-version-card-ease) both,
+    hb-version-card-fade var(--hb-version-card-fade-duration) var(--ease-out) both;
+  transition: box-shadow var(--motion-fast) var(--ease-out), translate var(--motion-fast) var(--ease-out);
+}
+
+/* 当前版本那张卡：右上角被「图片总数 + 箭头」角标占着，操作按钮往下让一格 */
+.image-node-version.is-active .image-node-version-actions {
+  top: 38px;
+}
+
+/* 位移回退量：每张卡启动时先落在「主图原位」上，再飞到自己的格子。
+   偶数列统一回退一列步长；行步长按 nth-child 成对给（两列一行）；更深的链取近似档。 */
+.image-node-versions .image-node-version:nth-child(1) { --hb-version-enter-x: 0px; --hb-version-enter-y: 0px; }
+.image-node-versions .image-node-version:nth-child(even) { --hb-version-enter-x: calc(-1 * var(--hb-version-step-x)); }
+.image-node-versions .image-node-version:nth-child(3),
+.image-node-versions .image-node-version:nth-child(4) { --hb-version-enter-y: calc(-1 * var(--hb-version-step-y)); }
+.image-node-versions .image-node-version:nth-child(5),
+.image-node-versions .image-node-version:nth-child(6) { --hb-version-enter-y: calc(-2 * var(--hb-version-step-y)); }
+.image-node-versions .image-node-version:nth-child(7),
+.image-node-versions .image-node-version:nth-child(8) { --hb-version-enter-y: calc(-3 * var(--hb-version-step-y)); }
+.image-node-versions .image-node-version:nth-child(n + 9) { --hb-version-enter-y: calc(-4 * var(--hb-version-step-y)); }
+/* 错相延迟：让一大片卡依次铺开而不是整块砸下来 */
+.image-node-versions .image-node-version:nth-child(2) { animation-delay: var(--motion-stagger); }
+.image-node-versions .image-node-version:nth-child(3) { animation-delay: calc(var(--motion-stagger) * 2); }
+.image-node-versions .image-node-version:nth-child(n + 4) { animation-delay: calc(var(--motion-stagger) * 3); }
+
+.image-node-version:hover {
+  translate: 0 -1px;
+}
+
+/* 主图（当前版本）卡：选中描边与灵枢节点选中同一语言——80% 纸色 2px 外描边 + 4px 外延 */
+.image-node-version.is-active {
+  outline: 2px solid color-mix(in srgb, var(--color-paper) 80%, transparent);
+  outline-offset: 4px;
+}
+
+.image-node-version img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.image-node-version-tag {
+  position: absolute;
+  top: 6px;
+  left: 6px;
+  z-index: 3;
+  min-height: 18px;
+  display: inline-flex;
+  align-items: center;
+  border-radius: var(--radius-2xs);
+  background: var(--media-chrome-bg);
+  color: var(--media-chrome-fg);
+  padding: 0 6px;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: var(--font-size-2xs);
+  line-height: 1;
+  pointer-events: none;
+}
+
+.image-node-version-actions {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  z-index: 3;
+  display: flex;
+  gap: var(--spacing-1);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--motion-fast) var(--ease-out);
+}
+
+.image-node-version:hover .image-node-version-actions,
+.image-node-version:focus-within .image-node-version-actions {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.image-node-version-action {
+  width: 24px;
+  height: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  cursor: pointer;
+  text-decoration: none;
+  border-radius: var(--radius-2xs);
+  background: var(--media-chrome-bg);
+  color: var(--media-chrome-fg);
+  box-shadow: inset 0 0 0 1px var(--media-chrome-border);
+  padding: 0;
+  transition: background var(--motion-fast) var(--ease-out), transform var(--motion-fast) var(--ease-out);
+}
+
+.image-node-version-action:hover {
+  background: var(--media-chrome-bg-strong);
+  transform: translateY(-1px);
+}
+
+.image-node-version-action:disabled {
+  opacity: 0.4;
+  cursor: default;
+  transform: none;
+}
+
+.image-node-version-action svg {
+  width: 14px;
+  height: 14px;
+  display: block;
+}
+
+/* 收起：卡片先散着退场，节点再缩回单图尺寸（.versions-leaving 保留两列布局） */
+.image-flow-node.versions-leaving .image-node-versions {
+  pointer-events: none;
+}
+
+.image-flow-node.versions-leaving .image-node-version {
+  animation:
+    hb-version-card-exit var(--hb-version-card-exit-duration) var(--hb-version-card-exit-ease) both,
+    hb-version-card-exit-fade var(--hb-version-card-exit-fade-duration) var(--hb-version-card-exit-fade-ease) var(--hb-version-card-exit-fade-delay) both;
+}
+
+/* 展开位移：从主图原位（--hb-version-enter-x/y 回退量）直达自己的格子，
+     只有 from/to 两个关键帧——整段只套一次 ease-in-out，中途不会因为
+     关键帧分段各自缓动而出现「顿一下」的断档 */
+@keyframes hb-version-card-enter {
+  from { transform: translate(var(--hb-version-enter-x, 0px), var(--hb-version-enter-y, 0px)); }
+  to { transform: translate(0px, 0px); }
+}
+
+/* 渐入：独立一条短动画，只跑前 200ms 完成不透明度，之后纯位移 */
+@keyframes hb-version-card-fade {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+/* 收起位移：先反向蓄力 12%，再沿原路飞回主图原位——只有 from/to 两个关键帧 */
+@keyframes hb-version-card-exit {
+  from { transform: translate(0px, 0px); }
+  to { transform: translate(var(--hb-version-enter-x, 0px), var(--hb-version-enter-y, 0px)); }
+}
+
+/* 收起淡出：延迟 230ms 才起淡（那时位移已走完 76.7%），140ms 淡到 0，
+     比卡片归位晚 70ms 结束，正好在主图接位之前收干净 */
+@keyframes hb-version-card-exit-fade {
+  from { opacity: 1; }
+  to { opacity: 0; }
+}
+
+/* ── 二次编辑态：钉在输入区的基准图（不可移除）与取消按钮 ── */
+.image-node-composer-ref.is-redit-base {
+  cursor: default;
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-border-focus) 72%, transparent);
+}
+
+.image-node-composer-ref.is-redit-base::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  corner-shape: inherit;
+  pointer-events: none;
+}
+
+/* 参考图编号徽标（多图时才出现）：数字 = 发给模型的图片顺序，用户说的「图 N」照此对号 */
+.image-node-composer-ref-index {
+  position: absolute;
+  left: 4px;
+  top: 4px;
+  z-index: 2;
+  min-width: 16px;
+  height: 16px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-2xs);
+  background: var(--media-chrome-bg);
+  color: var(--media-chrome-fg);
+  padding: 0 4px;
+  font-size: var(--font-size-2xs);
+  font-weight: var(--font-weight-semibold);
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
+}
+
+.image-node-composer-ref-base-tag {
+  position: absolute;
+  left: 4px;
+  bottom: 4px;
+  z-index: 2;
+  min-height: 16px;
+  display: inline-flex;
+  align-items: center;
+  border-radius: var(--radius-2xs);
+  background: var(--media-chrome-bg);
+  color: var(--media-chrome-fg);
+  padding: 0 5px;
+  font-size: var(--font-size-2xs);
+  line-height: 1;
+  pointer-events: none;
+}
+
+.image-node-composer-redit-cancel {
+  flex: 0 0 auto;
+  height: 32px;
+  display: inline-flex;
+  align-items: center;
+  border: 0;
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+  background: var(--color-ui-control-active);
+  color: var(--color-text-primary);
+  padding: 0 var(--spacing-2);
+  font-family: var(--font-sans);
+  font-size: var(--font-size-xs);
+  white-space: nowrap;
+  transition: background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out);
+}
+
+.image-node-composer-redit-cancel:hover:not(:disabled) {
+  background: var(--color-ui-control);
+  color: var(--color-text-primary);
+}
+
+.image-node-composer-redit-cancel:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}

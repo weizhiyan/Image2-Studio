@@ -1,0 +1,438 @@
+/** 画布节点三类：composer 输入生成、image 生成结果、reference 参考素材。 */
+export type CanvasNodeKind = 'composer' | 'image' | 'reference';
+
+/**
+ * 语言模型的上游接口格式：chat = /chat/completions，responses = /responses，
+ * auto = 先 chat，遇路由类错误自动回落 responses（Codex 系路由器只能走 responses）。
+ */
+export type TextApiFormat = 'chat' | 'responses' | 'auto';
+export type ImageApiMode = 'images' | 'responses';
+
+/**
+ * composer 引用预览（灵枢同款）：图片引用带缩略图；
+ * 文本引用（只有提示词、还没出图的生成节点）只展示 T 图标与文本，生成时合并进提示词。
+ */
+export interface CanvasReference {
+  id: string;
+  url: string;
+  title: string;
+  kind?: 'image' | 'text';
+  text?: string;
+  /** 图片来源节点的原始像素尺寸：自动比例按它推导宽高比（缺省时自动退回 1:1）。 */
+  width?: number;
+  height?: number;
+}
+
+/** 生成阶段：enhance = 语言模型整理提示词中；generate = 生图模型出图中。 */
+export type ComposerStage = 'enhance' | 'generate';
+
+/**
+ * 结果节点上的一个版本：一次生成 / 一次二次编辑的产物，按时间正序存（新版本在末位）。
+ * 同一张结果图反复迭代时不再新开节点，全部沉淀在这里，模型与用户都只面对一个节点。
+ */
+export interface CanvasNodeVersion {
+  id: string;
+  imageUrl: string;
+  fileName: string;
+  /** 这一版实际发出去的提示词。 */
+  prompt: string;
+  model: string;
+  size: string;
+  width?: number;
+  height?: number;
+  /** 这一版发起生成的时间。 */
+  createdAt: string;
+  /** 这一版出图完成的时间。 */
+  finishedAt: string;
+  enhancedPrompt?: string;
+  revisedPrompt?: string;
+  /** 由哪个版本二次编辑而来；首版为空。 */
+  baseVersionId?: string;
+  /** Responses API conversation context for editing this exact version. */
+  responseId?: string;
+  imageGenerationCallId?: string;
+  responseModel?: string;
+  responseProfileId?: string;
+}
+
+export interface CanvasNodeData {
+  kind: CanvasNodeKind;
+  label: string;
+  /** composer：正在编辑的提示词；image：生成用的提示词；reference：无。 */
+  prompt?: string;
+  status?: 'idle' | 'running' | 'done' | 'error';
+  /** image 节点：媒体服务返回的文件 URL（/api/files/xxx）。 */
+  imageUrl?: string;
+  /** reference / 图生图：dataURL 形式的位图。 */
+  referenceDataUrl?: string;
+  /** composer：上游连线带来的引用（图片缩略图 / 纯文本引用），由边同步，随持久化保存。 */
+  references?: CanvasReference[];
+  /** composer：是否处于可输入状态（选中节点后再次点击输入区进入，方便直接拖动卡片）。 */
+  composerEditing?: boolean;
+  fileName?: string;
+  model?: string;
+  size?: string;
+  /** composer：工具栏选中的画幅预设（"auto" = 按参考图自动推导；"16:9" / "1:1" / "9:16" 为手动锁定）。
+   *  提示词里写明比例时始终优先于这里（对齐灵枢的优先级链）。 */
+  ratio?: string;
+  /** composer：分辨率档位（1K / 2K / 4K，长边像素），与比例共同决定发给生图模型的 size。 */
+  resolution?: '1K' | '2K' | '4K';
+  /** composer：一次生成几张（1~8），结果作为多个版本挂回同一节点。 */
+  imageCount?: number;
+  /** 兼容旧字段：true = Image API，false = Responses API；不设则跟随全局 API 模式。 */
+  direct?: boolean;
+  /**
+   * 生成节点运行态的「本次实际直连与否」：决定流体描边 / 关联线条的颜色（白 = 直连，
+   * 紫 = 模型优化在跑）。只在生成入口写、结束或出错时清，不随节点级 direct 覆盖变粘滞。
+   */
+  runningDirect?: boolean;
+  /**
+   * composer：用户手动拖拽调整过的参考图顺序（reference id 数组）。缺省时仍按源节点
+   * 位置排序；有值时 chips 编号与发给模型的图片数组都照它来。
+   */
+  referenceOrder?: string[];
+  /** composer：生成阶段，驱动运行态的文案。 */
+  stage?: ComposerStage;
+  /** image：经语言模型优化后实际发出、浏览器原始输入的提示词。 */
+  enhancedPrompt?: string;
+  /** image：语言模型优化失败、按原文发送时的标记。 */
+  enhanceFailed?: boolean;
+  /** image：生图模型服务端润色后的提示词（revised_prompt）。 */
+  revisedPrompt?: string;
+  responseId?: string;
+  imageGenerationCallId?: string;
+  responseModel?: string;
+  responseProfileId?: string;
+  /** 卡片宽度（px）：与 width/height（位图像素）分开存，避免把卡片撑成原图尺寸。 */
+  cardWidth?: number;
+  /**
+   * image：历次生成沉淀成的版本链（新的在末位）。老节点没有这个字段，
+   * 读取时按「当前这张图」补一版（见 lib/versions 的 normalizeVersions）。
+   */
+  versions?: CanvasNodeVersion[];
+  /** image：当前作为主图展示的版本 id；缺省取最后一版（即最新版）。 */
+  activeVersionId?: string;
+  /**
+   * 二次编辑态：被钉进输入区的基准图版本 id。
+   * kind === 'composer' 且该字段有值时，节点就是「在原图上迭代」的编辑态——
+   * 输入区里那张不可移除的引用就是它，生成完成后字段清空、节点回到图片态。
+   */
+  reditBaseVersionId?: string;
+  error?: string;
+  /** composer：手动拉伸后的卡片高度（px），配 nodeHeightManual 使用。 */
+  nodeHeight?: number;
+  /** composer：是否手动拉伸过高度；为 true 时卡片高度不再跟随内容自适应。 */
+  nodeHeightManual?: boolean;
+  /** composer：开始生成的时间，同时驱动运行计时与预览里的「用时」。 */
+  createdAt?: string;
+  /** image：生成完成的时间。 */
+  finishedAt?: string;
+  /** 外部来源：mcp = Codex / 其他 Agent 推来的图。 */
+  source?: 'browser' | 'mcp';
+  width?: number;
+  height?: number;
+  /** React Flow v12 要求节点 data 满足 Record<string, unknown>。 */
+  [key: string]: unknown;
+}
+
+export interface CanvasDoc {
+  id: string;
+  name: string;
+  nodes: CanvasNode[];
+  edges: CanvasEdge[];
+  viewport?: { x: number; y: number; zoom: number };
+  updatedAt: string;
+}
+
+/** 与 @xyflow/react 的 RF 节点同构，这里只声明自用字段；渲染层再收窄。 */
+export interface CanvasNode {
+  id: string;
+  type: string;
+  position: { x: number; y: number };
+  data: CanvasNodeData;
+  width?: number;
+  height?: number;
+}
+
+export interface CanvasEdge {
+  id: string;
+  source: string;
+  target: string;
+}
+
+/** 配置种类：image = 生图模型；text = 语言 / 多模态模型（发送前整理提示词）。 */
+export type ProfileKind = 'image' | 'text';
+
+/** 一路生图模型配置（Base URL / Key / 模型列表独立，可同时存在多路）。 */
+export interface ModelProfileView {
+  id: string;
+  name: string;
+  baseUrl: string;
+  model: string;
+  defaultSize: string;
+  /** 从服务端拉取到的候选模型列表。 */
+  models: string[];
+  /** 勾选启用的模型；默认模型从其中选择。 */
+  enabledModels: string[];
+  /** 这路配置的用途。 */
+  kind: ProfileKind;
+  /** 该路是否已存 Key（不回显 key 本身）。 */
+  keyConfigured: boolean;
+  /** false = 停用这路配置：不参与默认竞选（界面置灰）；缺省视为启用 */
+  enabled?: boolean;
+  /** 语言模型的上游接口格式；生图配置恒为 auto。 */
+  textFormat: TextApiFormat;
+  /** Image API (default) or conversational Responses image-generation tool. */
+  imageApiMode?: ImageApiMode;
+  /** Mainline model for Responses API; separate from the image tool model. */
+  responsesModel?: string;
+}
+
+/** 提示词整理强度：只影响语言模型那一次对话，不改变生图模型参数。 */
+export type EnhanceLevel = 'strict' | 'balanced' | 'creative';
+
+/** 偏好档案的一条：manual = 灯箱手动录入；auto = 由生成记录归纳。 */
+export interface PreferenceEntry {
+  id: string;
+  text: string;
+  source: 'manual' | 'auto';
+  createdAt: string;
+}
+
+export interface PreferenceProfile {
+  /** 是否注入语言模型优化对话；未调用优化时无副作用。 */
+  enabled: boolean;
+  entries: PreferenceEntry[];
+  updatedAt: string;
+}
+
+export interface MediaSettings {
+  /** 全部生图配置；「生图设置」里可增删改。 */
+  profiles: ModelProfileView[];
+  /** 当前生效的那一路：浏览器生成与 Codex 生成都默认走它。 */
+  activeProfileId: string;
+  /** 兼容旧字段：true = Image API；false = Responses 智能生成。 */
+  direct: boolean;
+  /** 是否在浏览器生图前额外调用一次语言模型整理提示词。 */
+  promptOptimizationEnabled: boolean;
+  /** 优化提示词用的语言模型 id；为空时取第一把可用的语言模型。 */
+  textProfileId: string;
+  /** 整理强度：高遵循 / 均衡 / 创意。 */
+  enhanceLevel: EnhanceLevel;
+  /** 用户偏好档案：归纳 + 手动录入，注入优化对话。 */
+  preferences: PreferenceProfile;
+}
+
+export interface ImageResult {
+  fileName: string;
+  url: string;
+  revisedPrompt?: string;
+  responseId?: string;
+  imageGenerationCallId?: string;
+  responseModel?: string;
+}
+
+export type GenerateOutcome =
+  | { ok: true; jobId: string; images: ImageResult[] }
+  | { ok: false; error: string };
+
+/** 生成历史的一条：全部画布的图片节点汇成的时间线（bridge /api/history）。 */
+export interface HistoryItem {
+  url: string;
+  prompt: string;
+  /** 该图在所属结果节点版本链里的序号（1 起）；没有版本链的老节点为空。 */
+  versionIndex?: number;
+  /** 所属结果节点的版本总数；大于 1 说明这个节点被二次编辑过。 */
+  versionCount?: number;
+  /** 这一版是由哪个版本二次编辑来的（同链内的版本 id）。 */
+  baseVersionId?: string;
+  /** 该图所属的结果节点 id，用于从历史面板定位回画布。 */
+  nodeId?: string;
+  /** 版本链里这一版的 id，配合 baseVersionId 解析“基于 Vx”。 */
+  versionId?: string;
+  enhancedPrompt: string;
+  revisedPrompt: string;
+  model: string;
+  size: string;
+  fileName: string;
+  canvasId: string;
+  canvasName: string;
+  createdAt: string;
+  source: 'browser' | 'mcp' | string;
+}
+
+/* ── 对话（全局独立线程）──
+   线程由自身 id 标识，与画布生命周期无关；canvasId 仅记录最近的画布/结果落点。
+   图片引用继续携带来源画布和版本，删除画布不应删除对话历史。 */
+
+/** 对话消息里引用的画布图片：版本级引用。
+ *  用户引的是具体版本，不是"当前节点"——节点后来产生新版本，历史消息仍指向发送当时的版本。 */
+export interface ChatImageRef {
+  canvasId: string;
+  nodeId: string;
+  /** 具体版本 id；缺省 = 发送时节点的当前主图版本。 */
+  versionId?: string;
+  /** 仅用于当前界面缩略图，不能作为唯一事实源（事实源是画布节点）。 */
+  url?: string;
+  title?: string;
+  /** 引用在用户输入纯文本中的插入位置，用于在编辑器与历史消息里内联展示。 */
+  position?: number;
+}
+
+/** 对话消息里的生成结果：指向画布上的节点 + 版本（通过 nodeId + versionId 关联）。 */
+export interface ChatMessageMedia {
+  url: string;
+  fileName: string;
+  /** 生成结果所在节点：点图定位落它。 */
+  nodeId: string;
+  /** 结果落点画布；线程独立于画布，单个线程的结果可分布在不同画布。 */
+  canvasId?: string;
+  /** 版本链里的版本 id：下一轮上下文续接取它的 responseId。 */
+  versionId: string;
+  /** Agent 交给提示词优化器前的原始意图。 */
+  originalPrompt?: string;
+  /** 优化器实际交给生图接口的提示词；为空时表示优化失败并回退原文。 */
+  enhancedPrompt?: string;
+  referenceUsage?: 'style' | 'edit';
+  enhancementWarning?: string;
+  prompt: string;
+  model: string;
+  size: string;
+}
+
+/** 长对话的持久化记忆：原始消息始终保留，摘要和当前目标只作为压缩上下文。 */
+export interface ChatThreadMemory {
+  version?: number;
+  summary?: string;
+  summaryMessageCount?: number;
+  summaryUpdatedAt?: string;
+  goal?: {
+    mode?: string;
+    statement?: string;
+    deliverable?: string;
+    confirmed?: string[];
+    preserve?: string[];
+    change?: string[];
+    rejected?: string[];
+    openQuestions?: string[];
+    updatedAt?: string;
+  };
+  visualWorkingSet?: {
+    base?: Record<string, unknown>;
+    references?: Array<Record<string, unknown>>;
+    recentOutputs?: Array<Record<string, unknown>>;
+    inheritMode?: 'auto' | 'edit' | 'new';
+    explicitNewRequest?: boolean;
+  };
+  lastCompactionAt?: string;
+}
+
+/** 本轮实际用的上下文：给用户看"模型记得什么"，断链时讲清原因。 */
+export interface ChatMessageContext {
+  /** 续接了哪个画布版本的 responseId；空 = 本轮是全新上下文。 */
+  baseVersionId?: string;
+  responseId?: string;
+  /** 作为参考图发给模型的图片数。 */
+  referenceCount: number;
+  /** 上下文被重置的原因（换配置 / 跨模式）；空 = 正常续接或首轮。 */
+  resetReason?: string;
+}
+
+/** 工具调用记录（generate_image）：折叠过程卡的数据。 */
+export interface ChatToolCall {
+  id: string;
+  name: string;
+  /** 参数摘要：prompt / 参考图张数 / 比例 / 张数 / 是否续接。 */
+  args: Record<string, unknown>;
+  status: 'running' | 'done' | 'error' | 'stopped';
+  /** 过程步骤文案（已理解方向 / 正在准备参考图 / 正在调用生图工具 / 已生成 N 张候选图）。 */
+  steps: string[];
+  /** 工具产出的图（指向画布节点版本，与画布节点通过 nodeId + versionId 关联）。 */
+  media?: ChatMessageMedia[];
+  error?: string;
+  /** 本次调用实际使用的生图模型。 */
+  model?: string;
+  /** 模型配置名称，便于失败时定位是哪一路配置。 */
+  profileName?: string;
+  /** 生图开始时间与耗时。 */
+  startedAt?: string;
+  finishedAt?: string;
+  durationMs?: number;
+  /** 预估/实际输出尺寸。 */
+  size?: string;
+}
+
+export interface ChatClarificationOption {
+  label: string;
+  value: string;
+  description?: string;
+  recommended?: boolean;
+}
+
+export interface ChatClarificationQuestion {
+  id: string;
+  title: string;
+  description?: string;
+  multiple: boolean;
+  options: ChatClarificationOption[];
+}
+
+export interface ChatClarification {
+  callId: string;
+  questions: ChatClarificationQuestion[];
+  answers?: Record<string, string[]>;
+  status: 'awaiting_input' | 'answered' | 'cancelled';
+}
+
+/** 用户提交结构化询问后的可展开摘要，作为一条用户消息显示并回喂后续对话。 */
+export interface ChatAskResponseSummary {
+  title: string;
+  questions: Array<{
+    id: string;
+    title: string;
+    answers: string[];
+  }>;
+}
+
+export interface ChatModelSelection {
+  textProfileId?: string;
+  imageProfileId?: string;
+  imageModel?: string;
+}
+
+/** 消息运行态：运行中 / 完成 / 失败 / 已停止 / 刷新后状态未知（不伪装成完成）。 */
+export type ChatMessageStatus = 'running' | 'awaiting_input' | 'done' | 'error' | 'stopped' | 'unknown';
+
+export interface ChatMessage {
+  id: string;
+  role: 'user' | 'assistant';
+  content: string;
+  /** user：发送时引用的画布图片快照（版本级）。 */
+  attachments?: ChatImageRef[];
+  /** assistant：生成的图（指向画布节点版本）。 */
+  media?: ChatMessageMedia[];
+  /** assistant：本轮 agent 的工具调用痕迹。 */
+  toolCalls?: ChatToolCall[];
+  /** Agent 的结构化追问和用户回答；不参与图像提示词优化，只作为对话上下文。 */
+  clarifications?: ChatClarification[];
+  /** 用户提交结构化追问后的答案摘要。 */
+  askResponse?: ChatAskResponseSummary;
+  /** 发送这轮消息时选择的语言模型 / 生图模型。 */
+  modelSelection?: ChatModelSelection;
+  /** 本轮上下文徽标：续接了哪一版 / 断链原因。 */
+  context?: ChatMessageContext;
+  status?: ChatMessageStatus;
+  error?: string;
+  createdAt: string;
+}
+
+export interface ChatThread {
+  id: string;
+  /** 最近的画布/默认生成落点，不代表线程归属；独立对话可以没有画布。 */
+  canvasId?: string;
+  title: string;
+  messages: ChatMessage[];
+  memory?: ChatThreadMemory;
+  createdAt: string;
+  updatedAt: string;
+}

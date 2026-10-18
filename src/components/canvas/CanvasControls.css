@@ -1,0 +1,242 @@
+/* 画布共用控件：左侧竖向功能入口（rail）+ 左下角缩放 dock + 拖动工具光标。
+   绘画页与节点页共用；页面专属按钮（如绘画页的生成历史）由 extraButtons 注入。 */
+/* 左下角缩放 dock：图标组 | 百分比 | 最右可拖动滑块（对数行程），胶囊横条 */
+.canvas-dock {
+  position: absolute;
+  left: var(--spacing-4);
+  bottom: var(--spacing-4);
+  z-index: 120;
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-1);
+  padding: 6px 12px;
+  pointer-events: auto;
+  border: 1px solid var(--surface-popover-border);
+  border-radius: var(--radius-full);
+  background: color-mix(in srgb, var(--control-bg) 88%, transparent);
+  box-shadow: var(--shadow-sm);
+  backdrop-filter: blur(12px) saturate(130%);
+  -webkit-backdrop-filter: blur(12px) saturate(130%);
+}
+
+.canvas-dock-btn {
+  width: 26px;
+  height: 26px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-full);
+  background: transparent;
+  color: var(--color-text-primary);
+  font-family: var(--font-sans);
+  font-size: var(--font-size-md);
+  font-weight: var(--font-weight-regular);
+  line-height: 1;
+  cursor: pointer;
+}
+
+.canvas-dock-btn:hover:not(:disabled) {
+  background: var(--control-bg-hover);
+}
+
+.canvas-dock-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+
+.canvas-dock-btn svg {
+  width: 15px;
+  height: 15px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.canvas-dock-zoom {
+  min-width: 40px;
+  /* 跟在滑块右侧：左边只留一档间距，滑轨本身紧贴图标组 */
+  margin: 0 0 0 var(--spacing-1);
+  color: var(--color-text-secondary);
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: var(--font-size-xs);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  pointer-events: none;
+}
+
+.canvas-dock-slider {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 80px;
+  height: 16px;
+  /* 不再另加左边距：dock 自身 4px gap 就够，原来 label margin + 这里 margin 叠成 12px */
+  margin: 0;
+  padding: 0;
+  background: transparent;
+  cursor: pointer;
+}
+
+.canvas-dock-slider:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.canvas-dock-slider::-webkit-slider-runnable-track {
+  height: 3px;
+  border-radius: var(--radius-full);
+  background: color-mix(in srgb, var(--color-text-tertiary) 38%, transparent);
+}
+
+.canvas-dock-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 12px;
+  height: 12px;
+  margin-top: -4.5px;
+  border: 0;
+  border-radius: var(--radius-full);
+  background: var(--color-text-primary);
+}
+
+.canvas-dock-slider::-moz-range-track {
+  height: 3px;
+  border-radius: var(--radius-full);
+  background: color-mix(in srgb, var(--color-text-tertiary) 38%, transparent);
+}
+
+.canvas-dock-slider::-moz-range-thumb {
+  width: 12px;
+  height: 12px;
+  border: 0;
+  border-radius: var(--radius-full);
+  background: var(--color-text-primary);
+}
+
+/* 左侧竖向功能入口：添加节点 + 生成历史（竖向胶囊） */
+/* 左侧竖向功能入口：添加节点 + 生成历史（竖向胶囊） */
+.canvas-rail {
+  position: absolute;
+  left: var(--spacing-4);
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: 120;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--spacing-2);
+  padding: var(--spacing-1);
+  pointer-events: auto;
+  border: 1px solid var(--surface-popover-border);
+  border-radius: var(--radius-full);
+  background: color-mix(in srgb, var(--control-bg) 88%, transparent);
+  box-shadow: var(--shadow-sm);
+  backdrop-filter: blur(12px) saturate(130%);
+  -webkit-backdrop-filter: blur(12px) saturate(130%);
+}
+
+.canvas-rail-btn {
+  width: 32px;
+  height: 32px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-full);
+  /* 默认无背景，只有悬停才浮现一档 */
+  background: transparent;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  transition: background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out);
+}
+
+/* 悬停：白色 12% 背景才出现，加号同步旋转 45° */
+.canvas-rail-btn:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--color-paper) 12%, transparent);
+  color: var(--color-text-primary);
+}
+
+/* + 按钮是主入口：默认实色白底 + 深色图标；悬停时白色降低不透明度 */
+.canvas-rail-btn-add {
+  background: var(--color-paper);
+  color: var(--color-ink);
+}
+
+.canvas-rail-btn-add:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--color-paper) 72%, transparent);
+  color: var(--color-ink);
+}
+
+.canvas-rail-btn-add svg {
+  transition: transform var(--motion-normal) var(--ease-out);
+}
+
+.canvas-rail-btn-add:hover svg {
+  transform: rotate(45deg);
+}
+
+/* 激活（如"拖动"工具开启）：近实色白底 + 深色图标 + 细环，与"+"主入口同重量级，
+   在深色画布上一眼能看出"手"已经按下；连同悬停一起覆盖，避免 :hover 抢 specificity */
+.canvas-rail-btn.is-active,
+.canvas-rail-btn.is-active:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--color-paper) 88%, transparent);
+  color: var(--color-ink);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--color-paper) 26%, transparent);
+}
+
+.canvas-rail-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.canvas-rail-btn svg {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+/* 拖动工具开启：左键拖拽只平移画布，光标给 grab / grabbing 反馈（两页共用同一套交互） */
+.canvas-pan-tool .react-flow__pane {
+  cursor: grab;
+}
+
+.canvas-pan-tool .react-flow__pane:active {
+  cursor: grabbing;
+}
+
+/* 画布工具切换（选择 / 抓手）：图标常亮白色，激活态只做轻提示——
+   不再用近实色白底去抢「+」主入口的重量，用户要的是"看得出当前是哪个工具"而不是高亮块 */
+.canvas-rail-tool {
+  color: var(--color-paper);
+}
+
+.canvas-rail-tool svg {
+  width: 18px;
+  height: 18px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.canvas-rail-tool:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--color-paper) 14%, transparent);
+  color: var(--color-paper);
+}
+
+.canvas-rail-tool.is-active,
+.canvas-rail-tool.is-active:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--color-paper) 16%, transparent);
+  color: var(--color-paper);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--color-paper) 20%, transparent);
+}

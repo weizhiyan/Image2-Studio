@@ -1,0 +1,345 @@
+.hb-clarification-overlay {
+  position: relative;
+  width: calc(100% + var(--spacing-4));
+  margin-left: calc(var(--spacing-2) * -1);
+  padding: 0 var(--spacing-2) var(--spacing-2);
+}
+
+.hb-clarification-modal {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  width: 100%;
+  max-height: min(560px, calc(100dvh - 140px));
+  overflow: hidden;
+  border: 0;
+  border-radius: var(--radius-lg);
+  background: var(--work-dialog-control-bg);
+  color: var(--color-text-primary);
+  box-shadow: var(--chat-composer-shadow);
+  animation: hb-clarification-enter var(--motion-normal) var(--ease-out);
+}
+
+@keyframes hb-clarification-enter {
+  from {
+    opacity: 0;
+    transform: translateY(var(--spacing-3)) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+.hb-clarification-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--spacing-3);
+  padding: var(--spacing-3);
+  padding-bottom: var(--spacing-3);
+}
+
+.hb-clarification-heading {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 0;
+}
+
+.hb-clarification-heading > div {
+  min-width: 0;
+  display: grid;
+  gap: var(--spacing-1);
+}
+
+.hb-clarification-heading strong {
+  font-size: var(--font-size-md);
+  font-weight: var(--font-weight-medium);
+  line-height: var(--line-height-tight);
+}
+
+.hb-clarification-close {
+  width: var(--control-height-compact);
+  height: var(--control-height-compact);
+  flex: 0 0 var(--control-height-compact);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text-tertiary);
+  font-size: var(--icon-glyph-lg);
+  line-height: 1;
+  cursor: pointer;
+}
+
+.hb-clarification-close:hover,
+.hb-clarification-close:focus-visible {
+  background: var(--color-ui-control-hover);
+  color: var(--color-text-primary);
+}
+
+.hb-clarification-close:disabled,
+.hb-clarification-secondary:disabled {
+  cursor: wait;
+  opacity: 0.55;
+}
+
+.hb-clarification-tabs {
+  display: flex;
+  gap: var(--spacing-1);
+  overflow-x: auto;
+  margin: 0 var(--spacing-3) var(--spacing-2);
+  padding: var(--spacing-1);
+  border-radius: var(--radius-sm);
+  background: var(--color-ui-control-hover);
+}
+
+.hb-clarification-tabs button {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--spacing-1);
+  min-width: 64px;
+  height: var(--control-height-compact);
+  padding: 0 var(--spacing-2);
+  border: 0;
+  border-radius: var(--radius-2xs);
+  background: transparent;
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-xs);
+  cursor: pointer;
+}
+
+.hb-clarification-tabs button:hover,
+.hb-clarification-tabs button.is-active {
+  background: var(--color-ui-control-active);
+  color: var(--color-text-primary);
+}
+
+.hb-clarification-tabs i {
+  width: 6px;
+  height: 6px;
+  border-radius: var(--radius-full);
+  background: var(--color-accent-green);
+}
+
+.hb-clarification-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  scrollbar-width: thin;
+}
+
+.hb-clarification-body-inner {
+  padding: 0 var(--spacing-3);
+}
+
+.hb-clarification-question-head {
+  display: grid;
+  gap: var(--spacing-1);
+  padding: var(--spacing-2) 0 var(--spacing-3);
+}
+
+.hb-clarification-question-head h2,
+.hb-clarification-question-head p {
+  margin: 0;
+}
+
+.hb-clarification-question-head h2 {
+  font-size: var(--font-size-md);
+  font-weight: var(--font-weight-medium);
+  line-height: var(--line-height-tight);
+}
+
+.hb-clarification-question-head > span {
+  color: var(--color-text-tertiary);
+  font-size: var(--font-size-2xs);
+}
+
+.hb-clarification-question-head p {
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-xs);
+  line-height: var(--line-height-relaxed);
+}
+
+.hb-clarification-options {
+  display: grid;
+  gap: var(--spacing-1);
+  padding-bottom: var(--spacing-3);
+}
+
+.hb-clarification-option {
+  position: relative;
+  min-width: 0;
+  display: grid;
+  grid-template-columns: auto auto minmax(0, 1fr);
+  align-items: center;
+  gap: var(--spacing-2);
+  min-height: 44px;
+  padding: var(--spacing-2) var(--spacing-3);
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  cursor: pointer;
+  transition: background var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out);
+}
+
+.hb-clarification-option:hover,
+.hb-clarification-option:focus-within,
+.hb-clarification-option.is-selected {
+  border-color: var(--divider-subtle);
+  background: var(--color-ui-control-hover);
+}
+
+.hb-clarification-option > input:first-child {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+}
+
+.hb-clarification-control {
+  width: 16px;
+  height: 16px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--control-border);
+  border-radius: var(--radius-full);
+  color: var(--color-text-inverse);
+}
+
+.hb-clarification-option input[type='checkbox'] + .hb-clarification-control {
+  border-radius: var(--radius-2xs);
+}
+
+.hb-clarification-option input:checked + .hb-clarification-control {
+  border-color: var(--color-text-primary);
+  background: var(--color-text-primary);
+  box-shadow: inset 0 0 0 3px var(--surface-popover-bg);
+}
+
+.hb-clarification-option-copy {
+  min-width: 0;
+  display: grid;
+  gap: var(--spacing-1);
+}
+
+.hb-clarification-option-title {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-2);
+}
+
+.hb-clarification-option-title strong {
+  overflow: hidden;
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-medium);
+  line-height: var(--line-height-tight);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hb-clarification-option-title em {
+  flex: 0 0 auto;
+  border-radius: var(--radius-2xs);
+  background: var(--color-accent-purple-subtle);
+  color: var(--color-accent-purple);
+  padding: 1px var(--spacing-1);
+  font-size: var(--font-size-2xs);
+  font-style: normal;
+}
+
+.hb-clarification-option-copy small {
+  overflow: hidden;
+  color: var(--color-text-tertiary);
+  font-size: var(--font-size-xs);
+  line-height: var(--line-height-normal);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hb-clarification-other {
+  grid-column: 3;
+  width: 100%;
+  min-width: 0;
+  height: var(--control-height-compact);
+  border: 1px solid var(--control-border);
+  border-radius: var(--radius-2xs);
+  background: var(--control-bg);
+  color: var(--color-text-primary);
+  padding: 0 var(--spacing-2);
+  font: inherit;
+  font-size: var(--font-size-xs);
+}
+
+.hb-clarification-other:focus {
+  outline: none;
+  border-color: var(--control-border-focus);
+}
+
+.hb-clarification-footer {
+  flex: 0 0 auto;
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--spacing-2);
+  padding: var(--spacing-2) var(--spacing-3) var(--spacing-3);
+  border-top: 1px solid var(--divider-subtle);
+}
+
+.hb-clarification-secondary,
+.hb-clarification-primary {
+  min-width: 64px;
+  height: var(--control-height-compact);
+  padding: 0 var(--spacing-3);
+  border: 0;
+  border-radius: var(--radius-sm);
+  font: inherit;
+  font-size: var(--font-size-sm);
+  cursor: pointer;
+}
+
+.hb-clarification-secondary {
+  background: var(--color-ui-control-hover);
+  color: var(--color-text-primary);
+}
+
+.hb-clarification-primary {
+  background: var(--color-action-send);
+  color: var(--color-action-send-icon);
+}
+
+.hb-clarification-secondary:hover,
+.hb-clarification-secondary:focus-visible {
+  background: var(--color-ui-control-active);
+}
+
+.hb-clarification-primary:hover:not(:disabled),
+.hb-clarification-primary:focus-visible:not(:disabled) {
+  background: var(--color-action-send-hover);
+}
+
+.hb-clarification-primary:disabled {
+  cursor: not-allowed;
+  opacity: 0.42;
+}
+
+@media (max-width: 560px) {
+  .hb-clarification-overlay {
+    width: 100%;
+    margin-left: 0;
+    padding-inline: 0;
+  }
+
+  .hb-clarification-header,
+  .hb-clarification-body-inner,
+  .hb-clarification-footer {
+    padding-inline: var(--spacing-3);
+  }
+
+  .hb-clarification-tabs {
+    padding-inline: var(--spacing-3);
+  }
+}

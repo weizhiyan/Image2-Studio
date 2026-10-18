@@ -1,0 +1,1264 @@
+/* 生图设置弹窗：交互与视觉对齐灵枢 ModelConfigModal 的图像配置子集，单配置轻量化。
+   所有颜色/字号/圆角/动效一律走 tokens.css 的 L1 语义变量。 */
+
+.hb-modal-overlay {
+  position: fixed;
+  inset: 0;
+  /* 要压过画布顶栏(120)/节点工具栏(96-98)/历史面板(130)：设置弹窗必须是页面最上层 */
+  z-index: 320;
+  display: grid;
+  place-items: center;
+  padding: var(--spacing-4);
+  background: color-mix(in srgb, var(--color-bg-base) 76%, transparent);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+}
+
+.model-config-modal {
+  width: min(560px, 100%);
+  /* 给配置列表和右侧表单留出完整操作空间；小屏仍由 max-height 兜底 */
+  height: 680px;
+  max-height: min(720px, calc(100dvh - 32px));
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid var(--surface-panel-border);
+  border-radius: var(--radius-lg);
+  corner-shape: var(--corner-smooth);
+  background: color-mix(in srgb, var(--surface-panel-bg) 92%, transparent);
+  box-shadow: var(--shadow-lg);
+  --enter-y: 6px;
+  --enter-scale: 0.99;
+  /* 短值下拉（默认尺寸）收窄后的宽度：刚好放得下 "1024x1024"，不占满半栏 */
+  --model-config-compact-field-width: 136px;
+  animation: spring-in var(--motion-normal) var(--ease-out) both;
+}
+
+.model-config-modal-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--spacing-3);
+  padding: var(--spacing-4) var(--spacing-4);
+  border-bottom: 1px solid var(--divider-subtle);
+  flex: none;
+}
+
+/* 眉批「绘板生图」去掉后 h2 自己占一行，不用再给它让位 */
+.model-config-modal-head h2 {
+  margin: 0;
+  color: var(--color-text-primary);
+  font-size: var(--font-size-xl);
+  line-height: 1.25;
+}
+
+.model-config-close {
+  width: 30px;
+  height: 30px;
+  flex: none;
+  display: grid;
+  place-items: center;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text-tertiary);
+  font-size: var(--font-size-lg);
+  cursor: pointer;
+  transition: background-color var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out);
+}
+
+.model-config-close:hover {
+  background: var(--control-bg-hover);
+  color: var(--color-text-primary);
+}
+
+.model-config-modal-body {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  align-content: start;
+  gap: var(--spacing-4);
+  overflow: auto;
+  padding: var(--spacing-1) 0 var(--spacing-1) var(--spacing-4);
+}
+
+.model-config-form-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--spacing-2);
+}
+
+/* 右栏分组（参考图：基础信息 / 服务连接 / 可用模型）：
+   分组只靠标题层级 + 间距区分，不套卡片——内容不多的表单一块一块包描边只会显得乱。
+   卡片感只留给左栏配置行与「可用模型」的勾选网格（它们是可扫描的列表）。 */
+.model-config-group {
+  display: grid;
+  gap: var(--spacing-3);
+}
+
+.model-config-group-title {
+  margin: 0;
+  color: var(--color-text-primary);
+  font-size: var(--font-size-md);
+  font-weight: var(--font-weight-semibold);
+  line-height: 1.4;
+}
+
+/* 可用模型两列网格（参考图）：长模型名一列放不下，两列能扫更多；
+   「获取模型」下方的勾选项就是卡片形式，与表单字段的裸输入区分开。 */
+.model-config-model-list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--spacing-2);
+  border: 0;
+  background: transparent;
+  padding: 0;
+}
+
+/* 短值字段（默认尺寸）不撑满半栏：靠左收窄，右侧空出来的位置让下一行更好对齐 */
+.model-config-form-grid > .model-config-field.is-compact {
+  justify-self: start;
+  width: var(--model-config-compact-field-width);
+}
+
+.model-config-form-grid > .model-config-field.is-compact .model-config-select {
+  width: 100%;
+}
+
+.model-config-field {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.model-config-name-row {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-2);
+  min-width: 0;
+}
+
+.model-config-name-row .model-config-input {
+  flex: 1;
+  min-width: 0;
+}
+
+.model-config-field-label {
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-sm);
+}
+
+.model-config-field input,
+.model-config-select {
+  box-sizing: border-box;
+  width: 100%;
+  height: var(--control-height);
+  min-height: var(--control-height);
+  border: 1px solid var(--control-border);
+  border-radius: var(--radius-md);
+  background: var(--control-bg);
+  color: var(--color-text-primary);
+  padding: 0 10px;
+  font-family: var(--font-sans);
+  font-size: var(--font-size-sm);
+  outline: none;
+}
+
+.model-config-select {
+  cursor: pointer;
+}
+
+.model-config-field input:focus,
+.model-config-select:focus-visible {
+  background: var(--control-bg);
+  border-color: var(--control-border-focus);
+  box-shadow: var(--focus-ring);
+}
+
+.model-config-field input::placeholder {
+  color: var(--color-text-tertiary);
+}
+
+.model-config-api-key {
+  height: var(--control-height);
+  min-height: var(--control-height);
+  display: flex;
+  align-items: center;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--control-border);
+  background: var(--control-bg);
+}
+
+.model-config-api-key input {
+  height: 100%;
+  min-height: 0;
+  border: none;
+  background: transparent;
+  box-shadow: none;
+}
+
+.model-config-api-key:focus-within {
+  border-color: var(--control-border-focus);
+  box-shadow: var(--focus-ring);
+}
+
+.model-config-api-key button {
+  width: 36px;
+  height: 100%;
+  flex-shrink: 0;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text-tertiary);
+  cursor: pointer;
+}
+
+.model-config-api-key button:hover {
+  color: var(--color-text-primary);
+}
+
+.model-config-api-key svg {
+  width: 16px;
+  height: 16px;
+}
+
+.model-config-model-picker {
+  position: relative;
+  min-width: 0;
+}
+
+.model-config-model-picker-trigger {
+  box-sizing: border-box;
+  width: 100%;
+  height: var(--control-height);
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  border: 1px solid var(--control-border);
+  border-radius: var(--radius-md);
+  background: var(--control-bg);
+  color: var(--color-text-primary);
+  padding: 0 10px;
+  font-family: var(--font-sans);
+  font-size: var(--font-size-sm);
+  text-align: left;
+  cursor: pointer;
+}
+
+.model-config-model-picker-trigger:hover,
+.model-config-model-picker-trigger:focus-visible {
+  border-color: var(--control-border-focus);
+  outline: none;
+}
+
+.model-config-model-picker-trigger > span:first-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.model-config-model-picker-menu {
+  position: absolute;
+  z-index: 3;
+  top: calc(100% + 5px);
+  right: 0;
+  left: 0;
+  max-height: 196px;
+  display: grid;
+  overflow: auto;
+  border: 1px solid var(--control-border);
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--surface-panel-bg) 96%, transparent);
+  box-shadow: var(--shadow-lg);
+  padding: 4px;
+}
+
+.model-config-model-picker-menu button,
+.model-config-model-picker-menu > span {
+  min-width: 0;
+  overflow: hidden;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text-secondary);
+  padding: var(--spacing-2);
+  font-size: var(--font-size-sm);
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.model-config-model-picker-menu button {
+  cursor: pointer;
+}
+
+.model-config-model-picker-menu button:hover,
+.model-config-model-picker-menu button[aria-selected='true'] {
+  background: var(--control-bg-hover);
+  color: var(--color-text-primary);
+}
+
+/* 可用模型区：group 只是裸标题，这里直接排布（头部信息行 + 手填 + 勾选网格） */
+.model-config-model-section {
+  display: grid;
+  gap: var(--spacing-2);
+}
+
+.model-config-model-section-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--spacing-4);
+}
+
+.model-config-model-section-title {
+  display: flex;
+  align-items: baseline;
+  gap: var(--spacing-2);
+}
+
+.model-config-model-section-title > span {
+  color: var(--color-text-tertiary);
+  font-size: var(--font-size-sm);
+  white-space: nowrap;
+}
+
+.model-config-fetch-button {
+  height: var(--control-height);
+  flex: 0 0 auto;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: var(--control-bg-active);
+  color: var(--color-text-primary);
+  padding: 0 var(--spacing-3);
+  font-size: var(--font-size-sm);
+  cursor: pointer;
+}
+
+.model-config-fetch-button:hover:not(:disabled) {
+  background: var(--control-bg-hover);
+}
+
+.model-config-fetch-button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.model-config-model-section-head > div {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+
+.model-config-model-section-head strong {
+  color: var(--color-text-primary);
+  font-size: var(--font-size-md);
+}
+
+.model-config-model-section-head span {
+  color: var(--color-text-tertiary);
+  font-size: var(--font-size-sm);
+  line-height: 1.4;
+}
+
+.model-config-model-list .model-config-model-row,
+.model-config-empty {
+  min-height: 48px;
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-2);
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--divider-subtle);
+  background: color-mix(in srgb, var(--control-bg) 86%, transparent);
+  color: var(--color-text-secondary);
+  padding: 0 10px;
+  font-size: var(--font-size-sm);
+}
+
+.model-config-model-row {
+  min-width: 0;
+  display: block;
+  padding: 0;
+  cursor: default;
+}
+
+.model-config-model-list .model-config-model-row:hover {
+  background: var(--control-bg-hover);
+  color: var(--color-text-primary);
+}
+
+.model-config-model-list .model-config-model-row:has(input:checked) {
+  border-color: var(--control-border-focus);
+  background: var(--color-ui-control-active);
+}
+
+.model-config-model-choice {
+  /* position: relative 是关键：里面那个 1px 隐藏 checkbox 是 position:absolute，
+     包含块必须落在本行内，否则它会逃出 body 的 overflow:auto 裁剪、按静态位置
+     落在弹窗下方，把弹窗的滚动区撑出几百px；一点中（label 聚焦隐藏 input）
+     浏览器"滚入视野"就会把 overflow:hidden 的弹窗整体滚走、还没有滚动条能滚回来，
+     看着就是整块白屏。关在行内后焦点 reveal 只滚 body 自己。 */
+  position: relative;
+  min-width: 0;
+  min-height: 46px;
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+  padding: var(--spacing-2) 10px;
+  color: var(--color-text-primary);
+  cursor: pointer;
+}
+
+.model-config-model-choice input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+}
+
+.model-config-checkbox {
+  width: 18px;
+  height: 18px;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--control-border);
+  border-radius: var(--radius-2xs);
+  background: var(--surface-panel-bg);
+  color: var(--color-on-accent);
+}
+
+.model-config-checkbox svg {
+  width: 12px;
+  height: 12px;
+  opacity: 0;
+}
+
+.model-config-model-choice input:checked + .model-config-checkbox {
+  border-color: var(--color-accent-blue);
+  background: var(--color-accent-blue);
+}
+
+.model-config-model-choice input:checked + .model-config-checkbox svg {
+  opacity: 1;
+}
+
+.model-config-model-choice input:focus-visible + .model-config-checkbox {
+  outline: 2px solid var(--control-border-focus);
+  outline-offset: 2px;
+}
+
+.model-config-model-choice .model-config-model-name {
+  min-width: 0;
+  color: var(--color-text-primary);
+  font-size: var(--font-size-md);
+  font-weight: var(--font-weight-medium);
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
+/* 配置没加载完 / 读取失败时的占位：绝不留一块白，要告诉用户 bridge 是不是没起 */
+.model-config-loading {
+  display: grid;
+  gap: var(--spacing-3);
+  justify-items: start;
+  padding: var(--spacing-4);
+  border: 1px solid var(--surface-panel-border);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--surface-panel-bg) 76%, var(--control-bg));
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-sm);
+  line-height: var(--line-height-normal);
+}
+
+.model-config-loading strong {
+  color: var(--color-text-primary);
+  font-size: var(--font-size-md);
+  font-weight: var(--font-weight-semibold);
+}
+
+.model-config-loading button {
+  height: var(--control-height);
+  padding: 0 var(--spacing-3);
+  border: 1px solid var(--control-border);
+  border-radius: var(--radius-sm);
+  background: var(--control-bg);
+  color: var(--color-text-primary);
+  font-family: var(--font-sans);
+  font-size: var(--font-size-sm);
+  cursor: pointer;
+  transition: background-color var(--motion-fast) var(--ease-out);
+}
+
+.model-config-loading button:hover:not(:disabled) {
+  background: var(--control-bg-hover);
+}
+
+.model-config-loading button:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
+.model-config-notice,
+.model-config-error {
+  font-size: var(--font-size-sm);
+  line-height: 1.4;
+}
+
+.model-config-notice {
+  color: var(--color-accent-green);
+}
+
+.model-config-error {
+  color: var(--color-accent-red);
+}
+
+.model-config-foot-hint {
+  color: var(--color-text-tertiary);
+  font-size: var(--font-size-xs);
+  line-height: var(--line-height-normal);
+}
+
+.model-config-modal-foot {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--spacing-3);
+  padding: var(--spacing-3) var(--spacing-4);
+  border-top: 1px solid var(--divider-subtle);
+}
+
+.model-config-state {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--spacing-3);
+  width: 100%;
+  color: var(--color-text-tertiary);
+  font-size: var(--font-size-sm);
+}
+
+.model-config-state > div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  justify-content: flex-end;
+}
+
+.model-config-state button {
+  height: var(--control-height);
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: var(--control-bg);
+  color: var(--color-text-primary);
+  padding: 0 10px;
+  font-size: var(--font-size-sm);
+  cursor: pointer;
+}
+
+.model-config-state button:hover:not(:disabled) {
+  background: var(--control-bg-hover);
+}
+
+.model-config-state button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* 保存配置：纯白底黑字（--color-paper 恒定白 + --color-ink 恒定深，两主题都成立），
+   在深色弹窗里是全页最亮的动作点，不会和「测试连接」的深底糊在一起 */
+.model-config-state .model-config-save {
+  border-color: transparent;
+  background: var(--color-paper);
+  color: var(--color-ink);
+  font-weight: var(--font-weight-medium);
+}
+
+.model-config-state .model-config-save:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--color-paper) 88%, var(--color-text-tertiary));
+}
+
+/* ── 多路生图配置：左侧配置列表 + 右侧编辑器（参考图：左栏配置卡片，右栏裸表单分组） ── */
+.model-config-modal-wide {
+  width: min(820px, 100%);
+}
+
+.model-config-split {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: 248px minmax(0, 1fr);
+  align-items: stretch;
+  gap: 0;
+  padding: var(--spacing-4);
+}
+
+/* 左栏：透明底，配置行自己是卡片；不用分区底色，少一层"块"感 */
+.model-config-profiles {
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-3);
+  padding-right: var(--spacing-4);
+  border-right: 1px solid var(--divider-subtle);
+}
+
+.model-config-split > .model-config-modal-body {
+  padding-top: 0;
+  padding-bottom: 0;
+}
+
+.model-config-profile-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: grid;
+  align-content: start;
+  gap: var(--spacing-2);
+}
+
+.model-config-profile-group {
+  display: grid;
+  gap: var(--spacing-2);
+}
+
+.model-config-profile-group + .model-config-profile-group {
+  margin-top: var(--spacing-4);
+  padding-top: var(--spacing-4);
+  border-top: 1px solid var(--divider-subtle);
+}
+
+.model-config-profile-empty {
+  color: var(--color-text-tertiary);
+  font-size: var(--font-size-2xs);
+}
+
+.model-config-profile-empty {
+  margin: 0;
+  padding: var(--spacing-2) var(--spacing-1);
+}
+
+/* 配置卡片：参考图左栏是独立圆角卡片（名称 + 模型名 + 右侧开关/删除），
+   选中态用深一档的控件底色，不用品牌色（品牌色留给主按钮） */
+.model-config-profile-row {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-2);
+  padding: var(--spacing-2) var(--spacing-3);
+  border: 0;
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--control-bg) 86%, var(--color-bg-base));
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--control-border) 52%, transparent);
+  transition: background var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out), transform var(--motion-fast) var(--ease-out);
+}
+
+.model-config-profile-row:hover {
+  background: var(--control-bg-hover);
+  box-shadow: inset 0 0 0 1px var(--control-border-hover), var(--shadow-sm);
+  transform: translateY(-1px);
+}
+
+.model-config-profile-row.selected {
+  background: var(--color-ui-control-active);
+}
+
+/* 停用的配置整行置灰（与 switch:disabled 同款透明度，颜色仍走 token） */
+.model-config-profile-row.is-disabled {
+  opacity: 1;
+}
+
+.model-config-profile-row.is-disabled:hover {
+  background: var(--control-bg-hover);
+}
+
+.model-config-profile-row.is-disabled.selected {
+  background: var(--color-ui-control-active);
+}
+
+.model-config-profile-main {
+  flex: 1;
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+  border: 0;
+  background: transparent;
+  color: var(--color-text-primary);
+  padding: var(--spacing-2) var(--spacing-2) var(--spacing-2) var(--spacing-1);
+  text-align: left;
+  cursor: pointer;
+}
+
+.model-config-profile-main strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-medium);
+}
+
+.model-config-profile-main small {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-xs);
+}
+
+.model-config-profile-actions {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--spacing-1);
+  padding-right: var(--spacing-1);
+}
+
+.model-config-profile-delete {
+  min-width: var(--icon-glyph-sm);
+  min-height: var(--icon-glyph-sm);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: var(--radius-xs);
+  background: transparent;
+  color: var(--color-text-tertiary);
+  padding: 0;
+  cursor: pointer;
+  transition: background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out);
+}
+
+/* 配置行开关（参考图）：36×20 圆角轨道 + 白滑块；on 态品牌色底。
+   生图多路各自独立开关，语言模型互斥（点击时 toggleDraftEnabled 让位旧的那路）。 */
+.model-config-profile-switch {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+}
+
+.model-config-profile-switch-track {
+  width: 36px;
+  height: 20px;
+  display: inline-flex;
+  align-items: center;
+  padding: 2px;
+  border: 1px solid var(--color-ui-border);
+  border-radius: var(--radius-full);
+  background: var(--color-ui-control);
+  transition: background var(--motion-normal) var(--ease-out), border-color var(--motion-normal) var(--ease-out);
+}
+
+.model-config-profile-switch-track > i {
+  width: 14px;
+  height: 14px;
+  border-radius: var(--radius-full);
+  background: var(--color-text-tertiary);
+  transition: transform var(--motion-normal) var(--ease-out), background var(--motion-normal) var(--ease-out);
+}
+
+.model-config-profile-switch.on .model-config-profile-switch-track {
+  border-color: var(--color-brand);
+  background: var(--color-brand);
+}
+
+.model-config-profile-switch.on .model-config-profile-switch-track > i {
+  transform: translateX(16px);
+  background: var(--color-paper);
+}
+
+.model-config-profile-switch:hover .model-config-profile-switch-track {
+  border-color: var(--control-border-hover);
+}
+
+.model-config-profile-delete svg {
+  width: 14px;
+  height: 14px;
+}
+
+.model-config-profile-delete:hover {
+  background: var(--color-ui-control-hover);
+  color: var(--color-text-primary);
+}
+
+.model-config-profile-add {
+  flex: none;
+  min-height: 34px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--spacing-1);
+  border: 1px dashed var(--control-border);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  font-size: var(--font-size-sm);
+  transition: background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out);
+}
+
+.model-config-profile-add svg {
+  width: 14px;
+  height: 14px;
+}
+
+.model-config-profile-add:hover {
+  background: var(--control-bg-hover);
+  color: var(--color-text-primary);
+}
+
+/* 手填模型名：列表接口不可用时的兜底入口 */
+.model-config-model-manual {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-2);
+  margin-bottom: var(--spacing-2);
+}
+
+.model-config-model-manual input {
+  flex: 1;
+  min-width: 0;
+  box-sizing: border-box;
+  height: 30px;
+  border: 1px solid var(--control-border);
+  border-radius: var(--radius-sm);
+  background: var(--control-bg);
+  color: var(--color-text-primary);
+  padding: 0 var(--spacing-2);
+  font-size: var(--font-size-sm);
+}
+
+.model-config-model-manual input:focus {
+  outline: none;
+  border-color: var(--control-border-focus);
+  box-shadow: var(--focus-ring);
+}
+
+.model-config-model-manual button {
+  flex: none;
+  min-height: 30px;
+  border: 1px solid var(--control-border);
+  border-radius: var(--radius-sm);
+  background: var(--control-bg);
+  color: var(--color-text-secondary);
+  padding: 0 var(--spacing-3);
+  cursor: pointer;
+  font-size: var(--font-size-sm);
+}
+
+.model-config-model-manual button:hover:not(:disabled) {
+  background: var(--control-bg-hover);
+  color: var(--color-text-primary);
+}
+
+.model-config-model-manual button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.model-config-input {
+  box-sizing: border-box;
+  width: 100%;
+}
+
+/* ── 两类配置：生图 / 语言 ── */
+.model-config-profile-kind {
+  display: inline-block;
+  margin-right: var(--spacing-1);
+  padding: 0 var(--spacing-1);
+  border-radius: var(--radius-2xs);
+  background: color-mix(in srgb, var(--color-text-tertiary) 16%, transparent);
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-xs);
+}
+
+.model-config-profile-kind.is-text {
+  background: color-mix(in srgb, var(--color-accent-purple) 20%, transparent);
+  color: var(--color-accent-purple);
+}
+
+.model-config-profile-adds {
+  display: grid;
+  gap: var(--spacing-2);
+}
+
+.model-config-profile-add.is-text {
+  color: var(--color-accent-purple);
+}
+
+/* 未配好模型的黄字警告：进设置就能看到，不用等画布上生成失败才反推 */
+.model-config-warn {
+  margin: 0 0 var(--spacing-2);
+  padding: var(--spacing-2) var(--spacing-3);
+  border: 1px solid color-mix(in srgb, var(--color-accent-amber) 40%, transparent);
+  border-radius: var(--radius-sm);
+  background: var(--color-accent-amber-subtle);
+  color: var(--color-accent-amber);
+  font-size: var(--font-size-xs);
+  line-height: 1.6;
+}
+
+/* 偏好档案开关：沿用统一的轨道语义 */
+.model-config-enhance-switch {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--spacing-2);
+  height: 34px;
+  padding: 0 var(--spacing-3);
+  border: 1px solid var(--color-ui-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-ui-control);
+  color: var(--color-text-tertiary);
+  font-family: var(--font-sans);
+  font-size: var(--font-size-xs);
+  cursor: pointer;
+  transition: background var(--motion-normal) var(--ease-out), border-color var(--motion-normal) var(--ease-out), color var(--motion-normal) var(--ease-out);
+}
+
+.model-config-enhance-switch:hover:not(:disabled),
+.model-config-enhance-switch:focus-visible:not(:disabled) {
+  border-color: var(--control-border-hover);
+  color: var(--color-text-secondary);
+}
+
+.model-config-enhance-switch:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.model-config-enhance-switch-track {
+  width: 30px;
+  height: 18px;
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  padding: 2px;
+  border: 1px solid var(--color-ui-border);
+  border-radius: var(--radius-full);
+  background: var(--color-ui-control);
+  transition: background var(--motion-normal) var(--ease-out), border-color var(--motion-normal) var(--ease-out);
+}
+
+.model-config-enhance-switch-track > i {
+  width: 12px;
+  height: 12px;
+  border-radius: var(--radius-full);
+  background: var(--color-text-tertiary);
+  transition: transform var(--motion-normal) var(--ease-out), background var(--motion-normal) var(--ease-out);
+}
+
+.model-config-enhance-switch.on {
+  border-color: var(--color-brand);
+  color: var(--color-text-primary);
+}
+
+.model-config-enhance-switch.on .model-config-enhance-switch-track {
+  border-color: var(--color-brand);
+  background: var(--color-brand);
+}
+
+.model-config-enhance-switch.on .model-config-enhance-switch-track > i {
+  transform: translateX(12px);
+  background: var(--color-on-accent);
+}
+
+.model-config-switch {
+  width: 40px;
+  height: 22px;
+  flex: none;
+  display: flex;
+  align-items: center;
+  padding: 2px;
+  border: 1px solid var(--color-ui-border);
+  border-radius: var(--radius-full);
+  background: var(--color-ui-control);
+  cursor: pointer;
+  transition: background var(--motion-normal) var(--ease-out), border-color var(--motion-normal) var(--ease-out);
+}
+
+.model-config-switch > span {
+  width: 16px;
+  height: 16px;
+  border-radius: var(--radius-full);
+  background: var(--color-text-tertiary);
+  transition: transform var(--motion-normal) var(--ease-out), background var(--motion-normal) var(--ease-out);
+}
+
+.model-config-switch.on {
+  border-color: var(--color-brand);
+  background: var(--color-brand);
+}
+
+.model-config-switch.on > span {
+  transform: translateX(18px);
+  background: var(--color-on-accent);
+}
+
+.model-config-model-picker-menu button small {
+  display: block;
+  color: var(--color-text-tertiary);
+  font-size: var(--font-size-xs);
+}
+
+/* 错误条贴在弹窗头部下方：保存/测试失败时不需要翻到底部就能看到原因 */
+.model-config-error-bar {
+  flex: none;
+  display: flex;
+  align-items: flex-start;
+  gap: var(--spacing-2);
+  margin: 0 var(--spacing-4);
+  padding: var(--spacing-2) var(--spacing-3);
+  border-radius: var(--radius-2xs);
+  background: color-mix(in srgb, var(--color-accent-red) 16%, transparent);
+  color: var(--color-text-primary);
+  font-size: var(--font-size-xs);
+  line-height: 1.5;
+}
+
+.model-config-error-bar strong {
+  flex: none;
+  color: var(--color-accent-red);
+  font-weight: var(--font-weight-semibold);
+}
+
+/* 保存/获取成功的状态条：与错误条同款版式，固定在标题区（以前在 body 最底部，
+   内容一多滚走就看不见"已保存"）。用 > 限定只作用于弹窗直属的那一条。 */
+.model-config-modal > .model-config-notice {
+  flex: none;
+  display: flex;
+  align-items: flex-start;
+  gap: var(--spacing-2);
+  margin: var(--spacing-2) var(--spacing-4) 0;
+  padding: var(--spacing-2) var(--spacing-3);
+  border-radius: var(--radius-2xs);
+  background: color-mix(in srgb, var(--color-accent-green) 16%, transparent);
+  color: var(--color-text-primary);
+  font-size: var(--font-size-xs);
+  line-height: 1.5;
+}
+
+/* 模型优化一行：裸开关 + 文案 + 三档强度（一个选项，不拆成三个开关） */
+
+.model-config-enhance-switch.is-bare {
+  padding: 0 var(--spacing-2);
+}
+
+
+/* 整理强度三档：分段轨道，选中态用品牌色（灵枢同款分段控件语义） */
+
+
+
+
+/* 偏好档案：归纳 + 灯箱手动录入，只在优化这一层注入 */
+.model-config-prefs {
+  display: grid;
+  gap: var(--spacing-2);
+  padding-top: var(--spacing-3);
+  border-top: 1px solid var(--divider-subtle);
+}
+
+.model-config-prefs-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--spacing-3);
+}
+
+.model-config-prefs-head strong {
+  display: block;
+  color: var(--color-text-primary);
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-semibold);
+}
+
+.model-config-prefs-head span {
+  display: block;
+  margin-top: 2px;
+  color: var(--color-text-tertiary);
+  font-size: var(--font-size-xs);
+  line-height: 1.5;
+}
+
+.model-config-prefs-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-2);
+}
+
+.model-config-prefs-action {
+  height: 28px;
+  padding: 0 var(--spacing-3);
+  border: 1px solid var(--color-ui-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-ui-control);
+  color: var(--color-text-secondary);
+  font-family: var(--font-sans);
+  font-size: var(--font-size-xs);
+  cursor: pointer;
+  transition: background var(--motion-normal) var(--ease-out), border-color var(--motion-normal) var(--ease-out), color var(--motion-normal) var(--ease-out);
+}
+
+.model-config-prefs-action:hover:not(:disabled) {
+  border-color: var(--control-border-hover);
+  background: var(--control-bg-hover);
+  color: var(--color-text-primary);
+}
+
+.model-config-prefs-action:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.model-config-prefs-notice {
+  margin: 0;
+  color: var(--color-text-tertiary);
+  font-size: var(--font-size-xs);
+  line-height: 1.6;
+}
+
+.model-config-prefs-list {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: var(--spacing-2);
+  max-height: 132px;
+  overflow-y: auto;
+}
+
+.model-config-prefs-empty {
+  margin: 0;
+  color: var(--color-text-tertiary);
+  font-size: var(--font-size-xs);
+  line-height: 1.6;
+}
+
+.model-config-prefs-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--spacing-2);
+  max-width: 100%;
+  padding: 4px var(--spacing-2);
+  border: 1px solid var(--color-ui-border);
+  border-radius: var(--radius-xs);
+  background: color-mix(in srgb, var(--surface-section-bg) 72%, transparent);
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-xs);
+}
+
+.model-config-prefs-chip > i {
+  flex: none;
+  padding: 1px 6px;
+  border-radius: var(--radius-2xs);
+  font-style: normal;
+  font-size: var(--font-size-xs);
+}
+
+.model-config-prefs-chip > i.is-manual {
+  background: color-mix(in srgb, var(--color-accent-blue) 20%, transparent);
+  color: var(--color-accent-blue);
+}
+
+.model-config-prefs-chip > i.is-auto {
+  background: color-mix(in srgb, var(--color-accent-purple) 20%, transparent);
+  color: var(--color-accent-purple);
+}
+
+.model-config-prefs-chip > em {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-style: normal;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.model-config-prefs-chip > button {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  border: none;
+  border-radius: var(--radius-full);
+  background: transparent;
+  color: var(--color-text-tertiary);
+  font-size: var(--font-size-xs);
+  line-height: 1;
+  cursor: pointer;
+  transition: background var(--motion-normal) var(--ease-out), color var(--motion-normal) var(--ease-out);
+}
+
+.model-config-prefs-chip > button:hover {
+  background: color-mix(in srgb, var(--color-accent-red) 16%, transparent);
+  color: var(--color-accent-red);
+}
+
+/* 设置弹窗 Tab：模型配置 / 偏好档案（下划线指示当前页） */
+.model-config-tabs {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-1);
+  padding: var(--spacing-2) var(--spacing-4) 0;
+  border-bottom: 1px solid var(--divider-subtle);
+}
+
+.model-config-tab {
+  position: relative;
+  height: 32px;
+  padding: 0 var(--spacing-3);
+  border: none;
+  border-radius: var(--radius-sm) var(--radius-sm) 0 0;
+  background: transparent;
+  color: var(--color-text-tertiary);
+  font-family: var(--font-sans);
+  font-size: var(--font-size-sm);
+  cursor: pointer;
+  transition: background var(--motion-normal) var(--ease-out), color var(--motion-normal) var(--ease-out);
+}
+
+.model-config-tab:hover {
+  background: var(--control-bg-hover);
+  color: var(--color-text-secondary);
+}
+
+.model-config-tab.active {
+  color: var(--color-text-primary);
+  font-weight: var(--font-weight-semibold);
+}
+
+.model-config-tab.active::after {
+  content: "";
+  position: absolute;
+  left: var(--spacing-3);
+  right: var(--spacing-3);
+  bottom: -1px;
+  height: 2px;
+  border-radius: var(--radius-full);
+  background: var(--color-text-primary);
+}
+
+/* 偏好档案 Tab：单列面板，不吃模型配置那套左右分栏 */
+.model-config-tab-panel {
+  align-content: start;
+}
+
+.model-config-tab-panel .model-config-prefs {
+  margin: 0;
+  padding: var(--spacing-4);
+  border: 1px solid var(--divider-subtle);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--surface-section-bg) 72%, transparent);
+}
+
+.model-config-tab-panel .model-config-prefs-list {
+  max-height: 300px;
+}

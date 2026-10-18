@@ -1,0 +1,279 @@
+/* 生成设置弹窗（比例 / 画质 / 数量 三段横向 Tab，Figma 2665:1983 定稿）与整理强度弹窗的覆盖层样式。
+ *
+ * ── 弹窗材质统一（2026-09-26 定稿）──
+ * 所有「下拉选择的弹窗」（节点工具栏的模型下拉 / 整理强度 / 生成设置，画布上的添加菜单 /
+ * 画布切换 / 生成历史）共用 tokens.css 的 --surface-popover-glass-* 一族：
+ * 同一底色、同一模糊、同一投影，不再各写一套 color-mix 与 blur 参数。
+ * 本文件只保留尺寸与排版权（圆角、264 宽、Tab 槽）与覆盖层职责：
+ * ImageNodes.css 是灵枢原封拷贝（禁改），本文件在 CanvasPage 的 import 顺序里
+ * 排在它之后，同特异性即可盖过。
+ * 2026-09-26 按 Figma 2665:1983 改版：三段从纵向列表改为横向 Tab 槽（分段控件语义）。 */
+
+:root {
+  /* 兜底值：正式取值统一走 tokens.css 的 --surface-popover-glass-* 一族
+     （底色 / 模糊 / 投影），本文件不再自造第二套玻璃参数 */
+  --gen-popover-shadow: var(--surface-popover-glass-shadow);
+}
+
+/* 生成设置弹窗的圆角单独走大一档（--radius-lg）：它比整理强度弹窗高一半，
+   按 AGENTS.md 的圆角分档表取 ≥60px 那一档；底色 / 模糊 / 投影见下面统一规则。 */
+.image-node-toolbar .gen-settings-popover {
+  border-radius: var(--radius-lg);
+}
+
+/* ── 弹层材质统一：节点工具栏里这三个下拉浮层（模型下拉 / 生成设置 / 整理强度）
+   与画布上其余浮层（添加菜单 / 画布切换 / 生成历史）同一套玻璃。 */
+.image-node-toolbar .image-node-settings-popover,
+.image-node-toolbar .image-model-picker {
+  /* 整理强度与生成设置是同一个 .image-node-settings-popover，一起收敛 */
+  background: var(--surface-popover-glass-bg);
+  backdrop-filter: var(--surface-popover-glass-blur);
+  -webkit-backdrop-filter: var(--surface-popover-glass-blur);
+  box-shadow: var(--surface-popover-glass-shadow);
+}
+
+/* ── 模型下拉选中态：底色之外再加一枚对勾 ──
+   玻璃浮层上只靠背景色区分「选中的是哪一路」不够明确（多路配置同名模型时分不清），
+   所以选中项右侧固定一枚对勾；文字列仍然占满剩余宽度，长模型名照常省略。 */
+.image-node-model-picker .image-model-options button {
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--spacing-2);
+}
+
+.image-node-model-picker .image-model-option-text {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.image-node-model-picker .image-model-option-check {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--color-accent-blue);
+}
+
+.image-node-model-picker .image-model-option-check svg {
+  width: 16px;
+  height: 16px;
+}
+
+/* ── 比例档位文案钉死一档宽（--spacing-8）：档位字数不同（自动 / 16:9 / 9:16），
+   宽度跟着跳会让后面的开关整列左右位移，固定宽度后切换只换字不换位置。
+   flex: none 必须写：span 是按钮 flex 容器的子项，默认 flex-shrink 会把指定宽度
+   压回文字 min-content，档位一变宽度又跟着跳。 */
+.image-node-toolbar .image-node-toolbar-ratio-label {
+  flex: none;
+  width: var(--spacing-8);
+  text-align: center;
+}
+
+/* ── 弹窗尺寸：Figma 定稿 264 宽（含 8px 内边距，内容 248）──
+   横向 Tab 段落宽固定，不需要 width: max-content；超窄屏收进视口。 */
+.image-node-toolbar .gen-settings-popover {
+  width: 264px;
+  max-width: min(calc(100vw - 24px), 264px);
+  max-height: min(70vh, 560px);
+  padding: var(--spacing-2);
+  gap: var(--spacing-2);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+/* ── 分段：小标题 + Tab 槽，三段（比例 / 画质 / 数量）各自一组 ── */
+.gen-settings-block {
+  display: grid;
+  gap: 2px;
+}
+
+/* 分段小标题：小字号 + 弱化色，左缩进与 Tab 内容对齐，保持同一节奏 */
+.gen-settings-block-title {
+  padding-left: var(--spacing-1);
+  color: var(--color-text-tertiary);
+  font-size: var(--font-size-xs);
+  line-height: 20px;
+  white-space: nowrap;
+}
+
+/* ── Tab 槽：分段控件轨道（复用 --segment-* 一族 token，与全局 Segmented 同材质）──
+   滑块位置由 TSX 写行内变量 --gen-tab-index / --gen-tab-count（本处的声明是兜底值，
+   避免幽灵 Token）；档位数固定，几何用槽内边距 + 间距反推，换档只是滑块位移。 */
+.gen-settings-tabs {
+  position: relative;
+  isolation: isolate;
+  --gen-tab-index: 0;
+  --gen-tab-count: 1;
+  --gen-tab-gap: 2px;
+  --gen-tab-pad: 2px;
+  display: flex;
+  gap: var(--gen-tab-gap);
+  padding: var(--gen-tab-pad);
+  border-radius: var(--radius-sm);
+  background: var(--segment-track-bg);
+}
+
+/* 滑块：按档位数等分槽宽，切换时滑过去（不用 JS 量宽度，档位数是已知的） */
+.gen-settings-tabs::after {
+  content: '';
+  position: absolute;
+  z-index: 0;
+  top: var(--gen-tab-pad);
+  bottom: var(--gen-tab-pad);
+  left: var(--gen-tab-pad);
+  width: calc((100% - var(--gen-tab-pad) * 2 - (var(--gen-tab-count) - 1) * var(--gen-tab-gap)) / var(--gen-tab-count));
+  border-radius: var(--radius-xs);
+  background: var(--segment-thumb-bg);
+  box-shadow: var(--segment-thumb-shadow);
+  transform: translateX(calc(var(--gen-tab-index) * (100% + var(--gen-tab-gap))));
+  transition: transform var(--motion-normal) var(--ease-emphasized);
+}
+
+/* ── Tab 项：画质 / 数量是纯文字，比例带形状缩略（tab-stack 纵排）── */
+.gen-settings-tab {
+  position: relative;
+  z-index: 1;
+  flex: 1 0 0;
+  min-width: 0;
+  height: 32px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--spacing-1);
+  border: 0;
+  border-radius: var(--radius-xs);
+  background: transparent;
+  color: var(--color-text-secondary);
+  padding: 0;
+  cursor: pointer;
+  font-family: var(--font-sans);
+  font-size: var(--font-size-base);
+  line-height: 1.2;
+  transition: background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out);
+}
+
+.gen-settings-tab:hover {
+  color: var(--color-text-primary);
+}
+
+/* 选中态的底色由上面的滑块给：这里只留文字提亮，避免两层底色叠在一起 */
+.gen-settings-tab.active {
+  background: transparent;
+  color: var(--color-text-primary);
+}
+
+/* 切档时内容轻弹一下：滑块负责位移，文字/图标负责「落位」的重量感 */
+@keyframes gen-settings-tab-pop {
+  from {
+    transform: scale(0.9);
+  }
+
+  to {
+    transform: scale(1);
+  }
+}
+
+.gen-settings-tab.active > * {
+  animation: gen-settings-tab-pop var(--motion-fast) var(--ease-emphasized);
+}
+
+/* 比例 Tab：图标在上、文案在下（Figma Tab 高 53px：图标 20 + 间距 4 + 文案 13 + 内边距 16） */
+.gen-settings-tab-stack {
+  flex-direction: column;
+  justify-content: center;
+  gap: var(--spacing-1);
+  height: 56px;
+  padding: var(--spacing-2);
+  font-size: var(--font-size-xs);
+}
+
+.gen-settings-tab-stack > svg {
+  flex: 0 0 auto;
+}
+
+/* 比例形状缩略：外层固定 20×20 的占位盒（和「自动」档那个 20px 图标齐平，四个 Tab 的图标
+   外框因此一样大），里面用 ::before 画宽窄不一的矩形，视觉重心仍在同一基线上。 */
+.gen-settings-shape {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+}
+
+.gen-settings-shape::before {
+  content: '';
+  display: block;
+  border: 1.5px solid var(--color-text-tertiary);
+  border-radius: var(--radius-2xs);
+  opacity: 0.4;
+}
+
+.gen-settings-shape[data-shape="1:1"]::before {
+  width: 14px;
+  height: 14px;
+}
+
+.gen-settings-shape[data-shape="16:9"]::before {
+  width: 18px;
+  height: 10px;
+}
+
+.gen-settings-shape[data-shape="9:16"]::before {
+  width: 10px;
+  height: 18px;
+}
+
+.gen-settings-tab.active .gen-settings-shape {
+  border-color: var(--color-text-primary);
+  opacity: 1;
+}
+
+/* ── 工具栏防挤压（2026-09-26 修）：Figma 图标 20px 比原手写 16px 大，
+   四个按钮（模型 / 比例 / 优化开关 / 均衡）内容总宽超出容器时，
+   inline-flex 默认 flex-shrink 把文字 span 压成 width:0——工具栏只剩图标、文字全消失。
+   这里给按钮与其文字 span 上 flex: 0 0 auto：按钮按内容自然展开，不再收缩。
+   规则放本文件（NodeGenerationToolbar 的 CSS）：ImageNodes.css 禁改，
+   本文件注入顺序在其后，双保险。 */
+.image-node-toolbar .image-node-toolbar-item {
+  flex: 0 0 auto;
+}
+
+/* 只针对文字 span：两类 span 要被排除，别让 width:auto 覆盖它们的定宽——
+   1. 模型优化开关的轨道（--switch-track 自带 30×18 定宽），一并吃 width:auto 会被 flex
+      收缩成 18px 的正圆——「开关变成一个紫点」就是这么来的；
+   2. 比例档位文案（--ratio-label，ImageNodes.css 给它钉死一档宽，档位切换时工具栏不抖），
+      width:auto 会让宽度跟着「自动 / 16:9 / 9:16」的字数跳。 */
+.image-node-toolbar .image-node-toolbar-item span:not(.image-node-toolbar-switch-track):not(.image-node-toolbar-ratio-label) {
+  flex: 0 0 auto;
+  width: auto;
+  min-width: 0;
+}
+
+/* ── 工具栏度量对齐 Figma 2664:1903 ─────────────────────────────────────
+   上面的 flex 规则保证按钮不被压扁；这里补的是「压不扁之后」的间距细节。
+   ImageNodes.css 的基础规则（禁改）是通用控件档（字号 sm 12px / gap 4 /
+   开关左内边距 10 / 合并组 gap 2+padding 2），按定稿逐项还原：
+   - 文案 13px（定稿 text-13px，与正文 --font-size-base 同档）
+   - 选择模型钮：图标 → 文字 6px（内部再包了一层 gap-6 的组），文字 → 箭头 4px
+   - 比例钮：图标 / 文字 / 箭头之间一律 4px（定稿 gap-4）
+   - 模型优化开关组：左内边距 8、内部 gap 4（定稿 122px 宽）
+   - 开关与整理强度相邻无缝隙（定稿 184px = 122 + 62） */
+.image-node-toolbar .image-node-toolbar-model > svg:first-child {
+  margin-right: 2px;
+}
+
+.image-node-toolbar .image-node-toolbar-item {
+  font-size: var(--font-size-base);
+}
+
+.image-node-toolbar .image-node-toolbar-switch {
+  gap: 4px;
+  padding-left: 8px;
+}
+
+.image-node-toolbar .image-node-toolbar-merge {
+  flex: 0 0 auto;
+  gap: 0;
+  padding: 0;
+}

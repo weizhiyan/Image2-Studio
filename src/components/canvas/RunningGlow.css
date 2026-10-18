@@ -1,0 +1,115 @@
+/* ── 生成中节点的动态流体渐变描边 ────────────────────────────────────────────
+   只在 FlowImageNode 的 is-running 态挂载（见 .image-node-running-border）：
+   两种生成阶段都在节点最外层挂一圈旋转的 conic 流光边，composer 运行态与图片结果节点运行态通用。
+   视觉权重向「选中态」看齐：ImageNodes.css 的 .image-flow-node.selected 是
+   2px / 80% 白 outline（offset 4px），这里取同档粗细与亮度。
+   环宽 2px 落在卡片外沿：不压卡片内容、不挡连接点（span 排在句柄之前，
+   且 pointer-events: none）。两种阶段的描边内部都使用灵枢同源的点阵移动动画。
+
+   - is-running-direct（默认 / 本次直连）：白系渐变，描边比原来略宽
+   - is-running-enhanced（runningDirect === false，模型优化在跑）：品牌紫 + 亮白
+   白色高亮段比原来更宽，让智能生成态的状态层次更清晰。 */
+
+:root {
+  /* 自定义时长 token：旋转一圈 1.9s（取色台定稿值，比原来的 3s 更利落） */
+  --image-node-running-flow-duration: var(--motion-loop-fluid);
+  /* conic 渐变旋转角：由下面的 @property 注册为 <angle> 才能被动画插值。
+     未注册（老浏览器）时这条声明兜底保证 var() 有定义——角度动画退化成两端同色的
+     离散翻转（视觉上等于静态渐变描边）。 */
+  --image-node-running-angle: 0deg;
+}
+
+/* 把渐变角注册成可插值的 <angle>：conic-gradient 的 from 角才能平滑转动 */
+@property --image-node-running-angle {
+  syntax: '<angle>';
+  inherits: true;
+  initial-value: 0deg;
+}
+
+.image-node-running-border {
+  position: absolute;
+  inset: 0;
+  border-radius: var(--radius-lg);
+  pointer-events: none;
+}
+
+/* 流光边：conic 渐变铺满后用 mask 挖空中间，只留外沿 2px 一环；
+   角度 0 → 360deg 循环，首尾同色所以闭合处没有接缝。 */
+.image-node-running-border::before {
+  content: '';
+  position: absolute;
+  inset: -2px;
+  box-sizing: border-box;
+  padding: 2px;
+  border-radius: inherit;
+  /* 默认态 = 直连：白系渐变旋转（纸色 ↔ 正文白） */
+  background: conic-gradient(
+    from var(--image-node-running-angle),
+    color-mix(in srgb, var(--color-paper) 30%, transparent) 0%,
+    var(--color-paper) 22%,
+    color-mix(in srgb, var(--color-text-primary) 40%, var(--color-paper)) 40%,
+    var(--color-text-primary) 50%,
+    color-mix(in srgb, var(--color-text-primary) 34%, var(--color-paper)) 60%,
+    var(--color-paper) 80%,
+    color-mix(in srgb, var(--color-paper) 30%, transparent) 100%
+  );
+  /* 环：两层同色遮罩分别裁到 content-box / border-box 再做排除（exclude / xor），
+     只留外沿 2px 一环，中间透出卡片内容。注意两层 mask-image 必须都写，
+     层数由 mask-image 定，少一层就没有配对对象、挖不出洞。 */
+  -webkit-mask-image: linear-gradient(#000, #000), linear-gradient(#000, #000);
+  -webkit-mask-clip: content-box, border-box;
+  -webkit-mask-composite: xor;
+  mask-image: linear-gradient(#000, #000), linear-gradient(#000, #000);
+  mask-clip: content-box, border-box;
+  mask-composite: exclude;
+  animation: image-node-running-flow var(--image-node-running-flow-duration) var(--ease-linear) infinite;
+}
+
+/* 模型优化态（runningDirect === false）：紫色收窄，亮白段拉长。 */
+.image-node-running-border.is-running-enhanced::before {
+  padding: 2px;
+  background: conic-gradient(
+    from var(--image-node-running-angle),
+    color-mix(in srgb, var(--color-brand) 34%, transparent) 0%,
+    var(--color-brand) 10%,
+    color-mix(in srgb, var(--color-paper) 48%, var(--color-brand)) 22%,
+    var(--color-paper) 36%,
+    var(--color-paper) 70%,
+    color-mix(in srgb, var(--color-brand-hover) 34%, var(--color-paper)) 82%,
+    var(--color-brand) 90%,
+    color-mix(in srgb, var(--color-brand) 34%, transparent) 100%
+  );
+}
+
+/* 直连生成：白色高亮收短，低强度的白色尾段拉长，避免整圈过曝。 */
+.image-node-running-border.is-running-direct::before {
+  padding: 2px;
+  background: conic-gradient(
+    from var(--image-node-running-angle),
+    color-mix(in srgb, var(--color-text-primary) 18%, transparent) 0%,
+    color-mix(in srgb, var(--color-text-primary) 42%, transparent) 18%,
+    color-mix(in srgb, var(--color-text-primary) 68%, transparent) 30%,
+    var(--color-text-primary) 40%,
+    var(--color-text-primary) 50%,
+    color-mix(in srgb, var(--color-text-primary) 56%, transparent) 62%,
+    color-mix(in srgb, var(--color-text-primary) 24%, transparent) 80%,
+    color-mix(in srgb, var(--color-text-primary) 18%, transparent) 100%
+  );
+}
+
+@keyframes image-node-running-flow {
+  from {
+    --image-node-running-angle: 0deg;
+  }
+
+  to {
+    --image-node-running-angle: 360deg;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  /* 减弱动效：流光停住成一圈静态渐变描边（对齐 ImageNodes.css 的降级写法） */
+  .image-node-running-border::before {
+    animation: none;
+  }
+}

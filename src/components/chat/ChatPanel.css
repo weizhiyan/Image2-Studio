@@ -1,0 +1,2043 @@
+/* 对话面板：右下角 AI 按钮 + 悬浮卡片（方案 §5/§6）。
+   样式纪律同全项目：颜色 / 字号 / 圆角 / 动效只写 var(--…)，
+   布局尺寸（宽高 / 内外边距像素）不受此限。透明度分层：
+   组件规则体里只 var()，局部观感一律引用 L1 语义 Token。 */
+
+/* ── 入口按钮：白色入口与主操作保持明确对比 ── */
+.hb-chat-fab {
+  position: absolute;
+  right: var(--spacing-6);
+  bottom: var(--spacing-6);
+  z-index: 90;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 44px;
+  height: 44px;
+  padding: 0 var(--spacing-3);
+  gap: var(--spacing-2);
+  border: 1px solid var(--control-border);
+  border-radius: var(--radius-full);
+  background: var(--color-paper);
+  color: var(--color-shadow);
+  box-shadow: var(--work-dialog-shadow);
+  cursor: pointer;
+  transition: box-shadow var(--motion-fast) var(--ease-out), transform var(--motion-fast) var(--ease-out);
+}
+
+.hb-chat-fab-label {
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-medium);
+  white-space: nowrap;
+}
+
+.hb-chat-fab:hover {
+  box-shadow: var(--surface-popover-glass-shadow);
+  transform: translateY(-1px);
+}
+
+.hb-chat-fab > svg {
+  flex: 0 0 auto;
+}
+
+/* 有未读生成结果时的小绿点：面板收着也知道里面刚出过图 */
+.hb-chat-fab-dot {
+  position: absolute;
+  top: 9px;
+  right: 9px;
+  width: 8px;
+  height: 8px;
+  border-radius: var(--radius-full);
+  background: var(--color-accent-green);
+}
+
+/* ── 抽屉外壳：右下角悬浮卡片（不是整侧抽屉）── */
+.hb-chat-panel {
+  --hb-chat-width: 360px;
+  --hb-chat-panel-radius: var(--radius-xl);
+  /* 收起时只剩右下角 44px 的可见区域，圆角必须比控件小，
+     否则会把这块区域渲染成一个明显的圆形。 */
+  --hb-chat-collapse-radius: var(--radius-2xs);
+  position: absolute;
+  right: var(--spacing-3);
+  bottom: var(--spacing-3);
+  z-index: 130;
+  display: flex;
+  flex-direction: column;
+  width: var(--hb-chat-width);
+  /* 最大高度不贴窗口上下沿：留 24px 呼吸位 */
+  height: calc(100dvh - 24px);
+  max-width: calc(100vw - 24px);
+  border: 0;
+  border-radius: var(--hb-chat-panel-radius);
+  /* 与生成历史弹窗同一套玻璃：半透明底 + 背景模糊，替代原先的不透明面板色 */
+  background: var(--surface-popover-glass-bg);
+  backdrop-filter: var(--surface-popover-glass-blur);
+  -webkit-backdrop-filter: var(--surface-popover-glass-blur);
+  box-shadow: var(--surface-popover-glass-shadow);
+  overflow: hidden;
+  /* 右下角是稳定锚点：面板像从 FAB 内部展开，不会把右下角视觉基准推走。 */
+  transform-origin: right bottom;
+  will-change: clip-path, border-radius, opacity, transform;
+  animation: hb-chat-panel-enter var(--motion-slower) var(--ease-emphasized) both;
+}
+
+.hb-chat-panel.is-leaving {
+  animation: hb-chat-panel-leave var(--motion-slower) var(--ease-chat-collapse) both;
+}
+
+@keyframes hb-chat-panel-enter {
+  from {
+    opacity: 0;
+    clip-path: inset(calc(100% - 44px) 0 0 calc(100% - 44px) round var(--hb-chat-collapse-radius));
+    border-radius: var(--hb-chat-collapse-radius);
+    transform: translateY(8px) scale(0.97);
+  }
+  to {
+    opacity: 1;
+    clip-path: inset(0 0 0 0 round var(--hb-chat-panel-radius));
+    border-radius: var(--hb-chat-panel-radius);
+    transform: translateY(0);
+  }
+}
+
+@keyframes hb-chat-panel-leave {
+  from {
+    opacity: 1;
+    clip-path: inset(0 0 0 0 round var(--hb-chat-panel-radius));
+    border-radius: var(--hb-chat-panel-radius);
+    transform: translateY(0);
+  }
+  55% {
+    /* 收起不再把面板裁成小圆角区域，避免中间态看起来像突然变圆。 */
+    opacity: 0.58;
+    clip-path: inset(0 0 0 0 round var(--hb-chat-panel-radius));
+    border-radius: var(--hb-chat-panel-radius);
+    transform: translateY(4px) scale(0.985);
+  }
+  to {
+    opacity: 0;
+    clip-path: inset(0 0 0 0 round var(--hb-chat-panel-radius));
+    border-radius: var(--hb-chat-panel-radius);
+    transform: translateY(8px) scale(0.97);
+  }
+}
+
+/* 内容区延迟淡入：避免文字和输入控件在缩放中跳动 */
+.hb-chat-panel-body {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  animation: hb-chat-content-in var(--motion-normal) var(--ease-out) var(--motion-stagger) both;
+  will-change: opacity, transform;
+}
+
+@keyframes hb-chat-content-in {
+  from {
+    opacity: 0;
+    transform: translateY(var(--spacing-2));
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* 左缘拖拽调宽（336–560） */
+.hb-chat-resize {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 6px;
+  z-index: 2;
+  cursor: col-resize;
+}
+
+/* ── 头部 ── */
+.hb-chat-header {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--spacing-2);
+  min-height: 60px;
+  padding: var(--spacing-3) var(--spacing-4);
+  border-bottom: 1px solid var(--divider-subtle);
+}
+
+.hb-chat-title-btn {
+  display: flex;
+  align-items: center;
+  gap: 0;
+  flex: 0 1 auto;
+  min-width: 0;
+  /* 右侧要同时容纳 ID 按钮（约 58px）与关闭按钮（30px）+ 间距：比原来多留一档 */
+  max-width: calc(100% - 108px);
+  padding: var(--spacing-1) 0;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text-primary);
+  text-align: left;
+  cursor: pointer;
+  transition: background-color var(--motion-fast) var(--ease-out);
+}
+
+.hb-chat-title-btn:hover {
+  background: var(--color-ui-control-hover);
+}
+
+.hb-chat-title-btn strong {
+  max-width: none;
+  min-width: 0;
+  flex: 0 1 auto;
+  font-size: var(--font-size-md);
+  font-weight: var(--font-weight-medium);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.hb-chat-title-btn span {
+  max-width: 120px;
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  padding: 2px var(--spacing-2);
+  border: 1px solid var(--divider-subtle);
+  border-radius: var(--radius-full);
+  background: var(--color-ui-control-active);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: var(--font-size-2xs);
+  color: var(--color-text-tertiary);
+  white-space: nowrap;
+}
+
+.hb-chat-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-1);
+  flex: 0 0 auto;
+}
+
+.hb-chat-model-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  margin-right: var(--spacing-1);
+  padding-right: var(--spacing-1);
+  border-right: 1px solid var(--divider-subtle);
+}
+
+.hb-chat-composer-model-actions {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+}
+
+.hb-chat-image-model-button {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+  max-width: 100%;
+  gap: var(--spacing-1);
+  height: 28px;
+  padding: 0 var(--spacing-2);
+  border: 0;
+  border-radius: var(--radius-xs);
+  background: transparent;
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-2xs);
+  cursor: pointer;
+  transition: background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out);
+}
+
+.hb-chat-image-model-button span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hb-chat-image-model-button svg {
+  width: 16px;
+  height: 16px;
+  flex: none;
+}
+
+.hb-chat-image-model-button:hover,
+.hb-chat-image-model-button.is-open,
+.hb-chat-image-model-button:focus-visible {
+  background: var(--color-ui-control-hover);
+  color: var(--color-text-primary);
+}
+
+.hb-chat-model-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-xs);
+  background: transparent;
+  color: var(--color-text-tertiary);
+  cursor: pointer;
+  transition: background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out);
+}
+
+.hb-chat-model-button:hover,
+.hb-chat-model-button.is-open,
+.hb-chat-model-button:focus-visible {
+  background: var(--color-ui-control-hover);
+  color: var(--color-text-primary);
+}
+
+.hb-chat-model-button svg {
+  width: 16px;
+  height: 16px;
+}
+
+.hb-chat-model-menu {
+  position: absolute;
+  top: calc(100% + var(--spacing-1));
+  right: var(--spacing-3);
+  z-index: 8;
+  display: flex;
+  flex-direction: column;
+  width: 224px;
+  max-width: calc(100% - var(--spacing-4));
+  padding: var(--spacing-1);
+  border: 1px solid var(--surface-popover-border);
+  border-radius: var(--radius-md);
+  background: var(--surface-popover-glass-bg);
+  backdrop-filter: var(--surface-popover-glass-blur);
+  box-shadow: var(--surface-popover-glass-shadow);
+}
+
+.hb-chat-composer-model-menu {
+  --hb-chat-model-menu-bg: color-mix(in srgb, var(--color-ui-control) 52%, transparent);
+  position: fixed;
+  top: auto;
+  right: auto;
+  left: 0;
+  bottom: auto;
+  z-index: 220;
+  max-height: min(320px, calc(100dvh - var(--spacing-6)));
+  overflow-y: auto;
+  border: 1px solid var(--surface-popover-border);
+  box-shadow: var(--surface-popover-glass-shadow);
+  background: var(--hb-chat-model-menu-bg);
+  backdrop-filter: var(--surface-popover-glass-blur);
+  -webkit-backdrop-filter: var(--surface-popover-glass-blur);
+}
+
+.hb-chat-model-menu-title {
+  display: none;
+}
+
+.hb-chat-model-option {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--spacing-2);
+  width: 100%;
+  padding: var(--spacing-2);
+  border: 0;
+  border-radius: var(--radius-xs);
+  background: transparent;
+  color: var(--color-text-primary);
+  text-align: left;
+  cursor: pointer;
+}
+
+.hb-chat-model-option-text {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.hb-chat-model-option-check {
+  display: inline-flex;
+  align-items: center;
+  color: var(--color-accent-blue);
+}
+
+.hb-chat-model-option-check svg {
+  width: 15px;
+  height: 15px;
+}
+
+.hb-chat-model-option:hover,
+.hb-chat-model-option.is-active {
+  background: var(--color-ui-control-hover);
+}
+
+.hb-chat-model-option span {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--font-size-xs);
+}
+
+.hb-chat-model-option-text > span {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--font-size-xs);
+}
+
+.hb-chat-model-option small {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--color-text-tertiary);
+  font-size: var(--font-size-2xs);
+}
+
+.hb-chat-action {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  transition: background-color var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out);
+}
+
+.hb-chat-action:hover:not(:disabled) {
+  background: var(--color-ui-control-hover);
+  color: var(--color-text-primary);
+}
+
+.hb-chat-action:disabled {
+  color: var(--color-text-tertiary);
+  cursor: default;
+  opacity: 0.5;
+}
+
+/* 自动定位开启态：紫底紫字，与「AI 相关」功能色一致 */
+.hb-chat-action.is-on {
+  background: var(--color-accent-purple-subtle);
+  color: var(--color-accent-purple);
+}
+
+/* 运行中：头部停止按钮（红色以示可中断） */
+.hb-chat-action.is-running {
+  background: var(--color-accent-red-subtle);
+  color: var(--color-accent-red);
+}
+
+/* ── 历史对话菜单（标题下拉）── */
+.hb-chat-thread-menu {
+  position: absolute;
+  top: calc(100% + var(--spacing-1));
+  left: var(--spacing-2);
+  z-index: 5;
+  width: 300px;
+  max-width: calc(100% - var(--spacing-4));
+  padding: var(--spacing-1);
+  border: 1px solid var(--surface-popover-border);
+  border-radius: var(--radius-md);
+  background: var(--surface-popover-glass-bg);
+  backdrop-filter: var(--surface-popover-glass-blur);
+  box-shadow: var(--surface-popover-glass-shadow);
+}
+
+.hb-chat-thread-new {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-2);
+  width: 100%;
+  padding: var(--spacing-2);
+  border: 0;
+  border-radius: var(--radius-xs);
+  background: transparent;
+  color: var(--color-text-primary);
+  font-size: var(--font-size-sm);
+  cursor: pointer;
+  transition: background-color var(--motion-fast) var(--ease-out);
+}
+
+.hb-chat-thread-new:hover {
+  background: var(--color-ui-control-hover);
+}
+
+.hb-chat-thread-list {
+  max-height: min(400px, calc(100dvh - 220px));
+  overflow-y: auto;
+}
+
+.hb-chat-thread-row {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-1);
+  padding: var(--spacing-1) var(--spacing-1) var(--spacing-1) var(--spacing-2);
+  border-radius: var(--radius-xs);
+  transition: background-color var(--motion-fast) var(--ease-out);
+}
+
+.hb-chat-thread-row:hover {
+  background: var(--color-ui-control-hover);
+}
+
+.hb-chat-thread-row.is-active {
+  background: var(--color-interaction-default);
+}
+
+.hb-chat-thread-row.is-renaming {
+  background: var(--color-ui-control-hover);
+}
+
+.hb-chat-thread-item-main {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  flex: 1;
+  padding: var(--spacing-1) 0;
+  border: 0;
+  background: transparent;
+  color: var(--color-text-primary);
+  text-align: left;
+  cursor: pointer;
+}
+
+.hb-chat-thread-item-main strong {
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-regular);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.hb-chat-thread-item-main span {
+  font-size: var(--font-size-2xs);
+  color: var(--color-text-tertiary);
+}
+
+/* 悬停 / 键盘聚焦时浮出的两个操作按钮：编辑 + 删除（替代原来的"更多"图标）。 */
+.hb-chat-thread-actions {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex: 0 0 auto;
+  opacity: 1;
+}
+
+/* 重命名时整行让位给输入框，actions 隐藏。 */
+.hb-chat-thread-row.is-renaming .hb-chat-thread-actions {
+  display: none;
+}
+
+.hb-chat-thread-action-button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-xs);
+  background: transparent;
+  color: var(--color-text-tertiary);
+  cursor: pointer;
+  transition: background-color var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out);
+}
+
+.hb-chat-thread-action-button:hover,
+.hb-chat-thread-action-button:focus-visible {
+  background: var(--color-ui-control-active);
+  color: var(--color-text-primary);
+}
+
+.hb-chat-thread-action-button.is-danger:hover,
+.hb-chat-thread-action-button.is-danger:focus-visible {
+  color: var(--color-accent-red);
+}
+
+.hb-chat-thread-action-menu {
+  position: absolute;
+  top: calc(100% + var(--spacing-1));
+  right: 0;
+  z-index: 7;
+  display: flex;
+  flex-direction: column;
+  min-width: 112px;
+  padding: var(--spacing-1);
+  border: 1px solid var(--surface-popover-border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-popover-glass-bg);
+  backdrop-filter: var(--surface-popover-glass-blur);
+  box-shadow: var(--surface-popover-glass-shadow);
+}
+
+.hb-chat-thread-action-menu button {
+  width: 100%;
+  padding: var(--spacing-2);
+  border: 0;
+  border-radius: var(--radius-xs);
+  background: transparent;
+  color: var(--color-text-primary);
+  font-size: var(--font-size-xs);
+  text-align: left;
+  cursor: pointer;
+}
+
+.hb-chat-thread-action-menu button:hover {
+  background: var(--color-ui-control-hover);
+}
+
+.hb-chat-thread-action-menu button.is-danger {
+  color: var(--color-accent-red);
+}
+
+.hb-chat-thread-action-menu button.is-danger:hover {
+  background: var(--color-accent-red-subtle);
+}
+
+.hb-chat-thread-rename {
+  display: flex;
+  gap: var(--spacing-1);
+  padding: var(--spacing-1);
+}
+
+.hb-chat-thread-rename input {
+  flex: 1;
+  min-width: 0;
+  height: var(--control-height-compact);
+  padding: 0 var(--spacing-2);
+  border: 1px solid var(--control-border);
+  border-radius: var(--radius-sm);
+  background: var(--control-bg);
+  color: var(--color-text-primary);
+  font-size: var(--font-size-sm);
+}
+
+.hb-chat-thread-rename input:focus-visible {
+  outline: none;
+  border-color: var(--control-border-focus);
+}
+
+.hb-chat-thread-rename button {
+  flex: 0 0 auto;
+  height: var(--control-height-compact);
+  padding: 0 var(--spacing-2);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: var(--color-action-send);
+  color: var(--color-action-send-icon);
+  font-size: var(--font-size-sm);
+  cursor: pointer;
+}
+
+.hb-chat-menu-empty {
+  padding: var(--spacing-4) var(--spacing-2);
+  font-size: var(--font-size-xs);
+  color: var(--color-text-tertiary);
+  text-align: center;
+}
+
+/* ── 消息流 ── */
+.hb-chat-messages {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--spacing-4) var(--spacing-4) var(--spacing-3);
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-3);
+}
+
+.hb-chat-messages-empty {
+  align-items: center;
+  justify-content: center;
+}
+
+.hb-chat-empty {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-2);
+  max-width: 280px;
+  text-align: center;
+}
+
+.hb-chat-empty-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  margin: 0 auto var(--spacing-2);
+  border: 1px solid var(--divider-subtle);
+  border-radius: var(--radius-md);
+  background: var(--color-interaction-subtle);
+  color: var(--color-accent-purple);
+}
+
+.hb-chat-empty strong {
+  font-size: var(--font-size-md);
+  font-weight: var(--font-weight-medium);
+  color: var(--color-text-primary);
+}
+
+.hb-chat-empty span {
+  font-size: var(--font-size-xs);
+  line-height: var(--line-height-relaxed);
+  color: var(--color-text-tertiary);
+}
+
+.hb-chat-empty span:last-child {
+  color: var(--color-text-secondary);
+}
+
+.hb-chat-msg {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-2);
+  max-width: 100%;
+}
+
+.hb-chat-msg-user {
+  align-items: flex-end;
+}
+
+.hb-chat-bubble {
+  max-width: min(88%, 300px);
+  padding: var(--spacing-2) var(--spacing-3);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--work-dialog-border);
+  background: var(--work-dialog-control-bg);
+  color: var(--work-dialog-text-primary);
+  font-size: var(--font-size-base);
+  line-height: var(--line-height-relaxed);
+  white-space: pre-wrap;
+  word-break: break-word;
+  box-shadow: var(--chat-composer-shadow);
+}
+
+.hb-chat-msg-user .hb-chat-bubble {
+  border-color: transparent;
+  background: color-mix(in srgb, var(--color-paper) 6%, transparent);
+  box-shadow: none;
+  backdrop-filter: blur(12px);
+}
+
+.hb-chat-user-bubble {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: var(--spacing-2);
+  max-width: min(100%, 360px);
+}
+
+.hb-chat-user-copy {
+  white-space: pre-wrap;
+}
+
+.hb-chat-msg-inline-ref {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--spacing-1);
+  max-width: 152px;
+  margin: 0 var(--spacing-1);
+  padding: 2px var(--spacing-1) 2px 2px;
+  border: 0;
+  border-radius: var(--radius-xs);
+  background: var(--color-ui-control-panel);
+  color: var(--color-text-secondary);
+  vertical-align: middle;
+  cursor: pointer;
+}
+
+.hb-chat-msg-inline-ref img {
+  width: 24px;
+  height: 24px;
+  flex: 0 0 auto;
+  border-radius: var(--radius-2xs);
+  object-fit: cover;
+}
+
+.hb-chat-msg-inline-ref span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--font-size-2xs);
+}
+
+.hb-chat-msg-inline-ref:hover {
+  background: var(--color-ui-control-hover);
+  color: var(--color-text-primary);
+}
+
+.hb-chat-ask-response {
+  display: grid;
+  gap: var(--spacing-1);
+  width: min(100%, 360px);
+  overflow: hidden;
+  border-radius: var(--radius-sm);
+  background: var(--color-ui-control-panel);
+}
+
+.hb-chat-ask-response-head {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-2);
+  width: 100%;
+  min-height: 44px;
+  padding: var(--spacing-2);
+  border: 0;
+  background: transparent;
+  color: var(--color-text-primary);
+  text-align: left;
+  cursor: pointer;
+}
+
+.hb-chat-ask-response-head:hover,
+.hb-chat-ask-response-head:focus-visible {
+  background: var(--color-ui-control-hover);
+}
+
+.hb-chat-ask-response-mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  flex: 0 0 24px;
+  border-radius: var(--radius-full);
+  background: var(--color-accent-purple-subtle);
+  color: var(--color-accent-purple);
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-medium);
+}
+
+.hb-chat-ask-response-title {
+  min-width: 0;
+  display: grid;
+  flex: 1;
+  gap: var(--spacing-1);
+}
+
+.hb-chat-ask-response-title strong,
+.hb-chat-ask-response-title small {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hb-chat-ask-response-title strong {
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-medium);
+}
+
+.hb-chat-ask-response-title small {
+  color: var(--color-text-tertiary);
+  font-size: var(--font-size-2xs);
+}
+
+.hb-chat-ask-response-body {
+  display: grid;
+  gap: var(--spacing-2);
+  padding: 0 var(--spacing-2) var(--spacing-2);
+  animation: fade-in var(--motion-normal) var(--ease-out);
+}
+
+.hb-chat-ask-response-question {
+  display: grid;
+  gap: var(--spacing-1);
+  padding: var(--spacing-2) 0;
+  border-bottom: 1px solid var(--divider-subtle);
+}
+
+.hb-chat-ask-response-question:last-child {
+  border-bottom: 0;
+}
+
+.hb-chat-ask-response-question strong {
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-2xs);
+  font-weight: var(--font-weight-medium);
+  line-height: var(--line-height-normal);
+}
+
+.hb-chat-ask-response-answer-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--spacing-1);
+}
+
+.hb-chat-ask-response-answer-list span {
+  min-height: var(--control-height-compact);
+  display: inline-flex;
+  align-items: center;
+  padding: 0 var(--spacing-2);
+  border-radius: var(--radius-2xs);
+  background: var(--color-ui-control-hover);
+  color: var(--color-text-primary);
+  font-size: var(--font-size-2xs);
+  line-height: var(--line-height-tight);
+}
+
+/* 用户消息里的引用图（版本级快照，点击定位） */
+.hb-chat-msg-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--spacing-1);
+  justify-content: flex-start;
+  max-width: 100%;
+}
+
+.hb-chat-msg-attachment {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--spacing-1);
+  max-width: 190px;
+  min-width: 0;
+  padding: var(--spacing-1) var(--spacing-2) var(--spacing-1) var(--spacing-1);
+  border: 1px solid var(--divider-subtle);
+  border-radius: var(--radius-xs);
+  background: var(--work-dialog-control-bg);
+  color: var(--color-text-primary);
+  cursor: pointer;
+  transition: border-color var(--motion-fast) var(--ease-out);
+}
+
+.hb-chat-msg-attachment:hover {
+  border-color: var(--control-border-hover);
+}
+
+.hb-chat-msg-attachment img {
+  width: 34px;
+  height: 34px;
+  flex: 0 0 auto;
+  border-radius: var(--radius-2xs);
+  object-fit: cover;
+}
+
+.hb-chat-msg-attachment em {
+  font-size: var(--font-size-2xs);
+  font-style: normal;
+  color: var(--color-text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.hb-chat-msg-attachment-preview {
+  position: absolute;
+  left: 0;
+  bottom: calc(100% + var(--spacing-2));
+  z-index: 20;
+  width: 208px;
+  height: 156px;
+  padding: var(--spacing-1);
+  border: 1px solid var(--surface-popover-border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-popover-bg);
+  box-shadow: var(--surface-popover-glass-shadow);
+  opacity: 0;
+  transform: translateY(var(--spacing-1));
+  transition: opacity var(--motion-fast) var(--ease-out), transform var(--motion-fast) var(--ease-out);
+}
+
+.hb-chat-msg-attachment-preview img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border-radius: var(--radius-xs);
+  object-fit: contain;
+}
+
+.hb-chat-msg-attachment:hover .hb-chat-msg-attachment-preview,
+.hb-chat-msg-attachment:focus-visible .hb-chat-msg-attachment-preview {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+/* ── Agent 文字回复（基础 Markdown）── */
+.hb-chat-text {
+  font-size: var(--font-size-base);
+  line-height: var(--line-height-relaxed);
+  color: var(--color-text-primary);
+  word-break: break-word;
+}
+
+.hb-chat-text p {
+  margin: 0 0 var(--spacing-2);
+}
+
+.hb-chat-text p:last-child {
+  margin-bottom: 0;
+}
+
+.hb-chat-text ul,
+.hb-chat-text ol {
+  margin: 0 0 var(--spacing-2);
+  padding-left: var(--spacing-6);
+}
+
+.hb-chat-text li {
+  margin-bottom: var(--spacing-1);
+}
+
+.hb-chat-text code {
+  padding: 1px var(--spacing-1);
+  border-radius: var(--radius-2xs);
+  background: var(--color-inline-code-bg);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-code);
+}
+
+.hb-chat-text pre {
+  margin: 0 0 var(--spacing-2);
+  padding: var(--spacing-2);
+  border-radius: var(--radius-xs);
+  background: var(--color-ui-control-panel);
+  overflow-x: auto;
+}
+
+.hb-chat-text pre code {
+  padding: 0;
+  background: transparent;
+}
+
+.hb-chat-text blockquote {
+  margin: 0 0 var(--spacing-2);
+  padding: var(--spacing-1) var(--spacing-3);
+  border-left: 2px solid var(--color-ui-border-strong);
+  color: var(--color-text-secondary);
+}
+
+.hb-chat-text-actions {
+  display: flex;
+  gap: var(--spacing-1);
+  opacity: 0;
+  pointer-events: none;
+}
+
+.hb-chat-msg:hover .hb-chat-text-actions,
+.hb-chat-msg:focus-within .hb-chat-text-actions {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.hb-chat-text-actions button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: var(--spacing-1);
+  border: 0;
+  border-radius: var(--radius-2xs);
+  background: transparent;
+  color: var(--color-text-tertiary);
+  font-size: var(--font-size-2xs);
+  cursor: pointer;
+}
+
+.hb-chat-text-actions button:hover,
+.hb-chat-text-actions button:focus-visible {
+  background: var(--color-ui-control-hover);
+  color: var(--color-text-primary);
+}
+
+/* 对话文案可选中复制：页面根 .image-canvas-page 是 user-select:none（画布交互），
+   且 canvas-page.css 在本文件之后加载——同特异性下它会赢，必须加 .image-canvas-page
+   前缀把特异性提到 (0,2,0) 才能压住。整个面板显式放开：消息、工具卡步骤、上下文徽标、
+   报错、历史菜单全都能划词复制，不依赖复制按钮。input / textarea 本身就可选，不受影响。 */
+.image-canvas-page .hb-chat-panel,
+.image-canvas-page .hb-chat-panel .hb-chat-messages {
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+/* ── 运行态 ── */
+.hb-chat-pending {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-2);
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-sm);
+}
+
+.hb-chat-dots {
+  display: inline-flex;
+  gap: 3px;
+}
+
+.hb-chat-dots i {
+  width: 4px;
+  height: 4px;
+  border-radius: var(--radius-full);
+  background: var(--color-accent-purple);
+  animation: hb-chat-dot-blink var(--motion-loop) var(--ease-in-out) infinite;
+}
+
+.hb-chat-dots i:nth-child(2) {
+  animation-delay: var(--motion-stagger);
+}
+
+.hb-chat-dots i:nth-child(3) {
+  animation-delay: calc(var(--motion-stagger) * 2);
+}
+
+@keyframes hb-chat-dot-blink {
+  0%,
+  100% {
+    opacity: 0.25;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+/* 失败原因写在消息上：toast 3 秒就没了，对话里要能回看哪轮为什么红。
+   与画布节点报错（NodeHandleMotion.css 的 image-node-composer-error）同一口径：
+   14% 红底 + 88% 红字，不再另写一档更深的红色。 */
+.hb-chat-error {
+  padding: var(--spacing-2) var(--spacing-3);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--color-accent-red) 14%, transparent);
+  color: color-mix(in srgb, var(--color-accent-red) 88%, var(--color-text-primary));
+  font-size: var(--font-size-sm);
+  line-height: var(--line-height-normal);
+}
+
+/* 工具卡上常驻的报错：贴在卡下方，与卡片之间留 2px 呼吸位，
+   不并进卡内边框（否则折叠态的圆角会多出一条边） */
+.hb-chat-error-pinned {
+  margin-top: 2px;
+}
+
+.hb-chat-stopped {
+  font-size: var(--font-size-2xs);
+  color: var(--color-text-tertiary);
+}
+
+.hb-chat-context {
+  font-size: var(--font-size-2xs);
+  color: var(--color-text-tertiary);
+}
+
+/* ── 工具调用过程卡（方案 §8.3）── */
+.hb-chat-tool {
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  overflow: visible;
+}
+
+.hb-chat-tool-head {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-2);
+  width: 100%;
+  padding: var(--spacing-2) 0;
+  border: 0;
+  background: transparent;
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-sm);
+  text-align: left;
+  cursor: pointer;
+}
+
+.hb-chat-tool-head:hover {
+  background: var(--color-ui-control-hover);
+}
+
+.hb-chat-tool-head-text {
+  flex: 1;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--color-text-secondary);
+}
+
+.hb-chat-tool-status {
+  flex: 0 0 auto;
+  font-size: var(--font-size-2xs);
+  color: var(--color-text-tertiary);
+}
+
+.hb-chat-tool-status.is-error {
+  color: var(--color-accent-red);
+}
+
+.hb-chat-tool-body {
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-1);
+}
+
+.hb-chat-generation-stage {
+  position: relative;
+  width: 100%;
+  min-height: 116px;
+  aspect-ratio: 16 / 9;
+  margin-top: var(--spacing-2);
+  border-top: 1px solid var(--divider-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--color-bg-canvas);
+  overflow: hidden;
+}
+
+.hb-chat-generation-matrix {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+}
+
+/* AI 对话里的生成卡使用直连生成同款白色矩阵：静态细点阵 + 移动的聚焦光斑。 */
+.hb-chat-generation-matrix .image-node-running-dots,
+.hb-chat-generation-matrix .image-node-running-glow {
+  position: absolute;
+  inset: 2px;
+  pointer-events: none;
+}
+
+.hb-chat-generation-matrix .image-node-running-dots {
+  background-image: radial-gradient(circle, color-mix(in srgb, var(--color-text-primary) 46%, transparent) 0.7px, transparent 1.3px);
+  background-position: center;
+  background-repeat: space;
+  background-size: 11px 11px;
+  opacity: 0.22;
+}
+
+.hb-chat-generation-matrix .image-node-running-glow {
+  background-image: radial-gradient(circle, var(--color-text-primary) 1.1px, transparent 1.6px);
+  background-position: center;
+  background-repeat: space;
+  background-size: 11px 11px;
+  opacity: 0.7;
+  -webkit-mask-image:
+    radial-gradient(ellipse at center, #000 0%, transparent 60%),
+    radial-gradient(ellipse at center, #000 0%, transparent 62%);
+  mask-image:
+    radial-gradient(ellipse at center, #000 0%, transparent 60%),
+    radial-gradient(ellipse at center, #000 0%, transparent 62%);
+  -webkit-mask-position: 16% 20%, 30% 32%;
+  mask-position: 16% 20%, 30% 32%;
+  -webkit-mask-repeat: no-repeat, no-repeat;
+  mask-repeat: no-repeat, no-repeat;
+  -webkit-mask-size: 52% 46%, 40% 40%;
+  mask-size: 52% 46%, 40% 40%;
+  animation:
+    hb-chat-generation-direct-morph var(--motion-loop-slow) var(--ease-in-out) infinite,
+    pulse-opacity var(--motion-loop) var(--ease-in-out) infinite;
+  --pulse-from: 0.55;
+}
+
+@keyframes hb-chat-generation-direct-morph {
+  0% {
+    -webkit-mask-position: 16% 20%, 30% 32%;
+    mask-position: 16% 20%, 30% 32%;
+    -webkit-mask-size: 52% 46%, 40% 40%;
+    mask-size: 52% 46%, 40% 40%;
+  }
+
+  25% {
+    -webkit-mask-position: 84% 16%, 66% 30%;
+    mask-position: 84% 16%, 66% 30%;
+    -webkit-mask-size: 46% 58%, 44% 38%;
+    mask-size: 46% 58%, 44% 38%;
+  }
+
+  50% {
+    -webkit-mask-position: 82% 84%, 62% 68%;
+    mask-position: 82% 84%, 62% 68%;
+    -webkit-mask-size: 60% 44%, 38% 46%;
+    mask-size: 60% 44%, 38% 46%;
+  }
+
+  75% {
+    -webkit-mask-position: 14% 82%, 34% 66%;
+    mask-position: 14% 82%, 34% 66%;
+    -webkit-mask-size: 48% 54%, 46% 40%;
+    mask-size: 48% 54%, 46% 40%;
+  }
+
+  100% {
+    -webkit-mask-position: 16% 20%, 30% 32%;
+    mask-position: 16% 20%, 30% 32%;
+    -webkit-mask-size: 52% 46%, 40% 40%;
+    mask-size: 52% 46%, 40% 40%;
+  }
+}
+
+.hb-chat-generation-meta {
+  position: absolute;
+  left: var(--spacing-3);
+  right: var(--spacing-3);
+  bottom: var(--spacing-2);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  color: var(--media-chrome-fg-muted);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-2xs);
+  text-shadow: 0 1px 3px var(--shadow-ink-deep);
+}
+
+.hb-chat-tool-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--spacing-1) var(--spacing-3);
+  padding-top: var(--spacing-2);
+  color: var(--color-text-tertiary);
+  font-size: var(--font-size-2xs);
+}
+
+.hb-chat-tool-args {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-2xs);
+  color: var(--color-text-secondary);
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.hb-chat-tool-steps {
+  margin: 0;
+  padding-left: var(--spacing-4);
+  font-size: var(--font-size-2xs);
+  color: var(--color-text-secondary);
+}
+
+.hb-chat-tool-steps li {
+  margin-bottom: 2px;
+}
+
+.hb-chat-tool-retry {
+  align-self: flex-start;
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-1);
+  padding: var(--spacing-1) var(--spacing-2);
+  border: 0;
+  border-radius: var(--radius-xs);
+  background: var(--color-interaction-default);
+  color: var(--color-text-primary);
+  font-size: var(--font-size-2xs);
+  cursor: pointer;
+}
+
+.hb-chat-tool-retry:hover {
+  background: var(--color-interaction-subtle);
+}
+
+/* ── 生成结果格：编号徽标 + 悬浮动作 ── */
+.hb-chat-media {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--spacing-2);
+}
+
+.hb-chat-media-cell {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 148px;
+  aspect-ratio: 4 / 3;
+  border-radius: var(--radius-sm);
+  background: var(--color-ui-control-panel);
+  overflow: hidden;
+}
+
+/* 单图：较大媒体卡片 */
+.hb-chat-media.is-single {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.hb-chat-media.is-single .hb-chat-media-cell {
+  min-height: 220px;
+  max-height: 360px;
+  aspect-ratio: 16 / 10;
+}
+
+.hb-chat-media-cell img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  cursor: zoom-in;
+}
+
+/* 加载骨架：稳定尺寸，避免消息跳动 */
+.hb-chat-media-skeleton {
+  width: 60%;
+  height: 60%;
+  border-radius: var(--radius-xs);
+  background: var(--color-interaction-subtle);
+  animation: hb-chat-skeleton-breathe var(--motion-loop) var(--ease-in-out) infinite;
+}
+
+@keyframes hb-chat-skeleton-breathe {
+  0%,
+  100% {
+    opacity: 0.4;
+  }
+  50% {
+    opacity: 0.8;
+  }
+}
+
+.hb-chat-media-index {
+  position: absolute;
+  top: var(--spacing-1);
+  left: var(--spacing-1);
+  padding: 1px var(--spacing-1);
+  border-radius: var(--radius-2xs);
+  background: var(--media-chrome-bg);
+  color: var(--media-chrome-fg);
+  font-size: var(--font-size-2xs);
+}
+
+.hb-chat-media-actions {
+  position: absolute;
+  top: var(--spacing-1);
+  right: var(--spacing-1);
+  display: flex;
+  gap: var(--spacing-1);
+  opacity: 0;
+  transition: opacity var(--motion-fast) var(--ease-out);
+}
+
+.hb-chat-media-actions {
+  right: 50%;
+  transform: translateX(50%);
+}
+
+.hb-chat-media-cell:hover .hb-chat-media-actions,
+.hb-chat-media-actions:focus-within,
+.hb-chat-media-cell:focus-within {
+  opacity: 1;
+}
+
+.hb-chat-media-actions button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 1px solid var(--media-chrome-border);
+  border-radius: var(--radius-full);
+  background: var(--media-chrome-bg);
+  color: var(--media-chrome-fg);
+  cursor: pointer;
+  transition: background-color var(--motion-fast) var(--ease-out);
+}
+
+.hb-chat-media-actions button:hover {
+  background: var(--media-chrome-bg-strong);
+}
+
+/* ── 输入区 ── */
+.hb-chat-composer {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-1);
+  min-height: 112px;
+  margin: var(--spacing-2);
+  padding: var(--spacing-3);
+  border: 0;
+  border-radius: var(--radius-lg);
+  background: var(--work-dialog-control-bg);
+  box-shadow: var(--chat-composer-shadow);
+}
+
+/* 聚焦输入时不再给整块输入容器增加外描边，保持和画布输入节点一致。 */
+.hb-chat-composer:focus-within {
+  border-color: transparent;
+}
+
+.hb-chat-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--spacing-1);
+  max-width: 100%;
+  overflow: visible;
+}
+
+.hb-chat-input-content {
+  position: relative;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: var(--spacing-1);
+  min-width: 0;
+  flex: 1;
+}
+
+.hb-chat-inline-ref-preview {
+  position: absolute;
+  z-index: 30;
+  width: 208px;
+  height: 156px;
+  padding: var(--spacing-1);
+  border: 1px solid var(--surface-popover-border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-popover-glass-bg);
+  box-shadow: var(--surface-popover-glass-shadow);
+  pointer-events: none;
+  overflow: hidden;
+  animation: hb-chat-inline-ref-preview-in var(--motion-fast) var(--ease-out) both;
+}
+
+.hb-chat-inline-ref-preview img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border-radius: var(--radius-2xs);
+  object-fit: contain;
+}
+
+@keyframes hb-chat-inline-ref-preview-in {
+  from {
+    opacity: 0;
+    transform: translateY(var(--spacing-1));
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.hb-chat-chip {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--spacing-1);
+  min-height: 32px;
+  padding: 2px var(--spacing-1) 2px 2px;
+  border: 1px solid var(--divider-subtle);
+  border-radius: var(--radius-xs);
+  background: var(--color-ui-control-panel);
+  cursor: grab;
+}
+
+.hb-chat-chip.is-dragging {
+  opacity: 0.5;
+}
+
+.hb-chat-chip:hover,
+.hb-chat-chip:focus-within {
+  z-index: 3;
+}
+
+.hb-chat-chip.is-base {
+  border-style: dashed;
+  border-color: var(--color-accent-purple);
+  cursor: default;
+}
+
+.hb-chat-chip-thumb {
+  width: 28px;
+  height: 28px;
+  flex: 0 0 auto;
+  border-radius: var(--radius-2xs);
+  object-fit: cover;
+}
+
+/* 引用卡片里的缩略图包裹层：放大预览脱离输入区布局，避免撑高文本框。 */
+.hb-chat-chip-preview {
+  position: relative;
+  display: block;
+  width: 28px;
+  height: 28px;
+  flex: 0 0 auto;
+}
+
+.hb-chat-chip-preview .hb-chat-chip-thumb {
+  display: block;
+}
+
+.hb-chat-chip-preview-image {
+  position: absolute;
+  left: 0;
+  bottom: calc(100% + var(--spacing-2));
+  z-index: 20;
+  width: 208px;
+  height: 156px;
+  padding: var(--spacing-1);
+  border: 1px solid var(--surface-popover-border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-popover-bg);
+  box-shadow: var(--surface-popover-glass-shadow);
+  object-fit: contain;
+  opacity: 0;
+  transform: translateY(var(--spacing-1));
+  transition: opacity var(--motion-fast) var(--ease-out), transform var(--motion-fast) var(--ease-out);
+}
+
+.hb-chat-chip:hover .hb-chat-chip-preview-image,
+.hb-chat-chip:focus-within .hb-chat-chip-preview-image {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.hb-chat-chip-name {
+  max-width: 96px;
+  font-size: var(--font-size-xs);
+  font-style: normal;
+  color: var(--color-text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.hb-chat-chip-remove {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-full);
+  background: transparent;
+  color: var(--color-text-tertiary);
+  font-size: var(--font-size-sm);
+  line-height: var(--line-height-tight);
+  cursor: pointer;
+}
+
+.hb-chat-chip-remove:hover {
+  background: var(--color-ui-control-hover);
+  color: var(--color-text-primary);
+}
+
+.hb-chat-input {
+  display: block;
+  flex: 1;
+  min-height: 64px;
+  max-height: 160px;
+  padding: var(--spacing-1) var(--spacing-2);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text-primary);
+  font-family: var(--font-sans);
+  font-size: var(--font-size-base);
+  line-height: var(--line-height-normal);
+  resize: none;
+  outline: none;
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-y: auto;
+}
+
+.hb-chat-input:empty::before {
+  content: attr(data-placeholder);
+  color: var(--color-text-tertiary);
+  pointer-events: none;
+}
+
+.hb-chat-inline-ref {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--spacing-1);
+  max-width: 150px;
+  margin: 0 2px;
+  padding: 2px var(--spacing-1) 2px 2px;
+  border-radius: var(--radius-xs);
+  background: var(--color-ui-control-panel);
+  vertical-align: middle;
+}
+
+.hb-chat-inline-ref img {
+  width: 24px;
+  height: 24px;
+  flex: 0 0 auto;
+  border-radius: var(--radius-2xs);
+  object-fit: cover;
+}
+
+.hb-chat-inline-ref > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-2xs);
+}
+
+.hb-chat-inline-ref button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-full);
+  background: transparent;
+  color: var(--color-text-tertiary);
+  cursor: pointer;
+}
+
+.hb-chat-inline-ref button:hover {
+  background: var(--color-ui-control-hover);
+  color: var(--color-text-primary);
+}
+
+.hb-chat-input:focus-visible {
+  outline: none;
+}
+
+.hb-chat-input::placeholder {
+  color: var(--color-text-tertiary);
+}
+
+.hb-chat-input-row {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--spacing-2);
+  min-height: 64px;
+  min-width: min(100%, 140px);
+  flex: 1;
+}
+
+.hb-chat-tool-entry {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: var(--spacing-2);
+  padding: 0 var(--spacing-1);
+}
+
+.hb-chat-tool-entry .hb-chat-send {
+  margin-left: 0;
+}
+
+.hb-chat-tool-entry-left {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-1);
+}
+
+.hb-chat-entry-btn {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-1);
+  height: var(--control-height-compact);
+  padding: 0 var(--spacing-2);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-xs);
+  cursor: pointer;
+  transition: background-color var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out);
+}
+
+.hb-chat-entry-btn:hover,
+.hb-chat-entry-btn.is-open {
+  background: var(--color-ui-control-hover);
+  color: var(--color-text-primary);
+}
+
+.hb-chat-send {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 32px;
+  height: 32px;
+  align-self: flex-end;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: var(--color-action-send);
+  color: var(--color-action-send-icon);
+  cursor: pointer;
+  transition: background-color var(--motion-fast) var(--ease-out);
+}
+
+.hb-chat-send:hover:not(:disabled) {
+  background: var(--color-action-send-hover);
+}
+
+.hb-chat-send:disabled {
+  background: var(--color-action-send-disabled);
+  cursor: default;
+}
+
+.hb-chat-send.is-stop {
+  background: var(--color-accent-red);
+  color: var(--color-on-accent);
+}
+
+.hb-chat-composer-hint {
+  display: block;
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  font-size: var(--font-size-2xs);
+  line-height: var(--line-height-normal);
+  color: var(--color-text-tertiary);
+}
+
+/* ── @ 引用菜单 / 图片选择器（共用浮层）── */
+.hb-chat-picker {
+  position: absolute;
+  left: var(--spacing-3);
+  right: var(--spacing-3);
+  bottom: calc(100% + var(--spacing-1));
+  z-index: 6;
+  display: flex;
+  flex-direction: column;
+  max-height: min(344px, calc(100dvh - 180px));
+  border: 1px solid var(--surface-popover-border);
+  border-radius: var(--radius-md);
+  background: var(--surface-popover-glass-bg);
+  backdrop-filter: var(--surface-popover-glass-blur);
+  box-shadow: var(--surface-popover-glass-shadow);
+  overflow: hidden;
+}
+
+.hb-chat-picker-head {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-2);
+  padding: var(--spacing-2);
+  border-bottom: 1px solid var(--divider-subtle);
+  font-size: var(--font-size-xs);
+  color: var(--color-text-secondary);
+}
+
+.hb-chat-picker-head input {
+  flex: 1;
+  min-width: 0;
+  height: var(--control-height-compact);
+  padding: 0 var(--spacing-2);
+  border: 1px solid var(--control-border);
+  border-radius: var(--radius-sm);
+  background: var(--control-bg);
+  color: var(--color-text-primary);
+  font-size: var(--font-size-sm);
+}
+
+.hb-chat-picker-head input:focus-visible {
+  outline: none;
+  border-color: var(--control-border-focus);
+}
+
+.hb-chat-picker-list {
+  overflow-y: auto;
+  padding: var(--spacing-1) var(--spacing-1) var(--spacing-3);
+  scrollbar-gutter: stable;
+}
+
+.hb-chat-picker-item {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-2);
+  width: 100%;
+  min-height: 46px;
+  padding: var(--spacing-1) var(--spacing-2);
+  border: 0;
+  border-radius: var(--radius-xs);
+  background: transparent;
+  color: var(--color-text-primary);
+  text-align: left;
+  cursor: pointer;
+}
+
+.hb-chat-picker-item:hover,
+.hb-chat-picker-item.is-active {
+  background: var(--color-ui-control-hover);
+}
+
+.hb-chat-picker-item img {
+  width: 40px;
+  height: 40px;
+  flex: 0 0 auto;
+  border-radius: var(--radius-2xs);
+  object-fit: cover;
+}
+
+.hb-chat-picker-item-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.hb-chat-picker-item-text strong {
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-regular);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.hb-chat-picker-item-text span {
+  font-size: var(--font-size-2xs);
+  color: var(--color-text-tertiary);
+}
+
+.hb-chat-picker-item-check {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  flex: 0 0 auto;
+  border-radius: var(--radius-xs);
+  margin-left: auto;
+  color: var(--color-accent-purple);
+  font-size: var(--font-size-sm);
+}
+
+.hb-chat-picker-item-check:hover,
+.hb-chat-picker-item-check:focus-visible {
+  background: var(--color-ui-control-hover);
+  outline: none;
+}
+
+.hb-chat-picker-foot {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--spacing-2);
+  padding: var(--spacing-2);
+  border-top: 1px solid var(--divider-subtle);
+}
+
+.hb-chat-picker-foot button {
+  height: var(--control-height-compact);
+  padding: 0 var(--spacing-3);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: var(--color-action-send);
+  color: var(--color-action-send-icon);
+  font-size: var(--font-size-sm);
+  cursor: pointer;
+}
+
+.hb-chat-picker-foot button.is-ghost {
+  background: var(--color-interaction-default);
+  color: var(--color-text-primary);
+}
+
+/* ── 减少动效：只保留透明度，不做位移缩放 ── */
+@media (prefers-reduced-motion: reduce) {
+  .hb-chat-panel,
+  .hb-chat-panel.is-leaving,
+  .hb-chat-panel-body {
+    animation: none;
+    clip-path: none;
+    transform: none;
+  }
+
+  .image-canvas-page .hb-topbar {
+    transition: none;
+  }
+
+  .hb-chat-panel,
+  .hb-chat-panel.is-leaving,
+  .hb-chat-panel-body {
+    animation-duration: var(--motion-instant);
+  }
+
+  @keyframes hb-chat-panel-enter {
+    from {
+      opacity: 0;
+    }
+    to {
+      opacity: 1;
+    }
+  }
+
+  @keyframes hb-chat-panel-leave {
+    from {
+      opacity: 1;
+    }
+    to {
+      opacity: 0;
+    }
+  }
+
+  .hb-chat-dots i,
+  .hb-chat-media-skeleton,
+
+  .hb-chat-msg-attachment-preview,
+  .hb-chat-chip-preview-image {
+    transition: none;
+    transform: none;
+  }
+}
+
+@media (hover: none) {
+  .hb-chat-media-actions {
+    opacity: 1;
+  }
+
+  .hb-chat-msg-attachment-preview,
+  .hb-chat-chip-preview-image {
+    display: none;
+  }
+}
+
+@media (max-width: 900px) {
+  .hb-chat-panel {
+    right: var(--spacing-4);
+    bottom: var(--spacing-4);
+    max-width: calc(100vw - var(--spacing-8));
+    height: calc(100dvh - var(--spacing-8));
+  }
+
+  .hb-chat-picker {
+    max-height: min(360px, calc(100dvh - 160px));
+  }
+}
+
+@media (max-width: 640px) {
+  .hb-chat-panel {
+    right: var(--spacing-3);
+    bottom: var(--spacing-3);
+    width: calc(100vw - var(--spacing-6));
+    max-width: calc(100vw - var(--spacing-6));
+    height: calc(100dvh - var(--spacing-6));
+    min-height: min(420px, calc(100dvh - var(--spacing-6)));
+  }
+
+  .hb-chat-composer {
+    min-height: 112px;
+  }
+
+  .hb-chat-input {
+    min-height: 52px;
+  }
+
+  .hb-chat-fab {
+    right: var(--spacing-4);
+    bottom: var(--spacing-4);
+  }
+
+  .hb-chat-thread-menu {
+    width: min(360px, calc(100vw - var(--spacing-6)));
+  }
+}

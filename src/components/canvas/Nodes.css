@@ -1,0 +1,875 @@
+/* Figma-aligned canvas node system */
+.canvas-node {
+  /* 色相从下面那张唯一的 tone 表来（--tone-color）；无 data-tone 时落回中性灰。 */
+  --node-accent: var(--tone-color, var(--color-text-tertiary));
+  --node-glow-strong: 12%;
+  --node-glow-soft: 4%;
+  --node-glow-radius: 30%;
+  --node-border-accent: 26%;
+  --node-selected-border-accent: 46%;
+  --node-shell-bg: color-mix(in srgb, var(--color-bg-base) 91%, transparent);
+  --node-panel-bg: color-mix(in srgb, var(--color-text-primary) 4%, transparent);
+  --node-control-bg: color-mix(in srgb, var(--color-bg-base) 88%, var(--control-bg));
+  --node-control-hover: color-mix(in srgb, var(--node-control-bg) 84%, var(--control-bg-hover));
+  --node-control-focus: color-mix(in srgb, var(--node-control-bg) 72%, var(--control-bg-active));
+  --node-control-active: color-mix(in srgb, var(--node-control-bg) 62%, var(--control-bg-active));
+  --node-popover-bg: color-mix(in srgb, var(--color-bg-base) 88%, var(--control-bg));
+  width: 264px;
+  position: relative;
+  overflow: visible;
+  border: 1.5px solid transparent;
+  border-radius: var(--radius-xl);
+  corner-shape: var(--corner-smooth);
+  background:
+    radial-gradient(circle at calc(100% - 25px) 21px,
+      color-mix(in srgb, var(--node-accent) var(--node-glow-strong), transparent) 0,
+      color-mix(in srgb, var(--node-accent) var(--node-glow-soft), transparent) 13%,
+      transparent var(--node-glow-radius)) padding-box,
+    linear-gradient(var(--node-shell-bg), var(--node-shell-bg)) padding-box,
+    radial-gradient(circle at calc(100% - 25px) 21px,
+      color-mix(in srgb, var(--node-accent) var(--node-border-accent), transparent) 0,
+      transparent 23%) border-box,
+    linear-gradient(145deg,
+      color-mix(in srgb, var(--color-text-primary) 18%, transparent),
+      color-mix(in srgb, var(--color-border-subtle) 30%, transparent) 44%,
+      color-mix(in srgb, var(--color-text-primary) 11%, transparent)) border-box;
+  padding: 8px;
+  color: var(--color-text-primary);
+  font-family: var(--font-sans);
+  cursor: pointer;
+  box-shadow: none;
+  transition: border-color var(--motion-normal) var(--ease-out);
+  backdrop-filter: blur(14px) saturate(118%);
+  -webkit-backdrop-filter: blur(14px) saturate(118%);
+}
+
+.react-flow__node-input,
+.react-flow__node-output {
+  width: auto !important;
+  padding: 0 !important;
+  border: none !important;
+  background: transparent !important;
+  box-shadow: none !important;
+  color: inherit !important;
+  text-align: inherit !important;
+}
+
+.react-flow__node:has(.node-custom-select-trigger.open),
+.react-flow__node:has(.node-agent-select.open) {
+  z-index: 1000 !important;
+}
+
+.canvas-node:hover {
+  filter: brightness(1.01);
+}
+
+.canvas-node.node-selected {
+  background:
+    radial-gradient(circle at calc(100% - 25px) 21px,
+      color-mix(in srgb, var(--node-accent) var(--node-glow-strong), transparent) 0,
+      color-mix(in srgb, var(--node-accent) var(--node-glow-soft), transparent) 13%,
+      transparent var(--node-glow-radius)) padding-box,
+    linear-gradient(var(--node-shell-bg), var(--node-shell-bg)) padding-box,
+    radial-gradient(circle at calc(100% - 25px) 21px,
+      color-mix(in srgb, var(--node-accent) var(--node-selected-border-accent), transparent) 0,
+      transparent 25%) border-box,
+    linear-gradient(145deg,
+      color-mix(in srgb, var(--color-text-primary) 34%, transparent),
+      color-mix(in srgb, var(--color-border-subtle) 48%, transparent) 44%,
+      color-mix(in srgb, var(--color-text-primary) 24%, transparent)) border-box;
+  box-shadow: none;
+}
+
+/* ── tone → 色相：全项目唯一一张表 ──
+   三处消费者共用：节点外壳（--node-accent）、内置 Agent 里的端口小圆点（.tone-*）、
+   连线端子（.handle-*）。P6 之前这是**三张各写一遍的表**，彼此都不一致 ——
+   绿色的 knowledge 节点配绿端子，而 input 节点是灰的却挂着灰端子，
+   拖到画布上就成了"库里五颜六色、画布上大半是灰"。
+   与节点库 NodePanel.tsx 的 color 逐条对齐，权威副本在 tokens.guard.test.ts 的 TONE_MAP。
+
+   端子写在同一条选择器里而不是继承父节点：handle-input 长在 mini-agent 节点上，
+   继承会让它跟着变灰 —— 端子的色相属于它代表的**接口**，不属于它挂着的节点。
+
+   这一层只换色相。玻璃质感、4 层背景、边框渐变都读 --node-accent，不受影响。 */
+[data-tone="tone-input"], .tone-input, .handle-input { --tone-color: var(--color-accent-green); }
+[data-tone="tone-identity"], .tone-identity, .handle-identity { --tone-color: var(--color-accent-purple); }
+[data-tone="tone-skill"], .tone-skill, .handle-skill { --tone-color: var(--color-accent-amber); }
+[data-tone="tone-memory"], .tone-memory, .handle-memory { --tone-color: var(--color-accent-teal); }
+[data-tone="tone-knowledge"], .tone-knowledge, .handle-knowledge { --tone-color: var(--color-accent-teal); }
+[data-tone="tone-agent"], .tone-agent, .handle-agent { --tone-color: var(--color-accent-blue); }
+[data-tone="tone-mini-agent"], .tone-mini-agent, .handle-mini-agent { --tone-color: var(--color-text-secondary); }
+[data-tone="tone-model"], .tone-model, .handle-model { --tone-color: var(--color-accent-blue); }
+[data-tone="tone-output"], .tone-output, .handle-output { --tone-color: var(--color-text-tertiary); }
+
+/* 生图 Agent 与内置 Agent 是同一个节点类型（miniAgent + imageGeneration），
+   只在色相上分一档紫，不复制一套结构。输出端子跟着走 —— 紫节点挂灰端子会显得没接上。 */
+.canvas-node[data-tone="tone-mini-agent"][data-variant="image"],
+.canvas-node[data-variant="image"] .handle-mini-agent {
+  --tone-color: var(--color-accent-purple);
+}
+
+/* ── 弱发光档 ──
+   一条工作流上同时点亮 5–6 个彩色节点，默认档（12% 浓度 / 30% 半径）整块画布会过曝。
+   knowledge 早期上色时就单独压过发光，P6 把它的参数抽成共用块，其余新上色的跟着走。
+   identity / skill 保持默认档：它们是画布上的"配置"重点，且很少两个同时点亮。 */
+.canvas-node[data-tone="tone-input"],
+.canvas-node[data-tone="tone-memory"],
+.canvas-node[data-tone="tone-knowledge"],
+.canvas-node[data-tone="tone-agent"],
+.canvas-node[data-tone="tone-model"] {
+  --node-glow-strong: 4%;
+  --node-glow-soft: 1%;
+  --node-glow-radius: 16%;
+  --node-border-accent: 11%;
+  --node-selected-border-accent: 24%;
+}
+
+.node-header {
+  min-height: 40px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  overflow: hidden;
+  padding: 8px 16px;
+}
+
+.node-title {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--color-text-primary);
+  font-size: var(--font-size-md);
+  font-weight: var(--font-weight-medium);
+  line-height: 22px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.node-port-dot {
+  width: 10px;
+  height: 10px;
+  flex-shrink: 0;
+  border-radius: var(--radius-full);
+  background: transparent;
+  box-shadow: none;
+}
+
+.node-panel-card {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  overflow: visible;
+  border: none;
+  border-radius: var(--radius-lg);
+  corner-shape: var(--corner-smooth);
+  background: var(--node-panel-bg);
+  padding: 12px;
+  backdrop-filter: blur(10px) saturate(112%);
+  -webkit-backdrop-filter: blur(10px) saturate(112%);
+}
+
+.node-output {
+  display: flex;
+  flex-direction: column;
+}
+
+.node-output .node-panel-card {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+  padding-bottom: 20px;
+}
+
+.node-port-row {
+  min-height: 30px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 4px;
+  color: var(--color-text-primary);
+  font-size: var(--font-size-md);
+  font-weight: var(--font-weight-medium);
+  line-height: 22px;
+}
+
+.node-model-main {
+  display: grid;
+  gap: 12px;
+}
+
+.node-mini-agent-main {
+  display: grid;
+  gap: 10px;
+}
+
+.node-mini-agent-inputs {
+  display: grid;
+  gap: 0;
+}
+
+.node-mini-agent-model .node-custom-select-trigger {
+  min-height: 40px;
+  background: var(--node-control-bg);
+}
+
+.node-mini-agent-role {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+  margin: 0;
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-base);
+  line-height: 20px;
+}
+
+.node-mini-agent-capabilities,
+.node-mini-agent-skill-names {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.node-mini-agent-capabilities span,
+.node-mini-agent-skill-names small {
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  border-radius: var(--radius-sm);
+  background: var(--node-control-bg);
+  color: var(--color-text-tertiary);
+  padding: 4px 7px;
+  font-size: var(--font-size-xs);
+  line-height: 16px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.node-mini-agent-skill-names small {
+  background: color-mix(in srgb, var(--color-accent-amber) 10%, var(--node-control-bg));
+  color: var(--color-text-secondary);
+}
+
+.node-model-inputs {
+  display: grid;
+  gap: 0;
+}
+
+.node-model-agent-linked .node-model-inputs {
+  opacity: 0.34;
+}
+
+.node-model-agent-linked .node-model-inputs .node-port-row {
+  color: var(--color-text-tertiary);
+}
+
+.node-model-select .node-custom-select-trigger {
+  min-height: 40px;
+  background: var(--node-control-bg);
+}
+
+.node-model-select .node-custom-select-trigger:hover,
+.node-model-select .node-custom-select-trigger.open {
+  background: var(--node-control-hover);
+}
+
+.node-model-params {
+  display: grid;
+  gap: 8px;
+}
+
+.node-copy {
+  margin: 0;
+  color: var(--color-text-tertiary);
+  font-size: var(--font-size-md);
+  font-weight: var(--font-weight-regular);
+  line-height: 22px;
+  white-space: normal;
+}
+
+.node-field-stack {
+  display: grid;
+  gap: 8px;
+}
+
+.node-form-row {
+  display: grid;
+  grid-template-columns: 72px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.node-form-label {
+  overflow: hidden;
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-md);
+  line-height: 22px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.node-control {
+  min-width: 0;
+  min-height: 40px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+  background: var(--node-control-bg);
+  color: var(--color-text-primary);
+  font-family: var(--font-sans);
+  font-size: var(--font-size-md);
+  line-height: 22px;
+  box-shadow: none;
+  outline: none;
+}
+
+.node-control:where(input, textarea):focus,
+.node-control:focus-visible,
+.node-custom-select-trigger:focus-visible {
+  background: var(--node-control-focus);
+  border-color: var(--control-border-focus);
+}
+
+.node-select-pill,
+.node-list-value,
+.node-agent-select {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 0 12px;
+}
+
+.node-list-value {
+  width: 100%;
+  border: none;
+  cursor: pointer;
+  text-align: left;
+}
+
+.node-select-pill span,
+.node-list-value span,
+.node-agent-select span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.node-stepper {
+  display: grid;
+  grid-template-columns: 32px minmax(0, 1fr) 32px;
+  gap: 2px;
+  min-width: 0;
+}
+
+.node-step-button,
+.node-step-value {
+  min-width: 0;
+  height: 40px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+  background: var(--node-control-bg);
+  color: var(--color-text-primary);
+  font-family: var(--font-sans);
+  font-size: var(--icon-glyph-sm);
+  line-height: 22px;
+}
+
+.node-step-input {
+  width: 100%;
+  padding: 0 6px;
+  outline: none;
+  text-align: center;
+  -moz-appearance: textfield;
+}
+
+.node-step-input::-webkit-outer-spin-button,
+.node-step-input::-webkit-inner-spin-button {
+  margin: 0;
+  -webkit-appearance: none;
+}
+
+.node-step-input:focus {
+  background: var(--node-control-focus);
+  border-color: var(--control-border-focus);
+}
+
+.node-budget-input {
+  width: 100%;
+  min-width: 0;
+  padding: 0 8px;
+  text-align: left;
+}
+
+.node-step-button {
+  border-color: transparent;
+  color: var(--color-text-tertiary);
+  font-size: var(--icon-glyph-md);
+  line-height: 1;
+  cursor: pointer;
+}
+
+.node-step-button:hover {
+  border-color: transparent;
+  color: var(--color-text-secondary);
+  background: var(--node-control-hover);
+}
+
+.node-step-button:focus-visible {
+  outline: none;
+  border-color: var(--control-border-focus);
+  background: var(--node-control-focus);
+}
+
+.node-button {
+  width: 100%;
+  border-color: transparent;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 0 12px;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+}
+
+.node-button:hover {
+  border-color: transparent;
+  color: var(--color-text-primary);
+  background: var(--node-control-hover);
+}
+
+.node-add-button {
+  color: var(--color-text-secondary);
+}
+
+.node-edit-button {
+  height: 40px;
+}
+
+.node-gear-icon {
+  color: var(--color-text-tertiary);
+  font-size: var(--icon-glyph-md);
+  line-height: 1;
+}
+
+.node-skill-inline {
+  display: grid;
+  gap: 8px;
+}
+
+.node-split-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 40px;
+  gap: 6px;
+  min-width: 0;
+}
+
+.node-custom-select-wrap {
+  position: relative;
+  min-width: 0;
+}
+
+.node-custom-select-trigger {
+  width: 100%;
+  min-width: 0;
+  min-height: 40px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+  outline: none;
+  padding: 0 10px 0 12px;
+  background: var(--node-control-bg);
+  color: var(--color-text-primary);
+  cursor: pointer;
+  font-family: var(--font-sans);
+  font-size: var(--font-size-md);
+  line-height: 22px;
+  text-align: left;
+}
+
+.node-custom-select-trigger > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.node-custom-select-trigger > svg {
+  width: 18px;
+  height: 18px;
+  flex: 0 0 18px;
+  color: var(--color-text-tertiary);
+  transition: transform var(--motion-normal) var(--ease-out);
+}
+
+.node-custom-select-trigger.open,
+.node-custom-select-trigger:hover:not(:disabled) {
+  background: var(--node-control-hover);
+  border-color: transparent;
+}
+
+.node-custom-select-trigger.open > svg {
+  transform: rotate(180deg);
+}
+
+.node-custom-select-trigger.is-placeholder,
+.node-custom-select-trigger:disabled {
+  color: var(--color-text-tertiary);
+}
+
+.node-custom-select-trigger:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.node-custom-select-menu {
+  position: absolute;
+  z-index: 120;
+  top: calc(100% + 6px);
+  right: 0;
+  left: 0;
+  display: grid;
+  gap: 3px;
+  max-height: 216px;
+  overflow-y: auto;
+  padding: 6px;
+  border: 1px solid var(--surface-popover-border);
+  border-radius: var(--radius-md);
+  background: var(--surface-popover-bg);
+  box-shadow: 0 18px 38px var(--shadow-ink-deep);
+  scrollbar-color: color-mix(in srgb, var(--color-text-tertiary) 40%, transparent) transparent;
+}
+
+.node-floating-select-menu {
+  --node-control-active: color-mix(in srgb, var(--color-ui-control-active) 72%, transparent);
+  --node-popover-bg: color-mix(in srgb, var(--surface-popover-bg) 94%, var(--color-ui-control));
+  position: fixed;
+  z-index: 160;
+  inset: auto auto auto auto;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  touch-action: pan-y;
+  pointer-events: auto;
+}
+
+.node-custom-select-item,
+.node-custom-select-empty {
+  min-height: 34px;
+  width: 100%;
+  border: none;
+  border-radius: var(--radius-sm);
+  padding: 6px 8px;
+  background: transparent;
+  color: var(--color-text-secondary);
+  font-family: var(--font-sans);
+  font-size: var(--font-size-base);
+  line-height: 20px;
+  text-align: left;
+}
+
+.node-custom-select-item {
+  cursor: pointer;
+}
+
+.node-custom-select-item:hover:not(:disabled),
+.node-custom-select-item.active {
+  background: var(--node-control-active);
+  color: var(--color-text-primary);
+}
+
+.node-custom-select-item:disabled {
+  cursor: not-allowed;
+  opacity: 0.38;
+}
+
+.node-custom-select-empty {
+  color: var(--color-text-tertiary);
+}
+
+.node-icon-button {
+  width: 40px;
+  height: 40px;
+  border-color: transparent;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  color: var(--color-text-tertiary);
+  cursor: pointer;
+}
+
+.node-icon-button:hover {
+  border-color: transparent;
+  color: var(--color-text-secondary);
+  background: var(--node-control-hover);
+}
+
+.node-agent-inputs {
+  display: grid;
+  gap: 0;
+}
+
+.node-agent-select {
+  width: 100%;
+  border-color: transparent;
+  margin-top: 2px;
+  cursor: pointer;
+}
+
+.node-agent-select-wrap {
+  position: relative;
+  width: 100%;
+}
+
+.node-agent-select-main,
+.node-agent-menu-item {
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.node-agent-select-main {
+  flex: 1;
+}
+
+.node-agent-select.open,
+.node-agent-select:hover {
+  background: var(--node-control-hover);
+}
+
+.node-agent-select > svg {
+  width: 18px;
+  height: 18px;
+  flex: 0 0 18px;
+  color: var(--color-text-tertiary);
+}
+
+.node-agent-menu {
+  position: absolute;
+  z-index: 120;
+  left: 0;
+  right: 0;
+  top: calc(100% + 6px);
+  display: grid;
+  gap: 4px;
+  padding: 6px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--surface-popover-border);
+  background: var(--surface-popover-bg);
+  box-shadow: 0 18px 38px var(--shadow-ink);
+  max-height: 220px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-color: color-mix(in srgb, var(--color-text-tertiary) 40%, transparent) transparent;
+}
+
+.node-floating-agent-menu {
+  --node-control-active: color-mix(in srgb, var(--color-ui-control-active) 72%, transparent);
+  --node-popover-bg: color-mix(in srgb, var(--surface-popover-bg) 94%, var(--color-ui-control));
+  position: fixed;
+  z-index: 160;
+  inset: auto auto auto auto;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  touch-action: pan-y;
+  pointer-events: auto;
+}
+
+.node-agent-menu-empty,
+.node-agent-menu-item {
+  min-height: 36px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text-secondary);
+  padding: 0 8px;
+  font-family: var(--font-sans);
+  font-size: var(--font-size-md);
+  line-height: 22px;
+  text-align: left;
+}
+
+.node-agent-menu-item {
+  width: 100%;
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr) minmax(44px, max-content);
+  gap: 6px;
+  cursor: pointer;
+}
+
+.node-agent-menu-name,
+.node-agent-menu-version {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.node-agent-menu-name {
+  color: inherit;
+}
+
+.node-agent-menu-version {
+  justify-self: end;
+  max-width: 62px;
+  color: var(--color-text-tertiary);
+  font-size: var(--font-size-xs);
+}
+
+.node-agent-menu-item:hover,
+.node-agent-menu-item.active {
+  background: var(--node-control-active);
+  color: var(--color-text-primary);
+}
+
+.node-step-input::placeholder {
+  color: var(--color-text-tertiary);
+}
+
+.node-agent-logo {
+  width: 24px;
+  height: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  overflow: hidden;
+  border-radius: var(--radius-full);
+  color: var(--color-text-secondary);
+}
+
+.node-agent-logo img {
+  display: block;
+  width: 24px;
+  height: 24px;
+}
+
+.node-agent-logo.fallback {
+  background: var(--node-control-hover);
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-semibold);
+}
+
+.node-output-preview {
+  flex: 1;
+  min-height: 0;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  border-radius: var(--radius-sm);
+  background: var(--node-control-bg);
+  color: var(--color-text-secondary);
+  padding: 8px 12px;
+  font-size: var(--font-size-base);
+  line-height: 20px;
+  text-overflow: ellipsis;
+  white-space: normal;
+  word-break: break-word;
+}
+
+.node-output-resize-handle {
+  position: absolute;
+  right: 10px;
+  bottom: 10px;
+  width: 16px;
+  height: 16px;
+  border: none;
+  border-radius: var(--radius-2xs);
+  background: transparent;
+  opacity: 0;
+  cursor: nwse-resize;
+  pointer-events: none;
+  transition: opacity var(--motion-fast) var(--ease-out), background var(--motion-fast) var(--ease-out);
+}
+
+.node-output:hover .node-output-resize-handle,
+.node-output.node-selected .node-output-resize-handle {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.node-output-resize-handle::before,
+.node-output-resize-handle::after {
+  content: '';
+  position: absolute;
+  right: 2px;
+  bottom: 2px;
+  width: 9px;
+  height: 1.5px;
+  border-radius: var(--radius-full);
+  background: color-mix(in srgb, var(--color-text-tertiary) 80%, transparent);
+  transform-origin: right bottom;
+}
+
+.node-output-resize-handle::before {
+  transform: rotate(45deg);
+}
+
+.node-output-resize-handle::after {
+  transform: rotate(45deg) translate(-3px, -3px);
+  opacity: 0.7;
+}
+
+.node-output-resize-handle:hover {
+  background: color-mix(in srgb, var(--color-bg-hover) 60%, transparent);
+}
+
+.react-flow__handle {
+  width: 10px !important;
+  height: 10px !important;
+  border: 2px solid var(--node-shell-bg) !important;
+  box-shadow: 0 0 7px 1px color-mix(in srgb, currentColor 54%, transparent) !important;
+  z-index: 6 !important;
+  transition: box-shadow var(--motion-normal) var(--ease-out), filter var(--motion-normal) var(--ease-out) !important;
+}
+
+/* 端子色相读上面那张唯一的 tone 表。刻意限定在 .canvas-node 内 ——
+   生图画布的 .image-handle 是另一族（24px 圆角方块 + 悬停显形的 ＋ 号），
+   不加这层限定会被这里的 !important 抢掉底色。
+   color 与 background 同值：上面的发光用 currentColor 跟着端子色走。 */
+.canvas-node .react-flow__handle {
+  background: var(--tone-color, var(--color-text-tertiary)) !important;
+  color: var(--tone-color, var(--color-text-tertiary)) !important;
+}
+
+.react-flow__handle-left {
+  left: 30px !important;
+}
+
+.react-flow__handle-right {
+  right: 30px !important;
+}
+
+.react-flow__handle:hover {
+  box-shadow: 0 0 9px 2px color-mix(in srgb, currentColor 68%, transparent) !important;
+  filter: brightness(1.22);
+}
+
+.react-flow__handle.handle-muted {
+  opacity: 0.28;
+  filter: grayscale(1) brightness(0.86);
+  pointer-events: none;
+  box-shadow: none !important;
+}
+
+/* 知识库端子刻意压暗发光：一个 Agent 上可能挂好几条知识库连线。 */
+.handle-knowledge {
+  box-shadow: 0 0 3px color-mix(in srgb, currentColor 28%, transparent) !important;
+}
+
+.handle-knowledge:hover {
+  box-shadow: 0 0 5px 1px color-mix(in srgb, currentColor 40%, transparent) !important;
+}

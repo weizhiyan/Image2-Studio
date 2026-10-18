@@ -1,137 +1,151 @@
-# Image Studio
+# 绘板 Huiban · Image2-Studio
 
-一个独立运行的生图网站，支持 GPT Image / OpenAI 兼容中转站、参考图上传、截图粘贴、历史图二次修改，以及可选 Agent 提示词优化。
+**内置 Agent 的节点式 AI 图像工作台。**
 
-## 特性
+绘板不是一个只负责把提示词转发给生图接口的输入框，也不是一张画完就结束的空白画布。它把
+**Agent、对话、参考图、生成任务和结果版本**放进同一个可持续编辑的画布里：Agent 先理解你要做
+什么，再帮你补齐信息、整理提示词、调用生图模型；每一张图都是画布上的节点，节点之间的连线就是
+上下文关系，生成结果可以继续二次编辑、标注、对比和迭代。
 
-- 文生图：无参考图时调用兼容的 `/images/generations`。
-- 图生图：上传、拖拽、粘贴或选择历史图后调用兼容的 `/images/edits`。
-- Agent 优化：优先使用 `LANGUAGE_MODEL_BASE` / `LANGUAGE_MODEL_API_KEY` / `LANGUAGE_MODEL_NAME` 调用语言模型优化提示词；未配置时使用本地小 Agent。
-- 内置小 Agent：`backend/mini-agent.js` 负责意图提取、参考图约束、记忆偏好注入和提示词组合。
-- 持续学习：每次生成后自动总结风格特点、比例、模型、参考图数量等参数，并写入 skills 记忆。
-- 本地归档：输入图、输出图和索引保存在 `data/`。
-- 高端极简 UI：大输入区、轻量控制、图片优先的结果和历史面板。
+一句话概括：**在画布上思考，让 Agent 帮你把想法变成图。**
 
-## 运行
+## 核心能力
+
+### 内置 Agent，而不是单纯的生图按钮
+
+- **先理解，再生成**：Agent 会结合当前对话、画布节点和参考图理解意图，判断是直接生成，还是先整理提示词。
+- **主动反问**：当信息不足时，Agent 会提出 1–4 个关键问题，例如主体、风格、构图、画面文字、参考层等；回答后会继续当前任务。
+- **提示词优化**：内置提示词规范与优化链路，保留主体、场景、构图、光线、色彩、材质等约束，减少“看起来很努力但生成跑偏”的情况。
+- **上下文连续编辑**：在 Responses API 模式下支持多轮上下文，可以沿着上一版继续改；切到直连模式时，也能通过参考图和版本链继续迭代。
+- **结果直接落画布**：Agent 生成的图片不是停留在聊天窗口里，而是成为画布节点，并自动定位到结果。
+- **错误可见**：接口报错、上下文重置、生成失败都会显示在对话和节点上，不静默吞掉。
+
+### 节点就是生成上下文
+
+画布由三类核心节点组成：
+
+- **生成节点**：写提示词、选择模型和画幅、发起生成。运行中显示阶段、耗时和生成动画，完成后就地变成结果图。
+- **图片节点**：生成结果或上传参考图。可以查看大图、切换历史版本、复制图片、继续二次编辑，或作为下游参考。
+- **文本引用节点**：把上游提示词作为上下文连进来，适合把“风格说明 / 分镜描述 / 统一规范”复用到多条生成任务。
+
+节点之间的关系通过连线表达：
+
+- 图片节点连到生成节点 = 图生图 / 风格参考 / 局部重绘的参考图。
+- 文本节点连到生成节点 = 将上游提示词一起送入生成上下文。
+- 连线顺序可以调整，画布内会显示参考图编号，发送给模型的图片顺序与界面编号一致。
+- 支持拖拽移动、框选、复制粘贴、整理布局、撤回节点移动/连线/删除等编辑操作。
+
+### 对话和画布是同一个工作区
+
+- 每张画布拥有独立的 AI 对话线程，切换画布就切换上下文。
+- 对话可以引用画布中的图片和版本，引用会以可删除的内联图片卡片出现在输入框里，图片前后都能继续输入文字。
+- 生成结果在对话里显示为图片卡片，可以定位回画布节点。
+- 支持澄清问题卡片、消息 ID 复制、错误展示和重新生成。
+- 对话历史保存在本地浏览器与 bridge 双份存储中，刷新或换浏览器后仍可继续。
+
+### 图片编辑工作流
+
+- **二次编辑**：在结果节点上继续写修改要求，新版本会挂在同一节点的版本链里，不把画布铺满重复结果。
+- **手绘标注**：在图片上画笔、矩形、文字标注，然后直接按标注生成；标注编辑器拥有独立的撤销 / 重做和删除行为，不会误删画布节点。
+- **画幅控制**：支持 1:1、16:9、3:4、9:16 等比例，也可以从提示词中识别画幅；生成节点可以手动拉伸尺寸。
+- **多路模型配置**：可同时配置多路 OpenAI-compatible 生图接口，分别设置 Base URL、Key、模型列表和默认模型。
+- **直连 / 智能生成**：直连模式直接调用 Image API；智能模式通过 Responses API 理解上下文并支持连续编辑。
+
+### 多画布与本地优先
+
+- 顶栏可新建、重命名、切换和删除画布；不同画布拥有各自的节点、对话和生成历史。
+- 图片、画布文档、对话记录和模型配置都保存在本机 `~/.huiban/`，不依赖云端账号。
+- 浏览器 localStorage 是工作副本，bridge 提供整文档第二拷贝；局域网内打开同一地址也能看到最新画布内容。
+- API Key 只存本机 bridge，不写进仓库，也不会在前端明文持久化。
+
+## 快速开始
 
 ```bash
-copy .env.example .env
-node backend/server.js
+npm install
+npm run dev          # 前端：http://127.0.0.1:5199
+npm run dev:bridge   # bridge：HTTP + SSE + MCP
 ```
 
-打开 `http://127.0.0.1:8787`。
+打开页面后：
 
-如果 PowerShell 禁止运行 `npm.ps1`，可以直接使用 `node backend/server.js`，本项目 MVP 不依赖 npm 安装。
+1. 右上角进入「生图设置」，添加一路生图配置。
+2. 填写 OpenAI-compatible 的 Base URL 和 API Key，获取或手填模型名。
+3. 回到画布，双击空白处新建生成节点，或在右下角打开 AI 对话。
+4. 直接描述你想要的画面；信息不足时 Agent 会先反问。
+5. 生成结果会落到画布；拖动节点、拉线引用参考图，或继续对话迭代。
 
-## 局域网分享给同事
+也可以直接双击「启动.command」使用生产模式。
 
-1. 在你的电脑上查看局域网 IP，例如 Windows 里运行 `ipconfig`，找到类似 `192.168.1.23` 的 IPv4 地址。
-2. 编辑 `.env`：
+## 两种生成方式
 
-```env
-SERVER_HOST=0.0.0.0
-PORT=8787
-PUBLIC_BASE_URL=http://你的局域网IP:8787
+- **直连生成**：调用 Image API，适合明确的单次出图、图生图、批量生成和稳定低成本调用。
+- **智能生成**：走 Responses API + Agent 链路，适合需要理解上下文、连续编辑、参考图角色判断和提示词整理的场景。
+
+两条链路共用同一份模型配置和图片存储，结果都落在同一张画布上。
+
+## 给外部 Agent 的 MCP 接口
+
+绘板内置的 bridge 同时是一个 MCP stdio 服务。Codex 或其他 MCP 客户端可以把它接进来，让外部
+Agent 直接创建画布、读节点、生成图片和优化提示词。
+
+在 `~/.codex/config.toml` 中加入：
+
+```toml
+[mcp_servers.huiban]
+command = "node"
+args = ["<项目绝对路径>/bridge/dist/index.js"]
 ```
 
-示例：
+可用工具：
 
-```env
-PUBLIC_BASE_URL=http://192.168.1.23:8787
-```
+- `huiban_generate`：生成图片并落到指定画布节点，支持参考图、比例、数量和 `profileId`。
+- `huiban_canvases`：列出画布。
+- `huiban_canvas_create`：创建画布。
+- `huiban_nodes`：读取画布节点和图片引用。
+- `huiban_models` / `huiban_config`：查看模型与配置状态（不返回 Key）。
+- `huiban_prompt_guide`：读取内置提示词规范。
+- `huiban_optimize`：按同一套规范优化提示词。
 
-3. 启动服务：`node backend/server.js`
-4. 同事在同一个局域网浏览器打开：`http://你的局域网IP:8787`
-5. 如果访问不了，检查 Windows 防火墙是否允许 Node.js 或端口 `8787` 入站访问。
-
-## 环境变量
-
-```env
-SERVER_HOST=0.0.0.0
-PORT=8787
-PUBLIC_BASE_URL=http://127.0.0.1:8787
-# 图像生成模型：GPT Image 或兼容中转站
-IMAGE_PROVIDER_BASE=https://api.openai.com/v1
-IMAGE_PROVIDER_API_KEY=sk-your-key
-IMAGE_PROVIDER_MODEL=gpt-image-2
-IMAGE_PROVIDER_NAME=openai-compatible
-IMAGE_DEFAULT_SIZE=1024x1024
-IMAGE_DEFAULT_QUALITY=high
-
-# 语言模型 / 小 Agent：用于提示词优化，不直接生成图片
-LANGUAGE_MODEL_BASE=
-LANGUAGE_MODEL_API_KEY=
-LANGUAGE_MODEL_NAME=gpt-4.1-mini
-
-# 可选：旧版自定义 Agent 接口；通常不用填
-AGENT_ENDPOINT=
-AGENT_API_KEY=
-```
-
-中转站只要兼容 OpenAI Images API，即可把 `IMAGE_PROVIDER_BASE` 改成中转站地址，把 `IMAGE_PROVIDER_MODEL` 改成中转站要求的模型名。
-
-## 语言模型与 Agent
-
-推荐配置三件套：
-
-```env
-LANGUAGE_MODEL_BASE=https://api.openai.com/v1
-LANGUAGE_MODEL_API_KEY=sk-your-language-key
-LANGUAGE_MODEL_NAME=gpt-4.1-mini
-```
-
-后端会调用兼容 OpenAI 的 `/chat/completions` 接口优化提示词。如果 `LANGUAGE_MODEL_BASE` 或 `LANGUAGE_MODEL_API_KEY` 留空，就自动使用 `backend/mini-agent.js` 本地小 Agent。
-
-## 旧版 Agent Endpoint 协议
-
-如果不用语言模型三件套，而是有自定义 Agent 服务，则设置 `AGENT_ENDPOINT`。当 `AGENT_ENDPOINT` 有值时，后端会发送：
-
-```json
-{
-  "task": "optimize_image_prompt",
-  "sourcePrompt": "用户原始提示词",
-  "basePrompt": "系统合成提示词",
-  "previousPrompt": "上一轮提示词",
-  "images": [],
-  "rules": ["不改变用户核心意图", "只输出最终提示词", "不调用工具", "不写文件"]
-}
-```
-
-Agent 可返回纯文本，或返回：
-
-```json
-{ "prompt": "优化后的最终生图提示词" }
-```
-
-## API
-
-- `GET /api/config`：前端配置状态。
-- `POST /api/images/upload`：保存上传或粘贴图片。
-- `POST /api/images/optimize-prompt`：调用 Agent 或自动回退。
-- `POST /api/images/generate`：生成图片并保存输出。
-- `GET /api/images/history`：读取历史输出。
-- `GET /api/images/file/:id`：通过索引 ID 安全访问图片。
-
-## 数据目录
+## 架构
 
 ```text
-data/
-├── images.json
-├── generation-history.json
-├── skills/
-│   └── agent-memory.json
-└── images/
-    ├── inputs/YYYY-MM/
-    └── outputs/YYYY-MM/
+浏览器（Vite + React + React Flow）
+  │  /api/*  相对路径代理 / SSE
+  ▼
+bridge（Node 单进程）
+  ├─ 静态资源（npm run build 后的 dist）
+  ├─ /api/settings   模型配置与 Key（~/.huiban/settings.json）
+  ├─ /api/models     拉取模型列表
+  ├─ /api/test       测试模型连接
+  ├─ /api/generate   生图出口
+  ├─ /api/files/*    本地图片与媒体文件
+  ├─ /api/events     SSE：把新图和画布更新推给页面
+  ├─ /api/chats      对话线程持久化
+  └─ MCP stdio       给 Codex / 其他 Agent 的工具入口
 ```
 
-`generation-history.json` 保存每次生图的完整上下文；`skills/agent-memory.json` 保存 Agent 从历史生成中总结出的偏好标签和经验，用于后续提示词优化。
+所有画布写入通过 bridge 串行化保存，并在写入前保留滚动备份；浏览器和 bridge 都有副本，避免刷新、
+清缓存或局域网多标签页操作导致内容丢失。
 
-错误日志保存在：
+## 数据与隐私
 
-```text
-data/error-logs/errors.json
-data/error-logs/YYYY-MM-DD.md
+- 模型 Key 只保存在本机 `~/.huiban/settings.json`。
+- 画布、对话、图片与生成历史保存在本机 `~/.huiban/`。
+- 仓库不包含用户 Key、个人配置、日志或本地画布数据。
+- 如果需要局域网共享，建议只在可信网络中使用，并为 bridge 增加访问控制后再暴露到更大范围。
+
+## 开发与验证
+
+```bash
+npm run lint    # TypeScript 检查
+npm test        # 单元测试 / Token 守护
+npm run build   # 前端 + bridge 生产构建
 ```
 
-如果前端显示失败，会返回 `errorId`，可到上述日志里查详细堆栈和接口信息。
+项目使用统一 Design Token；组件样式、动效时长和颜色必须走 `src/styles/tokens.css` 与语义变量。
+详细的画布状态、节点事件和持久化约定见 `AGENTS.md`。
+
+## 平台
+
+macOS（Apple Silicon / Intel）与 Windows 均可运行。全链路没有原生数据库依赖，数据使用 JSON 与
+本地媒体文件存储。

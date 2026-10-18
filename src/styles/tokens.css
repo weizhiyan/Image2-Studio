@@ -1,0 +1,517 @@
+/* 灵枢 Design Tokens — 深色优先 */
+/* 源: 视觉前端交互规范.md + UI设计规范.md */
+
+/* ── L0 恒定原色（不随主题翻转）──
+   放在独立的 :root 里，而不是在深/浅两个块里各抄一份同样的数字 ——
+   "两个主题共用同一个值"应该是显式声明，不是靠两处抄对维持。
+   守护测试的主题一致性检查只比对 dark / light 两个块，这里不要求成对出现。
+
+   只有三种场景配得上恒定色：
+     · 压在照片/画布内容之上的控件 —— 可读性取决于它下面的图，不是 App 主题
+     · 功能色实底上的前景（勾选、开关把手）—— 底是中间调蓝，前景两个主题都得是白
+     · Logo —— 品牌识别 */
+:root {
+  --color-ink: #141418;      /* 媒体浮层底色。白按钮压在白照片上会消失，所以恒定深 */
+  --color-paper: #FFFFFF;    /* 恒定浅 */
+  --color-on-accent: var(--color-paper);
+  --color-brand: #7045BF;
+  --color-brand-hover: #7B53C9;
+
+  /* ── 媒体浮层 media chrome ──
+     照片 / 生成结果 / 灯箱之上的控件。整族恒定深，理由同上。 */
+  --media-chrome-bg: color-mix(in srgb, var(--color-ink) 72%, transparent);
+  --media-chrome-bg-strong: color-mix(in srgb, var(--color-ink) 88%, transparent);
+  --media-chrome-fg: var(--color-paper);
+  --media-chrome-fg-muted: color-mix(in srgb, var(--color-paper) 72%, transparent);
+  --media-chrome-border: color-mix(in srgb, var(--color-paper) 12%, transparent);
+  --media-chrome-active: color-mix(in srgb, var(--color-paper) 14%, transparent);
+}
+
+:root,
+[data-theme="dark"] {
+  /* ── 背景色 ── */
+  --color-bg-base: #18181A;
+  --color-bg-canvas: #0E0E0F;
+  --color-bg-surface: #262629;
+  --color-bg-overlay: #1A1A1D;
+  --color-bg-hover: rgb(255 255 255 / 4%);
+  --color-bg-active: #2B2B30;
+  --color-ui-panel: #262629;
+  --color-ui-control: #262629;
+  --color-ui-control-panel: #212123;
+  --color-ui-control-hover: rgb(255 255 255 / 4%);
+  --color-ui-control-active: #2B2B30;
+  --color-file-icon-bg: #343438;
+  --color-file-icon-border: rgb(255 255 255 / 7%);
+
+  /* ── 对话页语义色 ── */
+  --color-surface-control: #262629;
+  --color-surface-control-panel: #212123;
+  --color-interaction-subtle: rgb(255 255 255 / 4%);
+  --color-interaction-default: rgb(255 255 255 / 8%);
+  --color-action-send: #FFFFFF;
+  --color-action-send-hover: rgb(255 255 255 / 86%);
+  --color-action-send-disabled: rgb(255 255 255 / 40%);
+  --color-action-send-icon: rgb(21 21 26 / 90%);
+  --color-inline-code-bg: #3A3A40;
+
+  /* ── 组件语义色 ── */
+  --surface-panel-bg: var(--color-ui-panel);
+  --surface-panel-border: var(--color-ui-border-subtle);
+  /* 统一菜单/弹层风格：纯色实底 + ui-border（与④下拉基准一致） */
+  --surface-popover-bg: var(--color-bg-surface);
+  --surface-popover-border: var(--color-ui-border);
+  /* 下拉弹窗统一材质（.workflow-menu 为基准）：半透明底 + 背景模糊。
+     所有"下拉选择的弹窗"（模型选择 / 节点内下拉 / 画布切换）都引用这两个 token。 */
+  --surface-popover-glass-bg: color-mix(in srgb, var(--color-ui-control) 88%, transparent);
+  --surface-popover-glass-blur: blur(20px) saturate(140%);
+  /* 弹层投影：与上面两件同组，浮层一律「一套背景 + 一道投影」，不再各自写 shadow */
+  --surface-popover-glass-shadow: 0 18px 42px var(--shadow-ink-deep);
+  --surface-section-bg: var(--color-ui-control-panel);
+  --surface-section-border: var(--color-ui-border-subtle);
+  /* Figma 861:794. Kept separate because this translucent surface uses
+     different resolved values from the app's opaque base/hover tokens. */
+  --work-dialog-bg: rgb(24 24 26 / 90%);
+  --work-dialog-control-bg: #303034;
+  --work-dialog-message-bg: var(--color-surface-control);
+  --work-dialog-minimized-bg: rgb(71 71 77 / 50%);
+  --work-dialog-border: rgb(255 255 255 / 5%);
+  --work-dialog-focus-bg: rgb(255 255 255 / 6%);
+  --work-dialog-text-primary: rgb(255 255 255 / 90%);
+  --work-dialog-text-secondary: rgb(255 255 255 / 70%);
+  --work-dialog-text-tertiary: rgb(255 255 255 / 40%);
+  --work-dialog-send-bg: #FFFFFF;
+  /* 跟着主题走：深色下是 86% 白，浅色下是 #292B2F。变体里必须显式引用它，
+     否则 .chat-btn-send:hover 会被变体那条更高特异度的 background 压掉。 */
+  --work-dialog-send-bg-hover: var(--color-action-send-hover);
+  --work-dialog-send-icon: #131314;
+  --work-dialog-shadow: 0 8px 36px -8px rgb(0 0 0 / 6%);
+  --work-dialog-backdrop-blur: 60px;
+  --work-dialog-minimized-backdrop-blur: 16px;
+  --work-dialog-minimized-border: linear-gradient(
+    135deg,
+    rgb(247 250 255 / 32%) 0%,
+    rgb(247 250 255 / 8%) 46.6346%,
+    rgb(247 250 255 / 8%) 100%
+  );
+  --markdown-table-header-bg: var(--color-surface-control-panel);
+  /* 行底是「面」→ 纯色（硬规则 2）；hover 是「态」→ 透明层。
+     两个都指向分主题的 Token，所以浅色档不再重复声明一份。 */
+  --markdown-table-body-bg: var(--color-bg-base);
+  --markdown-table-body-hover-bg: var(--color-ui-control-hover);
+  --control-bg: var(--color-ui-control);
+  --control-bg-hover: var(--color-ui-control-hover);
+  --control-bg-active: var(--color-ui-control-active);
+  --control-border: var(--color-ui-border-subtle);
+  --control-border-hover: var(--color-ui-border);
+  --control-border-focus: var(--color-border-focus);
+  --focus-ring: none;
+  --divider-subtle: var(--color-ui-border-subtle);
+
+  /* ── 分段控件 Segmented ── */
+  /* 轨道与滑块都是**相对量**：轨道用墨色压出凹槽，滑块用抬升面色 + 发丝描边 + 微阴影。
+     这样同一套值在画布(#0E0E0F)、面板(#262629)、弹层上都成立。
+     P3 之前各处直接填 --color-ui-control-active，浅色下与轨道只差 Δ2，等于没有选中态。 */
+  --segment-track-bg: color-mix(in srgb, var(--color-shadow) 26%, transparent);
+  --segment-thumb-bg: #303034;
+  /* 滑块不描边：描边只是把填色块的边界画粗一圈，抬起感靠投影。 */
+  --segment-thumb-shadow: 0 1px 3px rgb(0 0 0 / 32%);
+  /* ghost 变体（无轨道，如看板分类页签）的选中填充 */
+  --segment-ghost-active-bg: var(--color-interaction-default);
+
+  /* ── 通知提示 Toast ── */
+  /* 底片 = 中性半透明层，再按 --toast-tint 掺入类型色；描边刻意做弱 */
+  --toast-bg: color-mix(in srgb, var(--color-bg-surface) 84%, transparent);
+  --toast-tint: 12%;
+  --toast-border: rgb(255 255 255 / 8%);
+  --toast-progress-track: rgb(255 255 255 / 7%);
+  --toast-progress-fill: rgb(255 255 255 / 22%);
+  --toast-shadow:
+    0 22px 48px -18px rgb(0 0 0 / 60%),
+    0 4px 14px -6px rgb(0 0 0 / 38%);
+
+  /* ── 边框色 ── */
+  --color-border-subtle: rgb(255 255 255 / 5%);
+  --color-border-default: rgb(255 255 255 / 7%);
+  --color-border-focus: rgb(255 255 255 / 18%);
+  --color-border-strong: rgb(255 255 255 / 11%);
+  --color-ui-border-subtle: rgb(255 255 255 / 5%);
+  --color-ui-border: rgb(255 255 255 / 7%);
+  --color-ui-border-strong: rgb(255 255 255 / 11%);
+
+  /* ── 文字色 ── */
+  --color-text-primary: #FFFFFF;
+  --color-text-secondary: rgb(255 255 255 / 70%);
+  --color-text-tertiary: rgb(255 255 255 / 40%);
+  --color-text-inverse: #111318;
+  --color-text-link: #5C8FE0;
+
+  /* ── 功能色 ── */
+  --color-accent-blue: #5C8FE0;
+  --color-accent-blue-subtle: #1A2A45;
+  --color-accent-green: #45BF88;
+  --color-accent-green-subtle: #0F2E20;
+  --color-accent-amber: #E0A04A;
+  --color-accent-amber-subtle: #2E1F08;
+  --color-accent-purple: #8F6FE0;
+  --color-accent-purple-subtle: #1E1535;
+  --color-accent-teal: #35BAB0;
+  --color-accent-teal-subtle: #0A2825;
+  --color-accent-red: #E05C5C;
+  --color-accent-red-subtle: #2E0F0F;
+
+  /* ── 画布纹理 ── */
+  --color-canvas-dot: #373745;
+
+  /* ── 生成矩阵色盘（RunningMatrixField 的 readPalette 读取）──────────────
+     对齐参考站 AnimShapeField：10 纯色 + 7 双色径向渐变，canvas 运行时读取，
+     读不到走 TSX 里的兜底同值。消费方 = 生成节点运行态（FlowImageNode）。 */
+  --matrix-solid-1: #22c55e;    /* 绿 */
+  --matrix-solid-2: #06b6d4;    /* 青 */
+  --matrix-solid-3: #f97316;    /* 橙 */
+  --matrix-solid-4: #ef4444;    /* 红 */
+  --matrix-solid-5: #facc15;    /* 黄 */
+  --matrix-solid-6: #ec4899;    /* 粉 */
+  --matrix-solid-7: #9ca3af;    /* 灰 */
+  --matrix-solid-8: #a78bfa;    /* 亮紫 */
+  --matrix-solid-9: #60a5fa;    /* 亮蓝 */
+  --matrix-solid-10: #34d399;   /* 翠 */
+  --matrix-grad-1a: #6366f1;  --matrix-grad-1b: #3b82f6;   /* 靛 → 蓝 */
+  --matrix-grad-2a: #06b6d4;  --matrix-grad-2b: #6366f1;   /* 青 → 靛 */
+  --matrix-grad-3a: #22c55e;  --matrix-grad-3b: #06b6d4;   /* 绿 → 青 */
+  --matrix-grad-4a: #f97316;  --matrix-grad-4b: #ef4444;   /* 橙 → 红 */
+  --matrix-grad-5a: #8b5cf6;  --matrix-grad-5b: #06b6d4;   /* 紫 → 青 */
+  --matrix-grad-6a: #3b82f6;  --matrix-grad-6b: #8b5cf6;   /* 蓝 → 紫 */
+  --matrix-grad-7a: #34d399;  --matrix-grad-7b: #3b82f6;   /* 翠 → 蓝 */
+
+  /* ── 字体 ── */
+  --font-sans: "PingFang SC", -apple-system, BlinkMacSystemFont, sans-serif;
+  --font-mono: "JetBrains Mono", "Fira Code", monospace;
+
+  /* ── 字号 ──
+     P4 只补下端、收上端，正文 13px 不动（动了整个 App 都要散）。
+     10px 原先没档却写死了 64 次 —— 代码早就比标尺更小了，先把它合法化。 */
+  --font-size-2xs: 10px;     /* 角标 / 元信息 / 路径 / 计数 */
+  --font-size-xs: 11px;
+  --font-size-sm: 12px;
+  --font-size-base: 13px;    /* 正文 */
+  --font-size-md: 14px;
+  --font-size-lg: 15px;      /* 16 → 15，收窄上端 */
+  --font-size-xl: 17px;      /* 18 → 17 */
+  --font-size-2xl: 20px;     /* 新增，收敛原先的 20/22px */
+  --font-size-code: 12px;
+
+  /* ── 字形图标 ──
+     × ‹ + ⚙ 这类 Unicode 符号当图标用的按钮。刻意与 --font-size-* 分开一条轴：
+     它们跟按钮尺寸走，混进正文标尺的话，"收窄正文上端"会顺手把图标也改小。
+     选档看按钮外框：≤24px → sm，28–32px → md，36px → lg，40px+ → xl。 */
+  --icon-glyph-sm: 16px;
+  --icon-glyph-md: 18px;
+  --icon-glyph-lg: 22px;
+  --icon-glyph-xl: 28px;
+
+  /* ── 字重 ── */
+  --font-weight-regular: 400;
+  --font-weight-medium: 500;
+  --font-weight-semibold: 600;
+
+  /* ── 行高 ── */
+  --line-height-tight: 1.3;
+  --line-height-normal: 1.5;
+  --line-height-relaxed: 1.6;
+  --line-height-code: 1.7;
+
+  /* ── 间距 ── */
+  --spacing-1: 4px;
+  --spacing-2: 8px;
+  --spacing-3: 12px;
+  --spacing-4: 16px;
+  --spacing-6: 24px;
+  --spacing-8: 32px;
+  --spacing-12: 48px;
+
+  /* ── 圆角 ──
+     P7 重新定档。P4 那版把 sm/md 定成 14/18，结果 36px 高的按钮配 18px 圆角
+     正好等于高度一半 —— 渲染出来就是个胶囊，和写 --radius-full 没区别。
+     P4 只清理了显式写 --radius-full 的 31 处，完全没看见"数值等于半高"这条
+     暗门，全项目 150 条规则从这个门溜了过去（70 条是矩形，本不该是胶囊）。
+
+     所以现在的选档规则是一个**比例**，不是一张"高度区间"表：
+         有效圆角 ≤ 0.4 × 高度
+     低于 0.4 才读得出"这是个圆角矩形"；到 0.5 就是胶囊，观感上等于全圆角。
+     反解成每档的最小可用高度（radius / 0.4），照这个查就不会越界：
+
+       --radius-2xs  6px  → 高度 ≥15px   徽章 / 计数 / 状态条
+       --radius-xs  10px  → 高度 ≥25px   菜单项 / 内层小按钮 / chip
+       --radius-sm  12px  → 高度 ≥30px   按钮 / 输入 / 图标按钮 / 分段轨道 / 下拉触发器
+       --radius-md  16px  → 高度 ≥40px   气泡 / 卡片 / 下拉小面板（无固定高度按最小态算）
+       --radius-lg  24px  → 高度 ≥60px   大面板 / 弹层 / 表格外框
+       --radius-xl  32px  → 高度 ≥80px   窗口外壳 / 大弹窗
+
+     无固定高度的面（气泡、卡片）按**最小态**算：用户消息气泡单行约 52px，
+     所以是 md(16) 而不是 lg(24) —— 24/52 = 0.46，单行时就已经是胶囊了。
+
+     嵌套面（外壳套内层）不要写 `calc(… - 2px)`，在组件顶部起一个局部 Token，
+     见 WorkKnowledgeDialog.css 的 --dialog-radius / --dialog-inner-radius。 */
+  --radius-2xs: 6px;
+  --radius-xs: 10px;
+  --radius-sm: 12px;         /* 控件档：36px 高的按钮/输入/图标按钮都用这个 */
+  --radius-md: 16px;         /* 面档：气泡、卡片、下拉面板 */
+  --radius-lg: 24px;         /* 原 --radius-popover(20) 并入此档 */
+  --radius-xl: 32px;
+  --radius-full: 999px;      /* 只用于正圆 / 滚动条 thumb / 进度条端头，见 CLAUDE.md */
+
+  /* ── 超椭圆（"苹果圆角"）──
+     实测（headless Chrome 逐像素量左上角对角线上的白色起点，标称 R=40）：
+       corner-shape        对角缺口   等效圆形圆角   占标称值
+       round / se(1)       16.97px      41.0px       102%   ← 基准，就是圆弧
+       superellipse(1.1)   15.56px      37.6px        94%   ← 现用
+       superellipse(1.2)   14.14px      34.1px        85%
+       superellipse(1.5)   12.73px      30.7px        77%
+       squircle / se(2)     8.49px      20.5px        51%   ← 写 24 看着像 12
+     指数越大，角尖被填得越满 —— 观感上**更方**，不是更圆。P4 铺开 `squircle`
+     之后"圆角显示的和写的不一样"就是这一条：只剩一半观感圆度。
+
+     为什么落在 1.1，而不是更"有味道"的 1.5：
+       · CSS 的 superellipse 只改角尖饱满度，改不了曲线沿边的起始位置；
+         而苹果连续圆角（.continuous）的特征恰恰是**曲线提前 ~1.2–1.3×R 起弯**、
+         角尖只比圆弧紧一点点。所以能对上苹果的那一档就在 1.1 附近，
+         1.5 / squircle 是"更方"，不是"更苹果"。
+       · 94% 意味着写 24 量出来 22.5、写 32 量出来 30 —— 肉眼对不出差别，
+         "声明值就是看到的值"这条重新成立。
+
+     只有 lg / xl 两档开：更小的面上超椭圆与圆弧差别不到 1px，纯付渲染成本。
+     组件里写 `corner-shape: var(--corner-smooth)`，不写字面量 ——
+     以后要整体调曲率（或干脆退回 `round` 让声明值完全等于观感值）只改这一行。 */
+  --corner-smooth: superellipse(1.1);
+
+  /* ── 控件与动效 ── */
+  --control-height: 36px;
+  --control-height-compact: 32px;
+
+  /* 一次性过渡（hover / 展开 / 弹层入场）。
+     实测 140/150ms 用了 26 次却无档可用 —— 补齐后一律向最近档归并。 */
+  --motion-instant: 100ms;   /* 纯 opacity、图标换色，快到察觉不到 */
+  --motion-fast: 120ms;      /* hover / 按压反馈 */
+  --motion-normal: 160ms;    /* 默认档：折叠展开、菜单入场 */
+  --motion-slow: 220ms;      /* 弹窗、抽屉、面板入场 */
+  --motion-slower: 360ms;    /* 大面积布局位移、画布切换 */
+  --motion-stagger: 80ms;    /* 错相延迟：多段 transition / 逐条入场的 delay */
+
+  /* 循环动画（spinner / 呼吸 / 流光）。与上面分开，避免把 1.4s 当"过渡"用。 */
+  --motion-loop-fast: 800ms; /* spinner，收敛原 800/820/900/1560ms */
+  --motion-loop: 1.4s;       /* 呼吸 / 脉冲，收敛原 1.15/1.2/1.4s */
+  --motion-loop-slow: 1.5s;  /* 流光，收敛原 1.45/1.5/1.6s */
+  --motion-loop-fluid: 1.9s; /* 生成态流体描边一圈（已定稿） */
+
+  /* 缓动。--ease-out 是项目里已经手写了 10 次的家族曲线，扶正为默认。 */
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-in-out: cubic-bezier(0.4, 0, 0.2, 1);
+  --ease-in: cubic-bezier(0.4, 0, 1, 1);     /* 仅退场：加速离开，不要用于入场 */
+  --ease-emphasized: cubic-bezier(0.2, 0.8, 0.2, 1);
+  --ease-chat-collapse: cubic-bezier(0.8, 0, 0.8, 0.2);
+  --ease-linear: linear;     /* 仅 spinner / 流光等匀速循环 */
+
+  /* ── 阴影 ── */
+  /* 阴影/遮罩的墨色原色。组件里用 color-mix 掺 transparent 取 alpha，
+     不要直接写 #000 —— 否则浅色模式下阴影不会跟着变。 */
+  --color-shadow: #000000;
+
+  /* 阴影**只给色，不给几何**。偏移/模糊/扩散是布局，留在组件里；浓度才是主题。
+     组件里这样写：`box-shadow: 0 18px 42px var(--shadow-ink-deep)`。
+     P5 之前 40 处阴影直接写 `rgb(0 0 0 / n%)`，浅色模式下 #F5F5F7 上压 30% 黑
+     会糊成一坨脏灰 —— 这是"深色还行、浅色一堆问题"里占比最大的一条。
+     浅色档位约为深色的 1/3，见 [data-theme="light"]。 */
+  --shadow-ink-faint: color-mix(in srgb, var(--color-shadow) 8%, transparent);
+  --shadow-ink-soft: color-mix(in srgb, var(--color-shadow) 14%, transparent);
+  --shadow-ink: color-mix(in srgb, var(--color-shadow) 24%, transparent);
+  --shadow-ink-deep: color-mix(in srgb, var(--color-shadow) 32%, transparent);
+  --shadow-ink-heavy: color-mix(in srgb, var(--color-shadow) 44%, transparent);
+
+  /* 弹层背后的压暗层。浅色模式也是深色遮罩 —— 浅遮罩压不住内容，只是更淡。 */
+  --scrim-weak: color-mix(in srgb, var(--color-shadow) 30%, transparent);
+  --scrim: color-mix(in srgb, var(--color-shadow) 48%, transparent);
+  --scrim-strong: color-mix(in srgb, var(--color-shadow) 75%, transparent);
+
+  /* 玻璃面顶边的内高光。浅色下是 transparent —— 浅色面本身接近白，内高光无从体现。 */
+  --bevel-highlight: color-mix(in srgb, var(--color-paper) 3%, transparent);
+
+  --shadow-sm: 0 2px 8px var(--shadow-ink);
+  --shadow-md: 0 4px 16px var(--shadow-ink-deep);
+  --shadow-lg: 0 8px 32px var(--shadow-ink-heavy);
+  --chat-composer-shadow: 0 8px 36px -8px rgb(0 0 0 / 28%);
+
+  /* ── 布局 ── */
+  --top-nav-height: 60px;
+  --app-outer-radius: 32px;
+  --chat-width: 816px;
+  --sidebar-width: 200px;
+
+  /* 左上角要给系统窗口按钮让出的横向空间。浏览器里没有窗口按钮 → 0。
+     桌面端由 main.tsx 加的 html.electron-shell 打开，值来自 electron/main.cjs 的
+     trafficLightPosition { x: 32, y: 26 } + 三颗 20px 圆点：32 + 3×20 + 2×8 间隙 ≈ 115。
+     任何贴着窗口左上角的容器都要 padding-left: max(自己的内边距, var(--shell-titlebar-inset))
+     —— 不要再写 .electron-shell 的一次性覆盖，那是"每个容器各记一遍 115px"的来源。 */
+  --shell-titlebar-inset: 0px;
+
+  /* 滚动条：命中区保持 8px 好抓，静止时只露 3px 一条线，hover 才铺满。
+     滑块用 border + background-clip: content-box 收窄，不动 ::-webkit-scrollbar 的宽度
+     —— 改宽度会让内容在 hover 时被挤动重排。 */
+  --scrollbar-size: 8px;
+  --scrollbar-thumb-rest: 3px;
+  --scrollbar-thumb-inset: calc((var(--scrollbar-size) - var(--scrollbar-thumb-rest)) / 2);
+}
+
+html.electron-shell {
+  --shell-titlebar-inset: 115px;
+}
+
+/* 桌面悬浮窗是无边框窗口，压根没有那三颗按钮 —— 让位反而在左上角留一块空白。
+   由 main.tsx 的 `?floating=1` 分支加类，写在这里是因为它是布局 Token 的值。 */
+html.floating-shell {
+  --shell-titlebar-inset: 0px;
+}
+
+/* 窄窗下 macOS 自己会把三颗按钮往左收，让出的空间同步缩小。
+   悬浮窗宽度本来就落在这个断点里，所以 :not(.floating-shell) 是必要的 ——
+   少了它，后面这条同特异度的规则会把上面的 0 又盖回 78。 */
+@media (max-width: 560px) {
+  html.electron-shell:not(.floating-shell) {
+    --shell-titlebar-inset: 78px;
+  }
+}
+
+[data-theme="light"] {
+  --color-bg-base: #F5F5F7;
+  --color-bg-canvas: rgb(24 24 26 / 8%);
+  --color-bg-surface: #FFFFFF;
+  --color-bg-overlay: rgb(242 243 245 / 96%);
+  --color-bg-hover: rgb(24 24 26 / 4%);
+  --color-bg-active: #E1E3E7;
+  --color-ui-panel: #FFFFFF;
+  --color-ui-control: #FFFFFF;
+  --color-ui-control-panel: #F2F3F5;
+  --color-ui-control-hover: rgb(24 24 26 / 4%);
+  --color-ui-control-active: #E1E3E7;
+  --color-file-icon-bg: #EEF0F3;
+  --color-file-icon-border: rgb(17 19 24 / 8%);
+
+  --color-surface-control: #FFFFFF;
+  --color-surface-control-panel: #F2F3F5;
+  --color-interaction-subtle: rgb(24 24 26 / 4%);
+  --color-interaction-default: rgb(24 24 26 / 8%);
+  --color-action-send: #34363B;
+  --color-action-send-hover: #292B2F;
+  --color-action-send-disabled: rgb(24 24 26 / 24%);
+  --color-action-send-icon: #FFFFFF;
+  --color-inline-code-bg: #E1E4EA;
+
+  --surface-panel-bg: var(--color-ui-panel);
+  --surface-panel-border: var(--color-ui-border-subtle);
+  --surface-popover-bg: var(--color-bg-surface);
+  --surface-popover-border: var(--color-ui-border);
+  /* 与深色块同值：color-mix 内的 --color-ui-control 在浅色下自动变浅，玻璃仍是浅色半透明 */
+  --surface-popover-glass-bg: color-mix(in srgb, var(--color-ui-control) 88%, transparent);
+  --surface-popover-glass-blur: blur(20px) saturate(140%);
+  --surface-popover-glass-shadow: 0 18px 42px var(--shadow-ink-deep);
+  --surface-section-bg: var(--color-ui-control-panel);
+  --surface-section-border: var(--color-ui-border-subtle);
+  /* 浅色下这个悬浮对话是纯白面，不是半透明玻璃：原来的 rgb(245 245 247 / 90%)
+     叠 60px backdrop-blur 会透出底下的内容而发灰，用户气泡（同为白）也就和底面
+     糊在一起。面改纯白，气泡改成浅灰，靠明度差分层。 */
+  --work-dialog-bg: var(--color-ui-panel);
+  --work-dialog-control-bg: var(--color-ui-control-panel);
+  --work-dialog-message-bg: var(--color-ui-control-panel);
+  --work-dialog-minimized-bg: rgb(255 255 255 / 80%);
+  --work-dialog-border: rgb(17 19 24 / 6%);
+  --work-dialog-focus-bg: rgb(17 19 24 / 6%);
+  --work-dialog-text-primary: #111318;
+  --work-dialog-text-secondary: #5C5F66;
+  --work-dialog-text-tertiary: #ABAEB2;
+  --work-dialog-send-bg: #18181A;
+  --work-dialog-send-icon: #FFFFFF;
+  --work-dialog-shadow: 0 8px 36px -8px rgb(0 0 0 / 6%);
+  --work-dialog-minimized-border: linear-gradient(
+    135deg,
+    rgb(17 19 24 / 18%) 0%,
+    rgb(17 19 24 / 6%) 46.6346%,
+    rgb(17 19 24 / 6%) 100%
+  );
+  --markdown-table-header-bg: var(--color-surface-control-panel);
+  --control-bg: var(--color-ui-control);
+  --control-bg-hover: var(--color-ui-control-hover);
+  --control-bg-active: var(--color-ui-control-active);
+  --control-border: var(--color-ui-border-subtle);
+  --control-border-hover: var(--color-ui-border);
+  --control-border-focus: var(--color-border-focus);
+  --focus-ring: none;
+  --divider-subtle: var(--color-ui-border-subtle);
+
+  /* 浅色滑块保持接近白（iOS 分段控件就是白滑块），关键是补上发丝描边 + 微阴影 ——
+     原来那块 #FFFFFF 既无描边也无阴影，读起来像"一块纯白色"而不是"一个凸起的滑块"。 */
+  --segment-track-bg: color-mix(in srgb, var(--color-shadow) 8%, transparent);
+  --segment-thumb-bg: #FFFFFF;
+  /* 浅色白滑块压在浅灰轨道上（Δ28），去掉发丝描边后全靠这层投影托住，所以比深色更重。 */
+  --segment-thumb-shadow: 0 1px 3px rgb(17 19 24 / 15%), 0 0 1px rgb(17 19 24 / 7%);
+  --segment-ghost-active-bg: var(--color-interaction-default);
+
+  --toast-bg: color-mix(in srgb, var(--color-bg-surface) 88%, transparent);
+  --toast-tint: 10%;
+  --toast-border: rgb(17 19 24 / 7%);
+  --toast-progress-track: rgb(17 19 24 / 6%);
+  --toast-progress-fill: rgb(17 19 24 / 16%);
+  --toast-shadow:
+    0 22px 46px -16px rgb(17 19 24 / 20%),
+    0 4px 12px -5px rgb(17 19 24 / 10%);
+
+  --color-border-subtle: rgb(17 19 24 / 6%);
+  --color-border-default: rgb(17 19 24 / 8%);
+  --color-border-focus: rgb(17 19 24 / 20%);
+  --color-border-strong: rgb(17 19 24 / 12%);
+  --color-ui-border-subtle: rgb(17 19 24 / 6%);
+  --color-ui-border: rgb(17 19 24 / 8%);
+  --color-ui-border-strong: rgb(17 19 24 / 12%);
+
+  --color-text-primary: #111318;
+  --color-text-secondary: #5C5F66;
+  --color-text-tertiary: #ABAEB2;
+  --color-text-inverse: #F0F0F5;
+  --color-text-link: #4A80D9;
+
+  --color-accent-blue: #4A80D9;
+  --color-accent-blue-subtle: #EBF2FF;
+  --color-accent-green: #3DAD7A;
+  --color-accent-green-subtle: #EAFAF3;
+  --color-accent-amber: #D48F3A;
+  --color-accent-amber-subtle: #FFF8EC;
+  --color-accent-purple: #7B5DD9;
+  --color-accent-purple-subtle: #F3EEFF;
+  --color-accent-teal: #2BA99B;
+  --color-accent-teal-subtle: #EAFAF8;
+  --color-accent-red: #D94A4A;
+  --color-accent-red-subtle: #FFECEC;
+
+  --color-canvas-dot: #C6CBD4;
+
+  --color-shadow: #111318;
+
+  /* 约为深色档位的 1/3。浅色的面本身反射率高，同样的黑压上去浓一倍。 */
+  --shadow-ink-faint: color-mix(in srgb, var(--color-shadow) 3%, transparent);
+  --shadow-ink-soft: color-mix(in srgb, var(--color-shadow) 5%, transparent);
+  --shadow-ink: color-mix(in srgb, var(--color-shadow) 7%, transparent);
+  --shadow-ink-deep: color-mix(in srgb, var(--color-shadow) 11%, transparent);
+  --shadow-ink-heavy: color-mix(in srgb, var(--color-shadow) 16%, transparent);
+
+  /* 遮罩不按 1/3 缩 —— 它的活是"压住下面的内容"，跟面色无关。
+     只比深色淡一档，保证白底弹层仍然浮得起来。 */
+  --scrim-weak: color-mix(in srgb, var(--color-shadow) 20%, transparent);
+  --scrim: color-mix(in srgb, var(--color-shadow) 32%, transparent);
+  --scrim-strong: color-mix(in srgb, var(--color-shadow) 58%, transparent);
+
+  --bevel-highlight: transparent;
+
+  --shadow-sm: 0 2px 8px var(--shadow-ink);
+  --shadow-md: 0 4px 16px var(--shadow-ink-deep);
+  --shadow-lg: 0 8px 32px var(--shadow-ink-heavy);
+  --chat-composer-shadow: 0 8px 36px -8px rgb(0 0 0 / 6%);
+}

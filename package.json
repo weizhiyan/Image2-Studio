@@ -1,10 +1,33 @@
 {
-  "name": "image-studio",
-  "version": "0.1.0",
+  "name": "huiban",
   "private": true,
+  "version": "0.1.0",
   "type": "module",
+  "description": "绘板 —— 轻量画布生图工具。画布里输入即生图，Codex 对话出图直接落画布。",
   "scripts": {
-    "start": "node backend/server.js",
-    "check": "node --check backend/server.js && node --check frontend/js/app.js"
+    "dev": "vite",
+    "dev:bridge": "tsx watch bridge/index.ts",
+    "build": "tsc -b && vite build && tsc -p tsconfig.bridge.json",
+    "start": "node bridge/dist/index.js",
+    "preview": "vite preview",
+    "lint": "tsc -b",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@xyflow/react": "^12.11.1",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "zustand": "^4.5.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@types/react": "^18.3.3",
+    "@types/react-dom": "^18.3.0",
+    "@vitejs/plugin-react": "^4.3.0",
+    "tsx": "^4.23.0",
+    "typescript": "^5.5.0",
+    "vite": "^5.4.0",
+    "vitest": "^2.0.0"
   }
 }

@@ -1,0 +1,41 @@
+/* 结果工具栏（Figma 2664:1926）在 ImageNodes.css 基础样式之上的增量。
+ * 基础形状（定位、容器玻璃、图标钮、分隔线）都在 ImageNodes.css:1209 起，禁改；
+ * 这里补两类：一是「重新生成」淡底图标钮，二是按定稿还原的钮宽 / 图标尺寸。 */
+
+.image-selection-toolbar .image-selection-toolbar-accent {
+  width: 42px;
+  background: var(--color-ui-control-hover);
+  color: var(--color-text-primary);
+}
+
+.image-selection-toolbar .image-selection-toolbar-accent:hover:not(:disabled) {
+  background: var(--color-ui-control-active);
+}
+
+/* ── Figma 2664:1926 度量对齐 ────────────────────────────────────────────
+   基础规则（ImageNodes.css:1231 起，禁改）把图标钮一律做成 32×32、svg 压到 17px，
+   那是旧手写图标的尺寸；换成 Figma 资产后按定稿逐项还原：
+   - 放大 / 绘画：20px 图标 → 钮 36×32（图标 x=8，左右各留 8）
+   - 二次编辑：18px 图标 + 文字，宽度跟内容走（定稿 90）
+   全部用「类名 + 类名」两级选择器，特异性稳压 ImageNodes.css 的同名基础规则，
+   不依赖两个文件的注入顺序。 */
+.image-selection-toolbar > button.image-selection-toolbar-glyph-lg {
+  width: 36px;
+}
+
+.image-selection-toolbar > button.image-selection-toolbar-glyph-lg svg {
+  width: 20px;
+  height: 20px;
+}
+
+/* 「二次编辑」文案 13px：定稿 text-13px，与生成工具栏同档（基础样式是 11px） */
+.image-selection-toolbar > button.image-selection-toolbar-text {
+  font-size: var(--font-size-base);
+}
+
+/* 二次编辑 / 重新生成：图标同为 18px（定稿），前者宽度跟内容走 */
+.image-selection-toolbar > button.image-selection-toolbar-text svg,
+.image-selection-toolbar > button.image-selection-toolbar-accent svg {
+  width: 18px;
+  height: 18px;
+}

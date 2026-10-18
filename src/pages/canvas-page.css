@@ -1,0 +1,594 @@
+/* 画布页面级微调：全部走 L1 语义 Token，不引入原始色。 */
+
+/* 页面根：挂 image-canvas-page 后灵枢那套 is-entering 逐层入场才真正命中（此前无人挂这个类，
+   节点 / dock / rail 的入场动画全都是死的）。画布里只让文本可选中。 */
+.image-canvas-page {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  color: var(--color-text-primary);
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.image-canvas-page input,
+.image-canvas-page textarea {
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+/* 失败节点的原因说明：只用 L1 语义色，不引入原始色。 */
+.image-node-error-note {
+  margin-top: var(--spacing-2);
+  color: var(--color-accent-red);
+  font-size: var(--font-size-xs);
+  font-style: normal;
+  line-height: var(--line-height-normal);
+}
+
+/* 拖拽图片进画布的反馈：虚线框 + 居中提示卡，全部走 L1 语义 Token。 */
+.hb-drop-overlay {
+  position: absolute;
+  inset: var(--spacing-2);
+  z-index: 15;
+  display: grid;
+  place-items: center;
+  border: 1px dashed color-mix(in srgb, var(--color-accent-blue) 60%, var(--color-ui-border));
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--color-bg-base) 55%, transparent);
+  pointer-events: none;
+}
+
+.hb-drop-card {
+  display: grid;
+  justify-items: center;
+  gap: var(--spacing-1);
+  padding: var(--spacing-4) var(--spacing-6);
+  border: 1px solid var(--surface-popover-border);
+  border-radius: var(--radius-md);
+  background: var(--surface-popover-glass-bg);
+  backdrop-filter: var(--surface-popover-glass-blur);
+  -webkit-backdrop-filter: var(--surface-popover-glass-blur);
+  box-shadow: var(--shadow-md);
+  color: var(--color-text-secondary);
+  text-align: center;
+}
+
+.hb-drop-card strong {
+  color: var(--color-text-primary);
+  font-size: var(--font-size-md);
+  font-weight: var(--font-weight-semibold);
+}
+
+.hb-drop-card span {
+  color: var(--color-text-tertiary);
+  font-size: var(--font-size-sm);
+}
+
+/* 双击画布的添加菜单：对齐灵枢 ImageCanvasPage 的 image-add-menu。 */
+.image-add-menu {
+  position: absolute;
+  z-index: 120;
+  width: min(192px, calc(100% - 40px));
+  max-height: calc(100% - 96px);
+  overflow: auto;
+  display: grid;
+  gap: 2px;
+  transform: translate(2px, 2px);
+  border: 1px solid var(--surface-popover-border);
+  border-radius: var(--radius-lg);
+  corner-shape: var(--corner-smooth);
+  background: var(--surface-popover-glass-bg);
+  padding: var(--spacing-2);
+  box-shadow: var(--surface-popover-glass-shadow);
+  backdrop-filter: var(--surface-popover-glass-blur);
+  -webkit-backdrop-filter: var(--surface-popover-glass-blur);
+  user-select: none;
+  -webkit-user-select: none;
+  animation: fade-in var(--motion-fast) var(--ease-out);
+}
+
+.image-add-menu-item {
+  width: 100%;
+  min-height: 40px;
+  display: grid;
+  grid-template-columns: 20px minmax(0, 1fr);
+  grid-template-rows: auto;
+  align-items: center;
+  column-gap: var(--spacing-3);
+  border: 0;
+  border-radius: var(--radius-xs);
+  background: transparent;
+  color: var(--color-text-secondary);
+  padding: var(--spacing-2) var(--spacing-3);
+  cursor: pointer;
+  font-family: var(--font-sans);
+  text-align: left;
+}
+
+/* 双击菜单是紧凑两行：副标题默认收起，只有连接菜单里才展开 */
+.image-add-menu-item.compact {
+  min-height: 40px;
+}
+
+.image-add-menu-item.disabled {
+  opacity: 0.46;
+  cursor: not-allowed;
+}
+
+.image-add-menu-item.disabled:hover {
+  background: transparent;
+  color: var(--color-text-secondary);
+}
+
+.image-add-menu-item:hover,
+.image-add-menu-item.active {
+  background: color-mix(in srgb, var(--color-ui-control-hover) 82%, transparent);
+  color: var(--color-text-primary);
+}
+
+.image-add-menu-item > span {
+  grid-row: 1;
+  width: 20px;
+  height: 20px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 0;
+  background: transparent;
+}
+
+.image-add-menu-item > span svg {
+  width: 20px;
+  height: 20px;
+}
+
+.image-add-menu-item strong,
+.image-add-menu-item small {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.image-add-menu-item strong {
+  color: var(--color-text-primary);
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-medium);
+}
+
+.image-add-menu-item small {
+  display: none;
+}
+
+.image-add-menu-section {
+  display: grid;
+  gap: var(--spacing-1);
+}
+
+.image-add-menu-label {
+  padding: var(--spacing-2) var(--spacing-2) 2px;
+  color: var(--color-text-tertiary);
+  font-size: var(--font-size-xs);
+  line-height: 1.2;
+}
+
+.image-add-menu-title {
+  min-height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 0 2px 0 var(--spacing-2);
+}
+
+.image-add-menu-title span {
+  color: var(--color-text-tertiary);
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-medium);
+}
+
+.image-add-menu-title button {
+  width: 26px;
+  height: 26px;
+  border: 0;
+  border-radius: var(--radius-xs);
+  background: transparent;
+  color: var(--color-text-tertiary);
+  cursor: pointer;
+  font-family: var(--font-sans);
+  font-size: var(--icon-glyph-sm);
+}
+
+.image-add-menu-title button:hover {
+  background: var(--color-ui-control-hover);
+  color: var(--color-text-primary);
+}
+
+/* 连接菜单更宽，且把每个候选项的副标题展开 */
+.image-connect-menu {
+  width: min(280px, calc(100% - 40px));
+  max-height: min(420px, calc(100vh - 32px));
+  overflow-y: auto;
+}
+
+.image-connect-menu .image-add-menu-item {
+  grid-template-columns: 20px minmax(0, 1fr);
+}
+
+.image-connect-menu .image-add-menu-item small {
+  display: block;
+}
+
+.image-connect-menu .image-add-menu-item.image-connect-menu-target {
+  grid-template-columns: 48px minmax(0, 1fr);
+  min-height: 64px;
+}
+
+.image-connect-menu-target .image-connect-menu-thumb {
+  width: 48px;
+  height: 48px;
+  border-radius: var(--radius-sm);
+}
+
+.image-connect-menu-target small {
+  display: none !important;
+}
+
+.image-connect-menu-thumb {
+  width: 20px;
+  height: 20px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  border-radius: var(--radius-2xs);
+  background: var(--color-ui-control-active);
+}
+
+.image-connect-menu-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.image-add-menu-hint,
+.image-add-menu-notice {
+  color: var(--color-text-tertiary);
+  font-size: var(--font-size-xs);
+}
+
+.image-add-menu-hint,
+.image-add-menu-notice {
+  border-radius: var(--radius-xs);
+  background: color-mix(in srgb, var(--color-ui-control-active) 36%, transparent);
+  padding: var(--spacing-2) 10px;
+  line-height: 1.45;
+}
+
+/* 顶栏右侧的弱化生图模式提示：与「生图设置」按钮同行等宽对齐，
+   只做只读状态展示，切换入口在设置弹窗里 */
+.image-canvas-mode-hint {
+  /* 与右侧「生图设置」按钮拉开一截：弱化提示不该贴着主按钮 */
+  margin-right: var(--spacing-6);
+  height: 34px;
+  display: inline-flex;
+  align-items: center;
+  white-space: nowrap;
+  color: var(--color-text-tertiary);
+  font-family: var(--font-sans);
+  font-size: var(--font-size-xs);
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+/* 画布选择器：以下规则从灵枢 TopNav.css 原封拷贝（top-nav-workflow-* / workflow-menu-*），
+   类名与灵枢保持一致，方便两边对照。 */
+
+/* 跟随布局流排布（灵枢新版从导航正中改为跟随 tabs 右侧）：名称过长时自身收缩省略 */
+.top-nav-workflow-wrap {
+  position: relative;
+  z-index: 1;
+  min-width: 0;
+}
+
+/* 名称 + 下拉按钮共享一块实色底：取画布级近黑（与分段导航同 token），
+   在画布同色顶栏上托出一个完整的"画布切换"控件；按钮 hover 仍是 interaction 层 */
+.top-nav-workflow-control {
+  height: 36px;
+  display: inline-flex;
+  align-items: stretch;
+  overflow: hidden;
+  border-radius: var(--radius-sm);
+  /* 与顶栏「生图设置」按钮同款底色，导航一整排视觉才是一家人 */
+  background: color-mix(in srgb, var(--color-ui-control) 88%, transparent);
+  backdrop-filter: blur(16px) saturate(140%);
+  -webkit-backdrop-filter: blur(16px) saturate(140%);
+}
+
+.top-nav-workflow-control:has(.top-nav-workflow-name:hover) .top-nav-workflow-menu-btn, .top-nav-workflow-control:has(.top-nav-workflow-name:focus-visible) .top-nav-workflow-menu-btn, .top-nav-workflow-control:has(.top-nav-workflow-menu-btn:hover) .top-nav-workflow-name, .top-nav-workflow-control:has(.top-nav-workflow-menu-btn:focus-visible) .top-nav-workflow-name {
+  background: var(--color-interaction-subtle);
+}
+
+.top-nav-workflow-name, .top-nav-workflow-menu-btn, .top-nav-workflow-input {
+  border: none;
+  background: transparent;
+  color: var(--color-text-primary);
+  font-family: var(--font-sans);
+}
+
+.top-nav-workflow-name {
+  min-width: 116px;
+  max-width: 220px;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 14px;
+  overflow: hidden;
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-medium);
+  cursor: text;
+  border-radius: var(--radius-sm) 0 0 var(--radius-sm);
+  transition: background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out);
+}
+
+.top-nav-workflow-name > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.top-nav-workflow-name:has(.top-nav-workflow-badge) {
+  cursor: default;
+}
+
+.top-nav-workflow-name:hover, .top-nav-workflow-name:focus-visible, .top-nav-workflow-menu-btn:hover, .top-nav-workflow-menu-btn:focus-visible, .top-nav-workflow-menu-btn.open {
+  background: var(--color-interaction-default);
+  color: var(--color-text-primary);
+}
+
+.top-nav-workflow-input {
+  width: 180px;
+  padding: 0 14px;
+  outline: none;
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-medium);
+}
+
+.top-nav-workflow-menu-btn {
+  width: 36px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-left: none;
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+}
+
+/* 展开过渡：从切换按钮下方弹出（共享 spring-in，原点钉在控件左上角，缩放不飘） */
+.workflow-menu {
+  --enter-y: -6px;
+  --enter-scale: 0.96;
+  transform-origin: top left;
+  animation: spring-in var(--motion-normal) var(--ease-emphasized);
+  position: absolute;
+  top: calc(100% + 8px);
+  /* 贴控件左边缘展开：画布页这个选择器就在最左侧，
+     再按控件中心居中会把菜单推出屏幕外（left: 50% + translateX(-50%) 踩过） */
+  left: 0;
+  width: 260px;
+  max-width: calc(100vw - 24px);
+  transform: none;
+  overflow: hidden;
+  padding: var(--spacing-2);
+  border-radius: var(--radius-lg);
+  corner-shape: var(--corner-smooth);
+  background: var(--surface-popover-glass-bg);
+  backdrop-filter: var(--surface-popover-glass-blur);
+  -webkit-backdrop-filter: var(--surface-popover-glass-blur);
+  box-shadow: var(--shadow-md);
+}
+
+.workflow-menu-new, .workflow-menu-item-main {
+  width: 100%;
+  border: none;
+  font-family: var(--font-sans);
+  cursor: pointer;
+}
+
+.workflow-menu-new {
+  height: 36px;
+  border-radius: var(--radius-sm);
+  /* 比菜单底色明显深一档，才看得清这是个按钮 */
+  background: var(--color-ui-control);
+  box-shadow: inset 0 0 0 1px var(--color-ui-border);
+  color: var(--color-text-primary);
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-medium);
+  transition: background var(--motion-fast) var(--ease-out);
+}
+
+.workflow-menu-new:hover {
+  background: var(--color-ui-control-hover);
+}
+
+.workflow-menu-list {
+  max-height: 280px;
+  margin-top: var(--spacing-2);
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.workflow-menu-empty {
+  padding: var(--spacing-4);
+  color: var(--color-text-tertiary);
+  font-size: var(--font-size-sm);
+  text-align: center;
+}
+
+.workflow-menu-item {
+  min-height: 38px;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  display: flex;
+  align-items: center;
+  overflow: hidden;
+}
+
+.workflow-menu-item:hover, .workflow-menu-item.active, .workflow-menu-item.switching {
+  background: color-mix(in srgb, var(--color-ui-control-hover) 72%, transparent);
+}
+
+.workflow-menu-item-main {
+  min-width: 0;
+  flex: 1;
+  min-height: 38px;
+  padding: 0 var(--spacing-3);
+  background: transparent;
+  color: var(--color-text-primary);
+  text-align: left;
+  font-size: var(--font-size-sm);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.workflow-menu-item-main span:first-child {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workflow-menu-item-main:disabled {
+  cursor: default;
+}
+
+/* 行内重命名输入框：接管这一行的主按钮位置 */
+.workflow-menu-item-input {
+  flex: 1;
+  min-width: 0;
+  height: 38px;
+  padding: 0 var(--spacing-3);
+  border: none;
+  outline: none;
+  background: transparent;
+  color: var(--color-text-primary);
+  font-family: var(--font-sans);
+  font-size: var(--font-size-sm);
+}
+
+/* 重命名 / 删除：只有悬停（或键盘 focus 在这一行）时才浮出，平时只留画布名 */
+.workflow-menu-item-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding-right: 4px;
+  opacity: 0;
+  transition: opacity var(--motion-fast) var(--ease-out);
+}
+
+.workflow-menu-item:hover .workflow-menu-item-actions,
+
+.workflow-menu-item:focus-within .workflow-menu-item-actions {
+  opacity: 1;
+}
+
+.workflow-menu-edit,
+.workflow-menu-delete {
+  width: 28px;
+  height: 28px;
+  border: none;
+  border-radius: var(--radius-sm);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  color: var(--color-text-tertiary);
+  cursor: pointer;
+  transition: color var(--motion-fast) var(--ease-out), background var(--motion-fast) var(--ease-out);
+}
+
+.workflow-menu-edit:hover,
+.workflow-menu-delete:hover {
+  background: var(--color-ui-control-active);
+  color: var(--color-text-primary);
+}
+
+.workflow-menu-edit svg,
+.workflow-menu-delete svg {
+  width: 15px;
+  height: 15px;
+}
+
+.canvas-delete-confirm-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 220;
+  display: grid;
+  place-items: center;
+  padding: var(--spacing-6);
+  background: var(--surface-popover-glass-bg);
+  backdrop-filter: var(--surface-popover-glass-blur);
+  -webkit-backdrop-filter: var(--surface-popover-glass-blur);
+}
+
+.canvas-delete-confirm {
+  width: min(400px, 100%);
+  display: grid;
+  gap: var(--spacing-3);
+  padding: var(--spacing-4);
+  border: 1px solid var(--surface-panel-border);
+  border-radius: var(--radius-md);
+  background: var(--surface-panel-bg);
+  box-shadow: var(--shadow-lg);
+}
+
+.canvas-delete-confirm strong {
+  color: var(--color-text-primary);
+  font-size: var(--font-size-md);
+}
+
+.canvas-delete-confirm p {
+  margin: 0;
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-sm);
+  line-height: var(--line-height-normal);
+}
+
+.canvas-delete-confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--spacing-2);
+  margin-top: var(--spacing-2);
+}
+
+.canvas-delete-confirm-actions button {
+  min-height: var(--control-height);
+  padding: 0 var(--spacing-3);
+  border: 1px solid var(--control-border);
+  border-radius: var(--radius-sm);
+  background: var(--control-bg);
+  color: var(--color-text-primary);
+  font-family: var(--font-sans);
+  font-size: var(--font-size-sm);
+  cursor: pointer;
+}
+
+.canvas-delete-confirm-actions button:hover {
+  background: var(--control-bg-hover);
+}
+
+.canvas-delete-confirm-actions button.is-danger {
+  border-color: transparent;
+  background: var(--color-accent-red);
+  color: var(--color-paper);
+}

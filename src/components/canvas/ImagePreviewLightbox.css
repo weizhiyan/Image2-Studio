@@ -1,0 +1,514 @@
+/* 大图预览：结构与类名照搬灵枢 ImagePreviewLightbox（去掉了多图廊/历史模式）。 */
+.image-generation-preview-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 260;
+  display: grid;
+  place-items: center;
+  padding: 28px;
+  background: var(--scrim-strong);
+  backdrop-filter: blur(16px) saturate(120%);
+  -webkit-backdrop-filter: blur(16px) saturate(120%);
+}
+
+.image-generation-preview {
+  width: min(1480px, calc(100vw - 56px));
+  height: min(850px, calc(100vh - 56px));
+  min-height: 520px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 264px;
+  gap: 12px;
+  position: relative;
+  background: transparent;
+}
+
+.image-generation-preview-main {
+  min-width: 0;
+  min-height: 0;
+  display: grid;
+  grid-template-rows: minmax(0, 1fr) auto;
+  overflow: hidden;
+  border-radius: var(--radius-lg);
+  corner-shape: var(--corner-smooth);
+  background: transparent;
+}
+
+.image-generation-preview-stage {
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  border-radius: var(--radius-lg);
+  corner-shape: var(--corner-smooth);
+  cursor: grab;
+  user-select: none;
+  touch-action: none;
+  box-shadow: 0 28px 90px var(--shadow-ink-heavy);
+}
+
+.image-generation-preview-stage:active {
+  cursor: grabbing;
+}
+
+.image-generation-preview-stage img {
+  width: 100%;
+  height: 100%;
+  display: block;
+  object-fit: contain;
+  border-radius: var(--radius-xs);
+  transform-origin: center;
+  transition: transform var(--motion-normal) var(--ease-out);
+  will-change: transform;
+}
+
+/* 文件丢失：灯箱里也不露裂图，居中一张虚线占位（图标 + 文件名） */
+.image-generation-preview-missing {
+  display: flex;
+  width: 100%;
+  height: 100%;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  border: 1px dashed color-mix(in srgb, var(--divider-subtle) 80%, transparent);
+  border-radius: var(--radius-xs);
+  background:
+    repeating-linear-gradient(-45deg, color-mix(in srgb, var(--color-ui-border-subtle) 5%, transparent) 0 8px, transparent 8px 16px),
+    var(--color-ui-panel);
+  color: var(--color-text-secondary);
+}
+
+.image-generation-preview-missing svg {
+  width: 44px;
+  height: 44px;
+  stroke: currentColor;
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  opacity: 0.7;
+}
+
+.image-generation-preview-missing-text {
+  margin: 0;
+  font-size: var(--font-size-base);
+}
+
+.image-generation-preview-missing-note {
+  margin: 0;
+  font-size: var(--font-size-xs);
+  color: var(--color-text-tertiary);
+}
+
+.image-generation-preview-zoom {
+  position: absolute;
+  left: 50%;
+  bottom: 16px;
+  z-index: 2;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  transform: translateX(-50%);
+  border: 1px solid var(--color-ui-border-subtle);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--color-ui-panel) 86%, transparent);
+  padding: 4px;
+  box-shadow: 0 18px 42px var(--shadow-ink-deep);
+  backdrop-filter: blur(18px) saturate(135%);
+  -webkit-backdrop-filter: blur(18px) saturate(135%);
+}
+
+.image-generation-preview-zoom button {
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: var(--radius-xs);
+  background: transparent;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  font-family: var(--font-sans);
+}
+
+.image-generation-preview-zoom button:hover:not(:disabled) {
+  background: var(--color-ui-control-hover);
+  color: var(--color-text-primary);
+}
+
+.image-generation-preview-zoom button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.image-generation-preview-zoom svg {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.75;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.image-generation-preview-zoom-value {
+  min-width: 46px;
+  color: var(--color-text-secondary);
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: var(--font-size-xs);
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+
+.image-generation-preview-nav {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 36px;
+  height: 36px;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--media-chrome-border);
+  border-radius: var(--radius-full);
+  background: var(--media-chrome-bg);
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  opacity: 0.72;
+  transition: opacity var(--motion-fast) var(--ease-out), background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out);
+}
+
+.image-generation-preview-nav:hover {
+  opacity: 1;
+  background: var(--media-chrome-bg-strong);
+  color: var(--color-text-primary);
+}
+
+.image-generation-preview-nav.is-prev { left: var(--spacing-3); }
+.image-generation-preview-nav.is-next { right: var(--spacing-3); }
+
+.image-generation-preview-nav svg {
+  width: 18px;
+  height: 18px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.9;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.image-generation-preview-hint {
+  position: absolute;
+  left: 50%;
+  top: 12px;
+  z-index: 2;
+  transform: translateX(-50%);
+  color: var(--color-text-tertiary);
+  font-family: var(--font-sans);
+  font-size: var(--font-size-xs);
+  pointer-events: none;
+}
+
+.image-generation-preview-side {
+  min-width: 0;
+  position: relative;
+  display: grid;
+  align-content: start;
+  gap: 8px;
+  overflow-y: auto;
+  border: 0;
+  border-radius: var(--radius-lg);
+  corner-shape: var(--corner-smooth);
+  width: 264px;
+  background: color-mix(in srgb, var(--color-ui-panel) 86%, transparent);
+  padding: 54px 12px 12px;
+  box-shadow: 0 28px 90px var(--shadow-ink-heavy);
+  backdrop-filter: blur(18px) saturate(135%);
+  -webkit-backdrop-filter: blur(18px) saturate(135%);
+}
+
+.image-generation-preview-close {
+  position: absolute;
+  top: 14px;
+  right: 14px;
+  z-index: 5;
+  width: 30px;
+  height: 30px;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: var(--radius-2xs);
+  background: transparent;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  font-family: var(--font-sans);
+  font-size: var(--icon-glyph-lg);
+  line-height: 1;
+}
+
+.image-generation-preview-close:hover {
+  background: var(--color-ui-control-hover);
+  color: var(--color-text-primary);
+}
+
+.image-generation-preview-panel {
+  position: relative;
+  display: grid;
+  gap: 6px;
+  border: 1px solid color-mix(in srgb, var(--color-ui-border-subtle) 56%, transparent);
+  border-radius: var(--radius-xs);
+  background: color-mix(in srgb, var(--color-ui-control) 82%, transparent);
+  padding: 10px;
+}
+
+.image-generation-preview-panel > span {
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-semibold);
+}
+
+.image-generation-preview-panel p {
+  max-height: 84px;
+  margin: 0;
+  overflow: auto;
+  color: var(--color-text-primary);
+  font-size: var(--font-size-xs);
+  line-height: 1.55;
+  white-space: pre-wrap;
+}
+
+.image-generation-preview-prompt {
+  padding-right: 12px;
+}
+
+.image-generation-preview-prompt button {
+  position: absolute;
+  top: 9px;
+  right: 9px;
+  width: 26px;
+  height: 26px;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: var(--radius-2xs);
+  background: transparent;
+  color: var(--color-text-tertiary);
+  cursor: pointer;
+  opacity: 0;
+  transition: background var(--motion-normal) var(--ease-out), color var(--motion-normal) var(--ease-out), opacity var(--motion-normal) var(--ease-out);
+}
+
+.image-generation-preview-prompt > span,
+.image-generation-preview-prompt > p {
+  padding-right: 30px;
+}
+
+.image-generation-preview-prompt button svg {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.75;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.image-generation-preview-prompt button span {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 6px);
+  width: max-content;
+  max-width: 84px;
+  border-radius: var(--radius-2xs);
+  background: var(--media-chrome-bg-strong);
+  color: var(--color-text-primary);
+  font-size: var(--font-size-xs);
+  line-height: 1;
+  padding: 6px 7px;
+  pointer-events: none;
+  opacity: 0;
+  transform: translateY(-2px);
+  transition: opacity var(--motion-normal) var(--ease-out), transform var(--motion-normal) var(--ease-out);
+  white-space: nowrap;
+}
+
+.image-generation-preview-prompt:hover button,
+.image-generation-preview-prompt:focus-within button {
+  opacity: 1;
+}
+
+.image-generation-preview-prompt button:hover {
+  background: var(--color-ui-control-hover);
+  color: var(--color-text-primary);
+}
+
+.image-generation-preview-prompt button.copied {
+  background: color-mix(in srgb, var(--color-accent-blue) 20%, transparent);
+  color: var(--color-text-primary);
+  opacity: 1;
+}
+
+.image-generation-preview-prompt button.copied span {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.image-generation-preview-info dl {
+  display: grid;
+  gap: 5px;
+  margin: 0;
+}
+
+.image-generation-preview-info dl > div {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 52px minmax(0, 1fr);
+  gap: 6px;
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-xs);
+}
+
+.image-generation-preview-info dt,
+.image-generation-preview-info dd {
+  min-width: 0;
+  margin: 0;
+}
+
+.image-generation-preview-info dd {
+  overflow: hidden;
+  color: var(--color-text-primary);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.image-generation-preview-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin-top: 2px;
+}
+
+.image-generation-preview-actions button {
+  min-height: 32px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  border: 1px solid var(--color-ui-border-subtle);
+  border-radius: var(--radius-2xs);
+  background: var(--color-ui-control);
+  color: var(--color-text-primary);
+  cursor: pointer;
+  font-family: var(--font-sans);
+  font-size: var(--font-size-xs);
+}
+
+.image-generation-preview-actions button:hover {
+  border-color: var(--color-ui-border);
+  background: var(--color-ui-control-hover);
+}
+
+.image-generation-preview-actions svg {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.75;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.image-generation-preview-backdrop :focus-visible {
+  outline: 1px solid var(--color-text-primary);
+  outline-offset: 2px;
+}
+
+@media (max-width: 720px) {
+  .image-generation-preview-backdrop {
+    padding: 12px;
+  }
+
+  .image-generation-preview {
+    width: calc(100vw - 24px);
+    height: calc(100vh - 24px);
+    min-height: 0;
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr) auto;
+    gap: 10px;
+  }
+
+  .image-generation-preview-side {
+    grid-column: 1 / -1;
+    max-height: 36vh;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    align-items: start;
+    width: auto;
+    border-radius: var(--radius-md);
+    padding: 44px 12px 12px;
+  }
+
+  .image-generation-preview-info,
+  .image-generation-preview-actions {
+    grid-column: 1 / -1;
+  }
+
+  .image-generation-preview-panel p {
+    max-height: 74px;
+  }
+}
+
+/* 派生提示词面板：优化后的用紫色标、模型润色后的用青色标，和原始提示词区分 */
+.image-generation-preview-panel.is-enhanced > span {
+  color: var(--color-accent-purple);
+}
+
+.image-generation-preview-panel.is-revised > span {
+  color: var(--color-accent-teal);
+}
+/* 喜欢：生成信息面板底部，线框 → 实心红心，再点一次取消 */
+.image-generation-preview-like {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: 28px;
+  margin-top: 2px;
+  border: 1px solid color-mix(in srgb, var(--color-ui-border-subtle) 56%, transparent);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--color-ui-control) 82%, transparent);
+  color: var(--color-text-secondary);
+  font-family: var(--font-sans);
+  font-size: var(--font-size-xs);
+  cursor: pointer;
+  transition: background var(--motion-normal) var(--ease-out), border-color var(--motion-normal) var(--ease-out), color var(--motion-normal) var(--ease-out);
+}
+
+.image-generation-preview-like > svg {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  transition: transform var(--motion-fast) var(--ease-out), fill var(--motion-normal) var(--ease-out);
+}
+
+.image-generation-preview-like:hover:not(:disabled) {
+  border-color: var(--control-border-hover);
+  background: var(--control-bg-hover);
+  color: var(--color-text-primary);
+}
+
+.image-generation-preview-like:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.image-generation-preview-like.is-liked {
+  border-color: var(--color-accent-red);
+  color: var(--color-accent-red);
+}
+
+.image-generation-preview-like.is-liked > svg {
+  fill: currentColor;
+  transform: scale(1.12);
+}

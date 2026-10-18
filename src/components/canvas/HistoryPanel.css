@@ -1,0 +1,471 @@
+/* 生成历史抽屉：贴着左侧功能条弹出的长方形面板，玻璃底 + 自滚动。
+   宫格视图只放图（列宽自适应填满面板，缩略图跟着列宽走，勾选与定位都压在图上做）；
+   列表视图按天分组：组标题是弱化日期，条目是小图 + 两行文字。
+   两种视图都能多选删除；条目最外侧不放描边底色，选中/hover 统一用 outline 画圈。 */
+.image-history-panel {
+  position: fixed;
+  z-index: 130;
+  width: min(448px, calc(100vw - 96px));
+  max-width: calc(100vw - 96px);
+  /* 宫格缩略图基准边长：176px 是「理想档」（1:1），列数按它算 auto-fill，
+     剩下的宽度由各列 1fr 拉伸分掉，面板多宽图就多大，不再左右留大缝；
+     thumb 自身与 locate 的贴角偏移共用这一个源，改尺寸只需改一处 */
+  --hb-history-thumb: 176px;
+  /* 列表视图再小一档：一屏能扫更多条，同样 1:1 */
+  --hb-history-list-thumb: 56px;
+  /* 列表条目内侧重进：条目左 padding 与按天组标题共用，组标题才能与小图左缘严格对齐 */
+  --hb-history-list-inset: var(--spacing-2);
+  /* 压在图上的两个小控件：勾选圈与定位按钮同档，换尺寸只改这里 */
+  --hb-history-check: 20px;
+  --hb-history-locate: 24px;
+  /* 面板高度上限改成视口 80%：不再钉死 660px，矮窗口（笔记本小屏）也不会顶到边，
+     高窗口下按 80% 走，历史列表一屏能扫更多 */
+  max-height: min(80dvh, calc(100dvh - 96px));
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border-radius: var(--radius-lg);
+  corner-shape: var(--corner-smooth);
+  background: var(--surface-popover-glass-bg);
+  backdrop-filter: var(--surface-popover-glass-blur);
+  -webkit-backdrop-filter: var(--surface-popover-glass-blur);
+  /* 投影与所有下拉浮层同一道：材质三件套（底色 / 模糊 / 投影）整组统一 */
+  box-shadow: var(--surface-popover-glass-shadow);
+  animation: history-pop var(--motion-normal) var(--ease-out) both;
+}
+
+/* 竖向居中由 JS 写入 top/transform，这里只保留水平入场的轻微位移 */
+@keyframes history-pop {
+  from {
+    opacity: 0;
+    transform: translate(-6px, -50%);
+  }
+}
+
+/* 收起：与入场同一条轴线倒退回去，播完由 onAnimationEnd / 400ms 兜底通知父组件卸载。
+   both 填充托住终态，避免动画结束到卸载之间闪回展开位置。 */
+.image-history-panel.is-leaving {
+  pointer-events: none;
+  animation: history-leave var(--motion-fast) var(--ease-out) both;
+}
+
+@keyframes history-leave {
+  to {
+    opacity: 0;
+    transform: translate(-6px, -50%) scale(0.97);
+  }
+}
+
+.image-history-head {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-2);
+  padding: var(--spacing-3) var(--spacing-3) var(--spacing-2);
+  border-bottom: 1px solid var(--divider-subtle);
+}
+
+/* 「生成历史」与数量同一行、同基线：数量跟在标题后面，不再单独占一行。
+   flex: none 让标题不被内联报错挤换行，长错误文案自己收省略号。 */
+.image-history-title {
+  flex: none;
+  display: flex;
+  align-items: baseline;
+  gap: var(--spacing-1);
+  min-width: 0;
+}
+
+.image-history-head strong {
+  display: block;
+  color: var(--color-text-primary);
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-semibold);
+}
+
+.image-history-title span {
+  color: var(--color-text-tertiary);
+  font-size: var(--font-size-xs);
+  font-variant-numeric: tabular-nums;
+}
+
+/* 头部动作区：多选开关 +（多选态下才出现的）删除按钮 */
+.image-history-head-actions {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-1);
+}
+
+.image-history-reveal-error {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--color-accent-red);
+  font-size: var(--font-size-2xs);
+}
+
+.image-history-head button {
+  width: 28px;
+  height: 28px;
+  flex: none;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: var(--radius-2xs);
+  background: transparent;
+  color: var(--color-text-tertiary);
+  cursor: pointer;
+  line-height: 1;
+  transition: background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out);
+}
+
+.image-history-head button svg {
+  width: 18px;
+  height: 18px;
+}
+
+.image-history-head button:hover {
+  background: var(--color-ui-control-hover);
+  color: var(--color-text-primary);
+}
+
+/* 带文字的小开关：比纯图标按钮宽一截，圆角走控件档。
+   选择器带上 .image-history-head 前缀，才压得过下面「头部图标按钮」的 28px 宽基础规则 */
+/* 基类给按钮是 display: grid：图标 + 文字会被摆进两个隐式行、竖着堆。
+   这里改回横排（图标在左、文字在右），28px 高的按钮里垂直居中 */
+.image-history-head .image-history-multi {
+  width: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--spacing-1);
+  padding: 0 var(--spacing-2);
+  border-radius: var(--radius-xs);
+  font-family: var(--font-sans);
+  font-size: var(--font-size-xs);
+  white-space: nowrap;
+}
+
+.image-history-head .image-history-multi svg {
+  width: 14px;
+  height: 14px;
+}
+
+.image-history-head .image-history-multi[aria-pressed='true'] {
+  background: var(--color-interaction-default);
+  color: var(--color-text-primary);
+}
+
+/* 多选态下这颗按钮就是退出入口（文案变「取消多选」）：点亮 + 一圈内描边，
+   和普通 toggle、和 hover 灰底都区分开，一眼知道点它是出去 */
+.image-history-head .image-history-multi.is-exit,
+.image-history-head .image-history-multi.is-exit:hover {
+  background: var(--color-interaction-default);
+  color: var(--color-text-primary);
+  box-shadow: inset 0 0 0 1px var(--color-ui-border-strong);
+}
+
+/* 删除：多选态下的醒目主操作。常态是红槽红字（--color-accent-red-subtle 底 + --color-accent-red 字）；
+   第一下「上膛」整块翻实心红并改文案「确认删除」，2 秒内第二下才真删，超时退回普通态。
+   选择器同样带 .image-history-head 前缀，压过头部图标按钮的 28px 宽基础规则。 */
+.image-history-head .image-history-delete {
+  width: auto;
+  padding: 0 var(--spacing-3);
+  border-radius: var(--radius-xs);
+  background: var(--color-accent-red-subtle);
+  color: var(--color-accent-red);
+  font-family: var(--font-sans);
+  font-size: var(--font-size-xs);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  transition: background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out);
+}
+
+.image-history-head .image-history-delete:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--color-accent-red) 22%, var(--color-accent-red-subtle));
+}
+
+.image-history-head .image-history-delete.is-armed,
+.image-history-head .image-history-delete.is-armed:hover:not(:disabled) {
+  background: var(--color-accent-red);
+  color: var(--color-on-accent);
+}
+
+/* 没得可删（一个都没勾）或正在删：置灰且不接点击 */
+.image-history-head .image-history-delete:disabled {
+  background: var(--color-ui-control-hover);
+  color: var(--color-text-tertiary);
+  cursor: default;
+}
+
+/* 宫格 / 列表视图切换：分段控件的选中态 */
+.image-history-views {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  margin-left: auto;
+}
+
+.image-history-views button:hover {
+  background: var(--color-ui-control-hover);
+  color: var(--color-text-primary);
+}
+
+.image-history-views button[aria-pressed='true'] {
+  background: var(--color-interaction-default);
+  color: var(--color-text-primary);
+}
+
+/* 滚轮/触控板在这里滚动查看：列数以 176px 基准档算 auto-fill（随面板宽窄增减列），
+   富余光由各列 1fr 拉伸分掉——图片贴着面板左右缘，间距恒等于 grid gap，
+   不再出现「列宽定死 176px、整组居中左右各留一条大缝」。min() 兜底防窄窗口溢出。 */
+.image-history-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(var(--hb-history-thumb), 100%), 1fr));
+  align-content: start;
+  gap: var(--spacing-2);
+  padding: var(--spacing-2);
+}
+
+/* 列表视图：按天分组竖排，组与组之间松一档 */
+.image-history-scroll.is-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-3);
+}
+
+/* 一天一束：组标题（弱化日期）在上，当天条目在下 */
+.image-history-day {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  width: 100%;
+}
+
+/* 按天组标题：与列表小图左缘对齐（共用 --hb-history-list-inset），颜色弱化、字号最小档 */
+.image-history-day-label {
+  margin-bottom: var(--spacing-1);
+  padding-left: var(--hb-history-list-inset);
+  color: var(--color-text-tertiary);
+  font-size: var(--font-size-2xs);
+  font-variant-numeric: tabular-nums;
+  line-height: var(--line-height-tight);
+}
+
+.image-history-empty,
+.image-history-error {
+  /* 空态 / 报错横跨整行，不挤在宫格的某一格里 */
+  grid-column: 1 / -1;
+  padding: var(--spacing-4) var(--spacing-2);
+  color: var(--color-text-tertiary);
+  font-size: var(--font-size-xs);
+  text-align: center;
+  line-height: 1.6;
+}
+
+.image-history-error {
+  color: var(--color-accent-red);
+}
+
+/* 条目：最外侧不描边也不铺底色，选中 / hover 都靠 outline 画圈。
+   outline 不吃布局，颜色过渡时宫格不会抖；红色留给删除，选中一律走 brand 系蓝。 */
+.image-history-item {
+  position: relative;
+  display: flex;
+  align-items: stretch;
+  min-width: 0;
+  border-radius: var(--radius-md);
+  outline: 2px solid transparent;
+  transition: outline-color var(--motion-fast) var(--ease-out);
+}
+
+.image-history-item:hover {
+  outline-color: color-mix(in srgb, var(--color-paper) 20%, transparent);
+}
+
+/* 多选勾中：蓝色描边整圈 + 图片压暗 + 实心勾，三重信号，和 hover、和删除的红明确分开 */
+.image-history-item.is-selected,
+.image-history-item.is-selected:hover {
+  outline-color: var(--color-accent-blue);
+}
+
+/* 宫格条目就是个图框：宽度撑满整列（列宽已由网格自适应算好），
+   条目贴紧图框，定位按钮才能正好落在图角上 */
+.image-history-item.is-grid {
+  width: 100%;
+}
+
+/* 列表条目：小图 + 两行文字横排，左重进与按天组标题对齐 */
+.image-history-item.is-list {
+  padding: var(--spacing-1) var(--hb-history-list-inset);
+  border-radius: var(--radius-sm);
+}
+
+.image-history-item-main {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--spacing-2);
+  align-items: start;
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
+  padding: 0;
+  font-family: var(--font-sans);
+}
+
+/* 缩略图固定 1:1：宫格节奏统一，横向竖向上的图都不抢视觉重量。
+   宽度撑满条目（条目即列宽，列宽随面板自适应），高度由 aspect-ratio 推出；
+   标准面板宽度下两列各约 212px，比 176px 基准档更饱满；窗口再窄整体等比缩。 */
+.image-history-item-thumb {
+  position: relative;
+  display: block;
+  width: 100%;
+  aspect-ratio: 1 / 1;
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  background: var(--color-ui-control);
+}
+
+/* 列表视图：小图 | 两行文字 一行横排 */
+.image-history-item.is-list .image-history-item-main {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-2);
+}
+
+/* 列表小图 56px 一档，仍 1:1；圆角按比例收一档（176px 用 md、56px 用 sm，视觉比例才一致） */
+.image-history-item.is-list .image-history-item-thumb {
+  flex: none;
+  width: var(--hb-history-list-thumb);
+  height: var(--hb-history-list-thumb);
+  border-radius: var(--radius-sm);
+}
+
+/* 选中时图片压暗一档：和蓝色描边、实心勾一起把「这张被选了」说清楚 */
+.image-history-item.is-selected .image-history-item-thumb::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: color-mix(in srgb, var(--color-ink) 34%, transparent);
+}
+
+.image-history-item img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  background: var(--color-ui-control);
+}
+
+/* 列表缩略图只有 56px：文件丢失的占位卡只留图标，文字塞不下 */
+.image-history-item.is-list .canvas-image-missing-text,
+.image-history-item.is-list .canvas-image-missing-note {
+  display: none;
+}
+
+.image-history-item-body {
+  min-width: 0;
+  display: block;
+}
+
+.image-history-item-prompt {
+  display: block;
+  color: var(--color-text-primary);
+  font-size: var(--font-size-xs);
+  line-height: 1.45;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 第二排元信息：版本 / 画布 / 来源 / 时刻，弱化第三档色 + 最小字号，与第一排拉开层级 */
+.image-history-item-meta {
+  display: block;
+  margin-top: 2px;
+  color: var(--color-text-tertiary);
+  font-size: var(--font-size-2xs);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 多选态：图片左上角的勾选圈，点图即切换选中。
+   未选是空心圈（媒体浮层底 + 白环，压在图片上也看得清），选中翻实心蓝勾。 */
+.image-history-check {
+  position: absolute;
+  top: var(--spacing-1);
+  left: var(--spacing-1);
+  width: var(--hb-history-check);
+  height: var(--hb-history-check);
+  display: grid;
+  place-items: center;
+  border: 1px solid color-mix(in srgb, var(--color-paper) 72%, transparent);
+  border-radius: var(--radius-full);
+  background: var(--media-chrome-bg);
+  color: var(--media-chrome-fg);
+  transition: background var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out);
+}
+
+.image-history-check.is-on {
+  border-color: var(--color-accent-blue);
+  background: var(--color-accent-blue);
+  color: var(--color-on-accent);
+}
+
+.image-history-check svg {
+  width: 13px;
+  height: 13px;
+}
+
+/* 定位按钮：浮在缩略图右上角的小圆底 + 图标（媒体浮层色，压在图上也看清），
+   只在非多选态渲染，且只在该条目 hover 时才浮现（默认透明且不吃指针事件，
+   避免整屏都是小圆点、也避免遮住图片本身的点击）。键盘 focus 同样可见。 */
+.image-history-item-locate {
+  position: absolute;
+  top: var(--spacing-1);
+  right: var(--spacing-1);
+  z-index: 1;
+  width: var(--hb-history-locate);
+  height: var(--hb-history-locate);
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: var(--radius-full);
+  background: var(--media-chrome-bg);
+  color: var(--media-chrome-fg);
+  cursor: pointer;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--motion-fast) var(--ease-out), background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out);
+}
+
+.image-history-item:hover .image-history-item-locate,
+.image-history-item-locate:focus-visible {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.image-history-item-locate:hover {
+  background: var(--color-accent-blue);
+  color: var(--color-on-accent);
+}
+
+/* 列表视图 thumb 贴左：从条目左缘算「重进 + thumb 宽 - 按钮宽 - 内缩」，正好压在图角上 */
+.image-history-item.is-list .image-history-item-locate {
+  right: auto;
+  left: calc(var(--hb-history-list-inset) + var(--hb-history-list-thumb) - var(--hb-history-locate) - var(--spacing-1));
+}
+
+.image-history-item-locate svg {
+  width: 14px;
+  height: 14px;
+}

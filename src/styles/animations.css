@@ -1,0 +1,97 @@
+/**
+ * 共享动效库 —— 全项目 @keyframes 的唯一集中地。
+ *
+ * 规则（见根目录 CLAUDE.md）：
+ *  1. 新增动效前先在这里找：**行为相同就复用，只有参数不同就用自定义属性调**。
+ *     P2 收敛前有 54 个 @keyframes，其中 8 个 spinner 全是 rotate(360deg)、
+ *     4 组入场动画字节级重复 —— 都是"直接新写一个"攒出来的。
+ *  2. 组件 CSS 里只允许保留**机制特殊**的动效（mask 位移、stroke-dashoffset、
+ *     box-shadow 扩散、SMIL），且必须写在文件底部。
+ *  3. 时长与缓动一律用 --motion-* / --ease-* Token，不写裸值。
+ *
+ * 参数化动效的用法：在使用方规则里赋值，不改这里。
+ *     .my-menu { --enter-y: -4px; animation: msg-enter var(--motion-normal) var(--ease-out); }
+ *
+ * 由 styles/tokens.guard.test.ts 守护：无引用的 keyframes、函数体重复的 keyframes
+ * 都会让测试变红。
+ */
+
+/* ── 旋转（所有 spinner 的唯一实现） ── */
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+/* ── 缩放呼吸（Agent 运行状态圆点） ── */
+@keyframes breathe {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.3); }
+}
+
+/* ── 透明度呼吸 / 脉冲。参数：--pulse-from（谷值）/ --pulse-to（峰值） ── */
+@keyframes pulse-opacity {
+  0%, 100% { opacity: var(--pulse-from, 0.55); }
+  50% { opacity: var(--pulse-to, 1); }
+}
+
+/* ── 省略号（三点依次亮起，靠 animation-delay 错相） ── */
+@keyframes dot-pulse {
+  0%, 20% { opacity: 0; }
+  50% { opacity: 1; }
+  80%, 100% { opacity: 0; }
+}
+
+/* ── 骨架屏流光：高光块横穿元素（自身位移） ── */
+@keyframes shimmer {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(100%); }
+}
+
+/**
+ * 渐变流光：背景位置滚动（元素不动），用于流式文字与压缩进度条。
+ * 参数：--shimmer-from / --shimmer-to，整条 background-position 值。
+ * 与 shimmer 机制不同（背景 vs 自身 transform），不能互换。
+ */
+@keyframes bg-shimmer {
+  from { background-position: var(--shimmer-from, 200% 50%); }
+  to { background-position: var(--shimmer-to, 0% 50%); }
+}
+
+/* ── 纯淡入 ── */
+@keyframes fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+/* ── 淡入 + 纵向位移。参数：--enter-y（负值 = 从上方落下） ── */
+@keyframes msg-enter {
+  from { opacity: 0; transform: translateY(var(--enter-y, 8px)); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* ── 淡入 + 横向位移。参数：--enter-x ── */
+@keyframes fade-slide-x {
+  from { opacity: 0; transform: translateX(var(--enter-x, 12px)); }
+  to { opacity: 1; transform: translateX(0); }
+}
+
+/**
+ * 居中弹层入场：保留 translateX(-50%) 的水平居中，只动纵向。
+ * 参数：--enter-y。给 left:50% 定位的元素用，普通元素用 msg-enter。
+ */
+@keyframes fade-rise-centered {
+  from { opacity: 0; transform: translateX(-50%) translateY(var(--enter-y, 4px)); }
+  to { opacity: 1; transform: translateX(-50%) translateY(0); }
+}
+
+/* ── 弹性出现。参数：--enter-scale（起始缩放）/ --enter-y ── */
+@keyframes spring-in {
+  from { opacity: 0; transform: translateY(var(--enter-y, 0px)) scale(var(--enter-scale, 0.95)); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+/* ── 边缘滑入（抽屉 / 侧栏，无淡入）。参数：--slide-from，负值 = 从左侧 ── */
+@keyframes slide-in-x {
+  from { transform: translateX(var(--slide-from, 100%)); }
+  to { transform: translateX(0); }
+}

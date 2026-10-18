@@ -1,0 +1,159 @@
+/* ── 节点把手 / 错误态 / 版本叠层 / 参考图拖拽的补充规则 ──────────────────────
+   由 FlowImageNode.tsx import（CanvasPage 先 import ImageNodes.css、再 import 本组件，
+   所以本文件注入顺序在其后）；同名默认值一律用「更高特异性 + 后置」压过 ImageNodes.css，
+   不改那边的文件。磁吸（--hb-magnet-*）已从 FlowImageNode 删除，
+   这里把 translate 显式归零，防止旧的 JS 变量残留把把手带偏。 */
+
+/* 「+」把手位移归零：磁吸删除后把手只靠 transform: translateY(-50%) 垂直居中，
+   translate 与 transform 各管一个属性，归零不碰居中体系。 */
+.image-flow-node .image-node-connect-add.image-node-connect-add {
+  translate: 0 0;
+}
+
+/* 由内到外的入场方向：target 在左缘从右往左归位、source 在右缘从左往右归位 */
+.image-flow-node .image-node-connect-add.image-handle-target {
+  --hb-handle-slide-x: 7px;
+}
+
+.image-flow-node .image-node-connect-add.image-handle-source {
+  --hb-handle-slide-x: -7px;
+}
+
+/* 悬停节点 / 选中：入场改成「由内到外」——在 ImageNodes.css 的 opacity + scale 之上
+   叠一层从节点内侧滑出的横移（transform 常驻 translateY(-50%) 保持垂直居中不动）。 */
+.image-flow-node:hover .image-node-connect-add.image-node-connect-add,
+
+.image-flow-node.selected .image-node-connect-add.image-node-connect-add {
+  opacity: 1;
+  animation: hb-handle-slide-in var(--motion-normal) var(--ease-emphasized);
+}
+
+/* 悬停把手本体：比入场终态再大一圈 + 底色提亮一档 + 外扩柔光
+   （ImageNodes.css 的 background / box-shadow 是 !important，必须同样 !important 才压得住）。 */
+.image-flow-node .image-node-connect-add.image-node-connect-add:hover {
+  transform: translateY(-50%) scale(1.16);
+  background: color-mix(in srgb, var(--color-text-primary) 12%, var(--color-ui-control-hover)) !important;
+  color: var(--color-text-primary);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-ui-border) 64%, transparent), 0 0 0 5px color-mix(in srgb, var(--color-text-primary) 10%, transparent) !important;
+}
+
+/* ── 错误态：节点最外沿一圈醒目红描边，画布上一眼定位失败节点 ──
+   运行中有流体描边优先（is-error 只在非 running 时挂），两个 ring 不打架。
+   脉冲复用 animations.css 的 pulse-opacity（--pulse-from / --pulse-to 参数化），
+   不新造 keyframes；降级见文件底部。 */
+.image-flow-node.is-error::after {
+  content: '';
+  position: absolute;
+  inset: -3px;
+  z-index: 3;
+  border-radius: var(--radius-lg);
+  pointer-events: none;
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-accent-red) 82%, transparent);
+  animation: pulse-opacity var(--motion-loop) var(--ease-in-out) infinite;
+  --pulse-from: 0.58;
+  --pulse-to: 1;
+}
+
+/* ── 版本叠层：背后两张复印件提亮一档、1px 内描边更可见 ──
+   只动 background / box-shadow；transform / opacity / 过渡是 ImageNodes.css 的
+   nth-child 布局体系，原样保留、和平共处。 */
+.image-flow-node .image-node-version-stack i {
+  background: color-mix(in srgb, var(--color-ui-panel) 66%, var(--color-paper));
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-text-primary) 14%, transparent);
+}
+
+/* ── 版本叠层 hover / selected 态同样提亮（ImageNodes 的散开只改 transform） ── */
+.image-flow-node.has-versions:hover .image-node-version-stack i,
+
+.image-flow-node.has-versions.selected .image-node-version-stack i {
+  background: color-mix(in srgb, var(--color-ui-panel) 60%, var(--color-paper));
+}
+
+/* ── 参考图 chips 拖拽换序：来源半透明、目标位高亮描边 ── */
+/* 二次编辑的基准图（is-redit-base）不参与拖拽：用 :not 摘掉，光标保持 default */
+.image-node-composer-refs figure.image-node-composer-ref:not(.is-redit-base) {
+  cursor: grab;
+  transition: box-shadow var(--motion-fast) var(--ease-out), opacity var(--motion-fast) var(--ease-out);
+}
+
+.image-node-composer-refs figure.image-node-composer-ref.is-dragging {
+  opacity: 0.45;
+  cursor: grabbing;
+}
+
+.image-node-composer-refs figure.image-node-composer-ref.is-drop-target {
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-brand) 72%, transparent);
+}
+
+/* ── 错误文案常驻可读：composer 与图片占位态的完整报错都展开成多行 ──
+   原来是绝对定位压在卡片底角的一行小字（容易被 foot / 关闭箭头盖住、也读不全），
+   这里改为排版流内、整宽、可换行断行、字号大一档，带一点红底衬底保证可读。 */
+.image-flow-node .image-node-composer-error {
+  position: static;
+  max-width: none;
+  margin: 0;
+  padding: var(--spacing-2) var(--spacing-3);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--color-accent-red) 14%, transparent);
+  color: color-mix(in srgb, var(--color-accent-red) 88%, var(--color-text-primary));
+  font-size: var(--font-size-sm);
+  font-style: normal;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* 生成中的软提示（提示词整理失败、按原文直出）：同一排位置，降一档不抢运行态的戏 */
+.image-flow-node .image-node-composer-error.is-pending {
+  background: color-mix(in srgb, var(--color-accent-red) 9%, transparent);
+  color: color-mix(in srgb, var(--color-accent-red) 72%, var(--color-text-primary));
+}
+
+.image-flow-node .image-node-placeholder.failed .image-node-error-note {
+  max-width: 100%;
+  padding: var(--spacing-2) var(--spacing-3);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--color-accent-red) 16%, transparent);
+  color: color-mix(in srgb, var(--color-accent-red) 92%, var(--color-text-primary));
+  font-size: var(--font-size-sm);
+  font-style: normal;
+  line-height: 1.5;
+  text-align: center;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* ── 本文件独占的 @keyframes（机制特殊，animations.css 没有对应项） ── */
+/* 把手由内到外入场：常驻 translateY(-50%) 做垂直居中不能丢，入场要在不破坏居中的前提下
+   叠加横移（target 7px / source -7px，见 --hb-handle-slide-x）与 0.55→1 的放大。
+   animations.css 的 fade-slide-x（无缩放）/ spring-in（无横移、不支持居中）都差一环，
+   机制不同不能复用，故在此新增。 */
+@keyframes hb-handle-slide-in {
+  from {
+    opacity: 0;
+    transform: translateY(-50%) translateX(var(--hb-handle-slide-x, 7px)) scale(0.55);
+  }
+
+  60% {
+    opacity: 1;
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(-50%) translateX(0) scale(1);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  /* 减弱动效：把手入场、错误环脉冲一律直接落到终态（对齐 ImageNodes.css 的降级写法） */
+  .image-flow-node:hover .image-node-connect-add.image-node-connect-add,
+
+  .image-flow-node.selected .image-node-connect-add.image-node-connect-add {
+    animation: none;
+  }
+
+  .image-flow-node.is-error::after {
+    animation: none;
+    opacity: 0.85;
+  }
+}
