@@ -9,7 +9,7 @@
 import { describe, expect, it } from 'vitest';
 import { renderToStaticMarkup } from 'react-dom/server';
 
-const { ProfileRow } = await import('@/components/SettingsPanel');
+const { ProfileOverviewCard, ProfileRow } = await import('@/components/SettingsPanel');
 
 const noop = () => {};
 
@@ -81,5 +81,74 @@ describe('配置列表一行', () => {
     expect(renderRow({ selected: false, enabled: true })).toContain('<div class="model-config-profile-row">');
     expect(renderRow({ selected: true, enabled: true })).toContain('<div class="model-config-profile-row selected">');
     expect(renderRow({ selected: false, enabled: false })).toContain('<div class="model-config-profile-row is-disabled">');
+  });
+});
+
+function renderOverviewCard(overrides: Record<string, unknown> = {}): string {
+  const draft = {
+    id: 'profile_1',
+    name: '示例中转站',
+    baseUrl: 'https://example.test/v1',
+    apiKey: '',
+    model: 'model-a',
+    defaultSize: '',
+    models: ['model-a', 'model-b'],
+    enabledModels: ['model-a'],
+    kind: 'image',
+    textFormat: 'auto',
+    imageApiMode: 'images',
+    responsesModel: 'gpt-5.5',
+    videoApiMode: 'auto',
+    videoCustomConfig: {},
+    keyConfigured: true,
+    enabled: true,
+    ...overrides,
+  };
+  return renderToStaticMarkup(
+    <ProfileOverviewCard
+      draft={draft as never}
+      selected
+      canTest
+      testing={false}
+      saving={false}
+      onOpen={noop}
+      onToggleModel={noop}
+      onTest={noop}
+    />,
+  );
+}
+
+describe('模型配置概览卡片', () => {
+  it('显示配置名、已选模型数量、直接测试和模型启停开关', () => {
+    const html = renderOverviewCard();
+    expect(html).toContain('示例中转站');
+    expect(html).toContain('1 个已选模型');
+    expect(html).toContain('>测试</button>');
+    expect(html).toContain('aria-label="停用模型 model-a"');
+    expect(html).not.toContain('model-b');
+    expect(html).not.toContain('未启用模型');
+    expect(html).toContain('model-config-overview-card is-current');
+  });
+
+  it('卡片显示已停用配置状态，测试中时显示反馈并禁用测试操作', () => {
+    const html = renderToStaticMarkup(
+      <ProfileOverviewCard
+        draft={{
+          id: 'profile_1', name: '停用配置', baseUrl: '', apiKey: '', model: 'model-a', defaultSize: '',
+          models: ['model-a'], enabledModels: ['model-a'], kind: 'image', textFormat: 'auto', imageApiMode: 'images',
+          responsesModel: '', videoApiMode: 'auto', videoCustomConfig: {} as never, keyConfigured: true, enabled: false,
+        } as never}
+        selected={false}
+        canTest
+        testing
+        saving={false}
+        onOpen={noop}
+        onToggleModel={noop}
+        onTest={noop}
+      />,
+    );
+    expect(html).toContain('配置已停用');
+    expect(html).toContain('>测试中...</button>');
+    expect(html).toContain('disabled=""');
   });
 });

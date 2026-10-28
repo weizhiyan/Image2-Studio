@@ -7,6 +7,13 @@ export interface CanvasPendingConnection {
   handleType: CanvasConnectionDirection;
 }
 
+const CONNECTABLE_SOURCE_KINDS = new Set(['reference', 'composer', 'image', 'text']);
+const CONNECTABLE_TARGET_KINDS = new Set(['composer', 'image', 'video']);
+
+export function canConnectCanvasNodeKinds(sourceKind: string, targetKind: string): boolean {
+  return CONNECTABLE_SOURCE_KINDS.has(sourceKind) && CONNECTABLE_TARGET_KINDS.has(targetKind);
+}
+
 export function connectionForNewNode(
   existingNodeId: string,
   direction: CanvasConnectionDirection,

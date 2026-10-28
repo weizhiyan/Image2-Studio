@@ -56,6 +56,42 @@
   }
 }
 
+.image-history-panel.is-inline {
+  position: relative;
+  z-index: auto;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  flex: 1;
+  max-width: none;
+  max-height: none;
+  margin: 0;
+  border-radius: 0;
+  background: transparent;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  box-shadow: none;
+  animation: history-inline-pop var(--motion-normal) var(--ease-out) both;
+}
+
+.image-history-panel.is-inline.is-leaving {
+  animation: history-inline-leave var(--motion-fast) var(--ease-out) both;
+}
+
+@keyframes history-inline-pop {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+}
+
+@keyframes history-inline-leave {
+  to {
+    opacity: 0;
+    transform: translateY(-4px) scale(0.985);
+  }
+}
+
 .image-history-head {
   flex: none;
   display: flex;
@@ -197,6 +233,160 @@
   background: var(--color-ui-control-hover);
   color: var(--color-text-tertiary);
   cursor: default;
+}
+
+.image-history-filter {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-1);
+  padding: var(--spacing-2) var(--spacing-3);
+  border-bottom: 1px solid var(--divider-subtle);
+}
+
+.image-history-filter-actions {
+  display: flex;
+  flex: none;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--spacing-1);
+  margin-left: auto;
+}
+
+.image-history-filter-actions > button {
+  min-width: calc(var(--control-height) + var(--spacing-1));
+  min-height: calc(var(--control-height) + var(--spacing-1));
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--spacing-1);
+  padding: 0 var(--spacing-2);
+  border: 0;
+  border-radius: var(--radius-xs);
+  background: transparent;
+  color: var(--color-text-secondary);
+  font-family: var(--font-sans);
+  font-size: var(--font-size-xs);
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out);
+}
+
+.image-history-panel.is-inline button:focus-visible {
+  outline: 1px solid var(--control-border-focus);
+  outline-offset: 2px;
+}
+
+.image-history-filter-actions > button:hover:not(:disabled) {
+  background: var(--color-ui-control-hover);
+  color: var(--color-text-primary);
+}
+
+.image-history-filter-actions > button:disabled {
+  color: var(--color-text-tertiary);
+  cursor: default;
+}
+
+.image-history-filter-actions > button svg {
+  width: var(--icon-glyph-sm);
+  height: var(--icon-glyph-sm);
+}
+
+.image-history-filter-actions .image-history-multi[aria-pressed='true'] {
+  background: var(--color-interaction-default);
+  color: var(--color-text-primary);
+}
+
+.image-history-filter-actions .image-history-multi.is-exit {
+  box-shadow: inset 0 0 0 1px var(--color-ui-border-strong);
+}
+
+.image-history-filter-actions .image-history-delete {
+  background: var(--color-accent-red-subtle);
+  color: var(--color-accent-red);
+  font-variant-numeric: tabular-nums;
+}
+
+.image-history-filter-actions .image-history-delete.is-armed,
+.image-history-filter-actions .image-history-delete.is-armed:hover:not(:disabled) {
+  background: var(--color-accent-red);
+  color: var(--color-on-accent);
+}
+
+.image-history-filter-actions .image-history-delete:disabled {
+  background: var(--color-ui-control-hover);
+  color: var(--color-text-tertiary);
+}
+
+.image-history-filter-actions .image-history-views {
+  margin-left: 0;
+}
+
+.image-history-filter-actions .image-history-views button {
+  width: calc(var(--control-height) + var(--spacing-1));
+  height: calc(var(--control-height) + var(--spacing-1));
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-xs);
+  background: transparent;
+  color: var(--color-text-tertiary);
+  cursor: pointer;
+}
+
+.image-history-filter-actions .image-history-views button:hover {
+  background: var(--color-ui-control-hover);
+  color: var(--color-text-primary);
+}
+
+.image-history-filter-actions .image-history-views button[aria-pressed='true'] {
+  background: var(--color-interaction-default);
+  color: var(--color-text-primary);
+}
+
+.image-history-filter-actions .image-history-close {
+  border-radius: var(--radius-sm);
+}
+
+.image-history-filter-btn {
+  min-height: 28px;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--spacing-1);
+  border: 0;
+  border-radius: var(--radius-xs);
+  background: transparent;
+  color: var(--color-text-tertiary);
+  padding: 0 var(--spacing-2);
+  font-family: var(--font-sans);
+  font-size: var(--font-size-xs);
+  cursor: pointer;
+  transition: background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out);
+}
+
+.image-history-filter-btn span {
+  color: var(--color-text-tertiary);
+  font-size: var(--font-size-2xs);
+  font-variant-numeric: tabular-nums;
+}
+
+.image-history-panel.is-inline .image-history-filter-btn {
+  min-height: var(--control-height-compact);
+}
+
+.image-history-filter-btn:hover {
+  background: var(--color-ui-control-hover);
+  color: var(--color-text-primary);
+}
+
+.image-history-filter-btn[aria-pressed='true'] {
+  background: var(--color-interaction-default);
+  color: var(--color-text-primary);
+}
+
+.image-history-filter-btn[aria-pressed='true'] span {
+  color: var(--color-text-secondary);
 }
 
 /* 宫格 / 列表视图切换：分段控件的选中态 */
@@ -366,6 +556,34 @@
   background: var(--color-ui-control);
 }
 
+.image-history-item-thumb video {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  background: var(--color-ink);
+}
+
+.image-history-video-mark {
+  position: absolute;
+  right: var(--spacing-2);
+  bottom: var(--spacing-2);
+  z-index: 1;
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--media-chrome-border);
+  border-radius: var(--radius-full);
+  background: var(--media-chrome-bg);
+  color: var(--media-chrome-fg);
+}
+
+.image-history-video-mark svg {
+  width: 16px;
+  height: 16px;
+}
+
 /* 列表缩略图只有 56px：文件丢失的占位卡只留图标，文字塞不下 */
 .image-history-item.is-list .canvas-image-missing-text,
 .image-history-item.is-list .canvas-image-missing-note {
@@ -432,7 +650,7 @@
 .image-history-item-locate {
   position: absolute;
   top: var(--spacing-1);
-  right: var(--spacing-1);
+  right: calc(var(--spacing-1) + var(--hb-history-locate) + var(--spacing-1));
   z-index: 1;
   width: var(--hb-history-locate);
   height: var(--hb-history-locate);
@@ -446,6 +664,40 @@
   opacity: 0;
   pointer-events: none;
   transition: opacity var(--motion-fast) var(--ease-out), background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out);
+}
+
+.image-history-item-save {
+  position: absolute;
+  top: var(--spacing-1);
+  right: var(--spacing-1);
+  z-index: 1;
+  width: var(--hb-history-locate);
+  height: var(--hb-history-locate);
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: var(--radius-full);
+  background: var(--media-chrome-bg);
+  color: var(--media-chrome-fg);
+  cursor: pointer;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--motion-fast) var(--ease-out), background var(--motion-fast) var(--ease-out);
+}
+
+.image-history-item:hover .image-history-item-save,
+.image-history-item-save:focus-visible {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.image-history-item-save:hover {
+  background: var(--color-accent-amber);
+}
+
+.image-history-item-save svg {
+  width: 14px;
+  height: 14px;
 }
 
 .image-history-item:hover .image-history-item-locate,

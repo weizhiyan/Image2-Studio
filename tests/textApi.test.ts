@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { callTextModel, testTextProfile } from '../bridge/textApi';
+import { buildVideoPromptSpec, callTextModel, optimizeVideoPrompt, testTextProfile } from '../bridge/textApi';
 import type { ModelProfile } from '../bridge/settings';
 
 const responsesProfile: ModelProfile = {
@@ -108,5 +108,41 @@ describe('文本接口连通测试', () => {
     const call = fetchMock.mock.calls[0] as unknown as [string, RequestInit] | undefined;
     const body = JSON.parse(String(call?.[1]?.body));
     expect(body.max_output_tokens).toBe(256);
+  });
+});
+
+describe('视频脚本优化', () => {
+  it('通过已有语言模型生成短视频提示词并带入当前参数', async () => {
+    const fetchMock = vi.fn(async (_url: string, _init?: RequestInit) => new Response(JSON.stringify({
+      choices: [{ message: { content: '小船缓慢驶过海面，镜头从近景平稳拉远，最后停在橙色晚霞下。' } }],
+    }), { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(optimizeVideoPrompt(chatProfile, {
+      prompt: '一只纸船在海面漂浮',
+      ratio: '9:16',
+      seconds: 10,
+      resolution: '720p',
+      referenceMode: 'style',
+    })).resolves.toContain('小船缓慢');
+
+    const body = JSON.parse(String((fetchMock.mock.calls[0] as unknown as [string, RequestInit])[1]?.body));
+    expect(body.messages[0].content).toContain('画幅 9:16');
+    expect(body.messages[0].content).toContain('时长 10 秒');
+    expect(body.messages[0].content).toContain('风格参考图');
+    expect(body.messages[1].content).toBe('一只纸船在海面漂浮');
+  });
+
+  it('规则明确要求保持用户原意且不假装识别图片', () => {
+    const spec = buildVideoPromptSpec({ referenceMode: 'first_frame' });
+    expect(spec).toContain('不能替换主体');
+    expect(spec).toContain('不要声称看到了图片内容');
+  });
+
+  it('保留简短英文视频提示词，不套用图片优化的最小词数门槛', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
+      choices: [{ message: { content: 'A cat runs across the grass.' } }],
+    }), { status: 200 })));
+    await expect(optimizeVideoPrompt(chatProfile, { prompt: 'A cat runs' })).resolves.toContain('A cat runs');
   });
 });

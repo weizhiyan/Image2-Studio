@@ -9,9 +9,16 @@ export const SETTINGS_FILE = path.join(DATA_DIR, 'settings.json');
 export const CANVASES_FILE = path.join(DATA_DIR, 'canvases.json');
 export const CANVAS_DOCS_FILE = path.join(DATA_DIR, 'canvas-docs.json');
 export const CHAT_DOCS_FILE = path.join(DATA_DIR, 'chat-docs.json');
+/** 视频任务态：提交后立刻落盘，bridge 重启 / 浏览器关闭都能接着轮询。 */
+export const VIDEO_TASKS_FILE = path.join(DATA_DIR, 'video-tasks.json');
+/** 图床配置：图生视频要把本机图片转成公网 HTTPS 地址，配置单独存，不塞进 settings.json。 */
+export const IMAGE_HOST_FILE = path.join(DATA_DIR, 'image-host.json');
 export const PORT = Number(process.env.HUIBAN_PORT || 3788);
 export const HOST = '127.0.0.1';
 
-/** bridge/dist/index.js → 项目根（dist 由 vite 产出在根下）。 */
+/** 源码运行在 bridge/，构建后运行在 bridge/dist/；两种情况都定位到项目根。 */
 const HERE = path.dirname(fileURLToPath(import.meta.url));
-export const STATIC_DIR = path.resolve(HERE, '..', '..', 'dist');
+const PROJECT_DIR = path.basename(HERE) === 'dist'
+  ? path.resolve(HERE, '..', '..')
+  : path.resolve(HERE, '..');
+export const STATIC_DIR = path.join(PROJECT_DIR, 'dist');

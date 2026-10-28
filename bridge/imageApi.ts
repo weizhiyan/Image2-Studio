@@ -156,13 +156,13 @@ async function generateWithImagesApi(profile: ModelProfile, params: GeneratePara
         if (multi) form.append('image[]', blob, `reference-${index + 1}.${extension}`);
         else form.append('image', blob, `reference.${extension}`);
       });
-      return fetch(`${base}/images/edits`, { method: 'POST', headers, body: form, signal: params.signal ? AbortSignal.any([params.signal, AbortSignal.timeout(120_000)]) : AbortSignal.timeout(120_000) });
+      return fetch(`${base}/images/edits`, { method: 'POST', headers, body: form, signal: params.signal });
     }
     return fetch(`${base}/images/generations`, {
       method: 'POST',
       headers: { ...headers, 'Content-Type': 'application/json' },
       body: JSON.stringify({ model, prompt, size, n, ...(params.quality ? { quality: params.quality } : {}) }),
-      signal: params.signal ? AbortSignal.any([params.signal, AbortSignal.timeout(120_000)]) : AbortSignal.timeout(120_000),
+      signal: params.signal,
     });
   };
   let response: Response | null = null;
@@ -176,7 +176,7 @@ async function generateWithImagesApi(profile: ModelProfile, params: GeneratePara
       if (response.body) await response.body.cancel().catch(() => undefined);
     } catch (error) {
       networkError = error;
-      if (attempt === 1) throw error;
+      if (params.signal?.aborted || attempt === 1) throw error;
     }
     await retryDelay(attempt);
   }
@@ -293,7 +293,7 @@ async function callResponses(profile: ModelProfile, params: GenerateParams, prev
           method: 'POST',
           headers: { ...providerAuthHeaders(profile.apiKey), 'Content-Type': 'application/json' },
           body: JSON.stringify(body),
-          signal: params.signal ? AbortSignal.any([params.signal, AbortSignal.timeout(120_000)]) : AbortSignal.timeout(120_000),
+          signal: params.signal,
         });
         if (response.ok || !isTransientStatus(response.status) || attempt === 1) break;
         const detail = await response.clone().text().catch(() => '');
@@ -301,7 +301,7 @@ async function callResponses(profile: ModelProfile, params: GenerateParams, prev
         if (response.body) await response.body.cancel().catch(() => undefined);
       } catch (caught) {
         error = caught;
-        if (attempt === 1) throw caught;
+        if (params.signal?.aborted || attempt === 1) throw caught;
       }
       await retryDelay(attempt);
     }
@@ -329,14 +329,32 @@ async function callResponses(profile: ModelProfile, params: GenerateParams, prev
 }
 
 /** Responses 由本次生成请求决定；旧调用未传时仍兼容 profile 配置。 */
+export const IMAGE_GENERATION_TIMEOUT_MS = 300_000;
+export const IMAGE_GENERATION_TIMEOUT_MESSAGE = '生图接口超过 5 分钟没有返回结果，已自动停止；请检查该模型的图生图接口或稍后重试';
+
 export async function generateImages(profile: ModelProfile, params: GenerateParams): Promise<GeneratedImage[]> {
-  const apiMode = params.apiMode || profile.imageApiMode || 'images';
-  if (apiMode !== 'responses') return generateWithImagesApi(profile, params);
-  if (!profile.apiKey) throw new Error(`尚未配置 API Key：请在绘板「生图设置」的「${profile.name}」里填写`);
+  const timeoutController = new AbortController();
+  const timeoutTimer = setTimeout(() => timeoutController.abort(), IMAGE_GENERATION_TIMEOUT_MS);
+  const signal = params.signal
+    ? AbortSignal.any([params.signal, timeoutController.signal])
+    : timeoutController.signal;
+  const boundedParams: GenerateParams = { ...params, signal };
+  const apiMode = boundedParams.apiMode || profile.imageApiMode || 'images';
   try {
-    return await callResponses(profile, params, params.previousResponseId);
+    if (apiMode !== 'responses') return await generateWithImagesApi(profile, boundedParams);
+    if (!profile.apiKey) throw new Error(`尚未配置 API Key：请在绘板「生图设置」的「${profile.name}」里填写`);
+    try {
+      return await callResponses(profile, boundedParams, boundedParams.previousResponseId);
+    } catch (error) {
+      if (!responseCompatFallback(error, Boolean(boundedParams.previousResponseId))) throw error;
+      return await generateWithImagesApi(profile, boundedParams);
+    }
   } catch (error) {
-    if (!responseCompatFallback(error, Boolean(params.previousResponseId))) throw error;
-    return generateWithImagesApi(profile, params);
+    if (timeoutController.signal.aborted) {
+      throw new Error(IMAGE_GENERATION_TIMEOUT_MESSAGE);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeoutTimer);
   }
 }

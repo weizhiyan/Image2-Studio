@@ -1,7 +1,7 @@
 import { create } from 'zustand';
 import { createJSONStorage, persist } from 'zustand/middleware';
 import type { StateStorage } from 'zustand/middleware';
-import type { CanvasDoc, CanvasEdge, CanvasNode } from '@/types';
+import type { CanvasDoc, CanvasEdge, CanvasGroupColor, CanvasNode } from '@/types';
 import { createId } from '@/lib/id';
 import { registerCanvas } from '@/lib/bridge';
 
@@ -27,6 +27,354 @@ interface CanvasState {
 }
 
 type CanvasNodeData = CanvasNode['data'];
+type CanvasPoint = { x: number; y: number };
+type MeasuredCanvasNode = CanvasNode & {
+  measured?: { width?: number; height?: number };
+};
+type CanvasGroupNode = CanvasNode & {
+  data: CanvasNodeData & { kind: 'group' };
+};
+
+export const CANVAS_GROUP_PADDING = 16;
+export const CANVAS_GROUP_HEADER_HEIGHT = 40;
+export const CANVAS_GROUP_MIN_WIDTH = 160;
+export const CANVAS_GROUP_MIN_HEIGHT = 120;
+
+const CANVAS_GROUP_COLORS: readonly CanvasGroupColor[] = ['neutral', 'blue', 'green', 'amber', 'purple'];
+
+export interface CanvasGroupGraph {
+  nodes: CanvasNode[];
+  edges: CanvasEdge[];
+  groupId: string;
+}
+
+function finiteNumber(value: unknown, fallback: number): number {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : fallback;
+}
+
+function nodeWidth(node: CanvasNode): number {
+  const measured = (node as MeasuredCanvasNode).measured;
+  return Math.max(1, finiteNumber(measured?.width, finiteNumber(node.width, 280)));
+}
+
+function nodeHeight(node: CanvasNode): number {
+  const measured = (node as MeasuredCanvasNode).measured;
+  return Math.max(1, finiteNumber(measured?.height, finiteNumber(node.height, 200)));
+}
+
+function isGroupNode(node: CanvasNode | undefined): node is CanvasGroupNode {
+  return node?.data?.kind === 'group';
+}
+
+function stripParent(node: CanvasNode, absolutePosition?: CanvasPoint): CanvasNode {
+  const next = { ...node };
+  delete next.parentId;
+  delete next.extent;
+  delete next.expandParent;
+  if (absolutePosition) next.position = absolutePosition;
+  return next;
+}
+
+function cleanCanvasEdges(nodes: CanvasNode[], edges: CanvasEdge[]): CanvasEdge[] {
+  const nodeById = new Map(nodes.map((node) => [node.id, node]));
+  const seen = new Set<string>();
+  return edges.filter((edge) => {
+    if (!nodeById.has(edge.source) || !nodeById.has(edge.target)) return false;
+    if (isGroupNode(nodeById.get(edge.source)) || isGroupNode(nodeById.get(edge.target))) return false;
+    if (seen.has(edge.id)) return false;
+    seen.add(edge.id);
+    return true;
+  });
+}
+
+/** 节点的绝对坐标；兼容历史数据里意外出现的多层 parent，带循环保护。 */
+export function absoluteNodePosition(nodes: CanvasNode[], node: CanvasNode): CanvasPoint {
+  const nodeById = new Map(nodes.map((item) => [item.id, item]));
+  let x = finiteNumber(node.position?.x, 0);
+  let y = finiteNumber(node.position?.y, 0);
+  const visited = new Set([node.id]);
+  let parentId = node.parentId;
+  while (parentId && !visited.has(parentId)) {
+    const parent = nodeById.get(parentId);
+    if (!parent) break;
+    visited.add(parentId);
+    x += finiteNumber(parent.position?.x, 0);
+    y += finiteNumber(parent.position?.y, 0);
+    parentId = parent.parentId;
+  }
+  return { x, y };
+}
+
+/** 把成员从组里摘成顶层节点，同时保持屏幕上的绝对位置不变。 */
+export function detachCanvasNode(nodes: CanvasNode[], node: CanvasNode): CanvasNode {
+  return stripParent(node, absoluteNodePosition(nodes, node));
+}
+
+export function collectCanvasGroupMembers(nodes: CanvasNode[], groupId: string): CanvasNode[] {
+  const group = nodes.find((node) => node.id === groupId);
+  if (!isGroupNode(group)) return [];
+  return nodes.filter((node) => node.id !== groupId && node.parentId === groupId && !isGroupNode(node));
+}
+
+/**
+ * 整理布局使用的顶层图：组是一个整体，组内成员不单独参与排版。
+ * 组内连线忽略；跨组边折叠到组根，保证整理后仍按原有拓扑排列。
+ */
+export function canvasTidyGraph(nodes: CanvasNode[], edges: CanvasEdge[]): {
+  nodes: CanvasNode[];
+  edges: CanvasEdge[];
+} {
+  const groupIds = new Set(nodes.filter(isGroupNode).map((node) => node.id));
+  const topLevelNodes = nodes.filter((node) => !node.parentId || !groupIds.has(node.parentId));
+  const topLevelIds = new Set(topLevelNodes.map((node) => node.id));
+  const nodeById = new Map(nodes.map((node) => [node.id, node]));
+  const rootOf = (nodeId: string): string => {
+    const node = nodeById.get(nodeId);
+    return node?.parentId && groupIds.has(node.parentId) ? node.parentId : nodeId;
+  };
+  const seen = new Set<string>();
+  const tidyEdges: CanvasEdge[] = [];
+  for (const edge of edges) {
+    const source = rootOf(edge.source);
+    const target = rootOf(edge.target);
+    if (source === target || !topLevelIds.has(source) || !topLevelIds.has(target)) continue;
+    const key = `${source}\u0000${target}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    tidyEdges.push({ id: `tidy:${key}`, source, target });
+  }
+  return { nodes: topLevelNodes, edges: tidyEdges };
+}
+
+function normalizeGroupLabel(value: unknown): string {
+  return String(value || '').trim() || '未命名编组';
+}
+
+function normalizeGroupColor(value: unknown): CanvasGroupColor {
+  return CANVAS_GROUP_COLORS.includes(value as CanvasGroupColor) ? value as CanvasGroupColor : 'neutral';
+}
+
+function removeCanvasNodes(nodes: CanvasNode[], edges: CanvasEdge[], removedIds: Set<string>): {
+  nodes: CanvasNode[];
+  edges: CanvasEdge[];
+} {
+  const nextNodes = nodes.filter((node) => !removedIds.has(node.id));
+  const nextEdges = edges.filter((edge) => !removedIds.has(edge.source) && !removedIds.has(edge.target));
+  return normalizeCanvasGroups(nextNodes, nextEdges);
+}
+
+/**
+ * 把一组顶层节点收进单个编组。成员位置改为相对坐标，数组顺序保证父组先于成员。
+ */
+export function createCanvasGroupGraph(
+  nodes: CanvasNode[],
+  edges: CanvasEdge[],
+  memberIds: string[],
+  options: { groupId?: string; label?: string; color?: CanvasGroupColor } = {},
+): CanvasGroupGraph {
+  const requested = new Set(memberIds);
+  const nodeById = new Map(nodes.map((node) => [node.id, node]));
+  const members = nodes.filter((node) => (
+    requested.has(node.id)
+    && !isGroupNode(node)
+    && (!node.parentId || !isGroupNode(nodeById.get(node.parentId)))
+  ));
+  const groupId = options.groupId || createId('group');
+  const label = normalizeGroupLabel(options.label);
+  const color = normalizeGroupColor(options.color);
+
+  if (members.length === 0) {
+    const normalized = normalizeCanvasGroups(nodes, edges);
+    return { nodes: normalized.nodes, edges: normalized.edges, groupId };
+  }
+
+  const memberBounds = members.map((node) => {
+    const position = absoluteNodePosition(nodes, node);
+    return {
+      node,
+      position,
+      right: position.x + nodeWidth(node),
+      bottom: position.y + nodeHeight(node),
+    };
+  });
+  const minX = Math.min(...memberBounds.map((item) => item.position.x));
+  const minY = Math.min(...memberBounds.map((item) => item.position.y));
+  const maxX = Math.max(...memberBounds.map((item) => item.right));
+  const maxY = Math.max(...memberBounds.map((item) => item.bottom));
+  const groupPosition = {
+    x: minX - CANVAS_GROUP_PADDING,
+    y: minY - CANVAS_GROUP_HEADER_HEIGHT - CANVAS_GROUP_PADDING,
+  };
+  const group: CanvasNode = {
+    id: groupId,
+    type: 'canvas-group',
+    position: groupPosition,
+    width: Math.max(CANVAS_GROUP_MIN_WIDTH, maxX - minX + CANVAS_GROUP_PADDING * 2),
+    height: Math.max(
+      CANVAS_GROUP_MIN_HEIGHT,
+      maxY - minY + CANVAS_GROUP_HEADER_HEIGHT + CANVAS_GROUP_PADDING * 2,
+    ),
+    data: {
+      kind: 'group',
+      label,
+      groupColor: color,
+    },
+  };
+  const memberIdSet = new Set(members.map((node) => node.id));
+  const groupedNodes = nodes.map((node) => {
+    if (!memberIdSet.has(node.id)) return node;
+    const absolute = absoluteNodePosition(nodes, node);
+    return {
+      ...node,
+      position: { x: absolute.x - groupPosition.x, y: absolute.y - groupPosition.y },
+      parentId: groupId,
+      expandParent: false,
+    };
+  });
+  const normalized = normalizeCanvasGroups([group, ...groupedNodes], edges);
+  return { nodes: normalized.nodes, edges: normalized.edges, groupId };
+}
+
+/** 解散后成员回到绝对坐标并恢复为顶层节点。 */
+export function dissolveCanvasGroup(
+  nodes: CanvasNode[],
+  edges: CanvasEdge[],
+  groupId: string,
+): { nodes: CanvasNode[]; edges: CanvasEdge[] } {
+  const group = nodes.find((node) => node.id === groupId);
+  if (!isGroupNode(group)) return normalizeCanvasGroups(nodes, edges);
+  const nextNodes = nodes
+    .filter((node) => node.id !== groupId)
+    .map((node) => (
+      node.parentId === groupId
+        ? stripParent(node, absoluteNodePosition(nodes, node))
+        : node
+    ));
+  return normalizeCanvasGroups(nextNodes, edges.filter((edge) => edge.source !== groupId && edge.target !== groupId));
+}
+
+/** 删除组会按已确认规则同时删除直接成员。 */
+export function deleteCanvasGroup(
+  nodes: CanvasNode[],
+  edges: CanvasEdge[],
+  groupId: string,
+): { nodes: CanvasNode[]; edges: CanvasEdge[] } {
+  if (!isGroupNode(nodes.find((node) => node.id === groupId))) return normalizeCanvasGroups(nodes, edges);
+  const removedIds = new Set([groupId, ...collectCanvasGroupMembers(nodes, groupId).map((node) => node.id)]);
+  return removeCanvasNodes(nodes, edges, removedIds);
+}
+
+/**
+ * 编组数据总兜底：一层父子关系、颜色/尺寸/名称、空组、越界成员、悬空边和数组顺序。
+ * 越界成员只修组框与相对坐标，成员的绝对视觉位置保持不变。
+ */
+export function normalizeCanvasGroups(
+  nodes: CanvasNode[],
+  edges: CanvasEdge[],
+): { nodes: CanvasNode[]; edges: CanvasEdge[] } {
+  const source = Array.isArray(nodes) ? nodes : [];
+  const sourceEdges = Array.isArray(edges) ? edges : [];
+  const groups = new Map<string, CanvasNode>();
+
+  for (const node of source) {
+    if (!isGroupNode(node)) continue;
+    const { parentId: _parentId, extent: _extent, expandParent: _expandParent, ...groupNode } = node;
+    groups.set(node.id, {
+      ...groupNode,
+      type: 'canvas-group',
+      position: {
+        x: finiteNumber(node.position?.x, 0),
+        y: finiteNumber(node.position?.y, 0),
+      },
+      width: Math.max(CANVAS_GROUP_MIN_WIDTH, finiteNumber(node.width, CANVAS_GROUP_MIN_WIDTH)),
+      height: Math.max(CANVAS_GROUP_MIN_HEIGHT, finiteNumber(node.height, CANVAS_GROUP_MIN_HEIGHT)),
+      data: {
+        ...node.data,
+        kind: 'group',
+        label: normalizeGroupLabel(node.data?.label),
+        groupColor: normalizeGroupColor(node.data?.groupColor),
+      },
+    });
+  }
+
+  const absolutePositions = new Map<string, CanvasPoint>();
+  const normalizedNodes = source
+    .filter((node) => !isGroupNode(node))
+    .map((node) => {
+      const parentId = node.parentId && groups.has(node.parentId) ? node.parentId : undefined;
+      const position = {
+        x: finiteNumber(node.position?.x, 0),
+        y: finiteNumber(node.position?.y, 0),
+      };
+      if (!parentId) return stripParent({ ...node, position });
+      const parent = groups.get(parentId)!;
+      const { extent: _extent, ...childNode } = node;
+      absolutePositions.set(node.id, {
+        x: parent.position.x + position.x,
+        y: parent.position.y + position.y,
+      });
+      return {
+        ...childNode,
+        position,
+        parentId,
+        expandParent: false,
+      };
+    });
+
+  for (const [groupId, group] of groups) {
+    const members = normalizedNodes.filter((node) => node.parentId === groupId);
+    if (members.length === 0) {
+      groups.delete(groupId);
+      continue;
+    }
+    const absolute = members.map((node) => {
+      const position = {
+        x: group.position.x + finiteNumber(node.position.x, 0),
+        y: group.position.y + finiteNumber(node.position.y, 0),
+      };
+      return { node, position, right: position.x + nodeWidth(node), bottom: position.y + nodeHeight(node) };
+    });
+    const minX = Math.min(...absolute.map((item) => item.position.x));
+    const minY = Math.min(...absolute.map((item) => item.position.y));
+    const maxX = Math.max(...absolute.map((item) => item.right));
+    const maxY = Math.max(...absolute.map((item) => item.bottom));
+    const groupRight = group.position.x + Number(group.width);
+    const groupBottom = group.position.y + Number(group.height);
+    const nextX = Math.min(group.position.x, minX - CANVAS_GROUP_PADDING);
+    const nextY = Math.min(group.position.y, minY - CANVAS_GROUP_HEADER_HEIGHT - CANVAS_GROUP_PADDING);
+    const nextRight = Math.max(groupRight, maxX + CANVAS_GROUP_PADDING);
+    const nextBottom = Math.max(groupBottom, maxY + CANVAS_GROUP_PADDING);
+    groups.set(groupId, {
+      ...group,
+      position: { x: nextX, y: nextY },
+      width: Math.max(CANVAS_GROUP_MIN_WIDTH, nextRight - nextX),
+      height: Math.max(CANVAS_GROUP_MIN_HEIGHT, nextBottom - nextY),
+    });
+  }
+
+  const finalNodes = normalizedNodes.map((node) => {
+    if (!node.parentId || !groups.has(node.parentId)) return { ...stripParent(node), zIndex: node.zIndex ?? 100 };
+    const group = groups.get(node.parentId)!;
+    const absolute = absolutePositions.get(node.id) || {
+      x: group.position.x + node.position.x,
+      y: group.position.y + node.position.y,
+    };
+    return {
+      ...node,
+      position: { x: absolute.x - group.position.x, y: absolute.y - group.position.y },
+      parentId: group.id,
+      expandParent: false,
+      zIndex: node.zIndex ?? 100,
+    };
+  });
+
+  const ordered = [
+    ...groups.values(),
+    ...finalNodes,
+  ];
+  return { nodes: ordered, edges: cleanCanvasEdges(ordered, sourceEdges) };
+}
 
 /** 最近更新的画布 id：启动兜底定位用。 */
 function newestCanvasId(canvases: CanvasDoc[]): string {
@@ -41,6 +389,58 @@ function emptyCanvas(name: string): CanvasDoc {
 
 function touch(doc: CanvasDoc, patch: Partial<CanvasDoc>): CanvasDoc {
   return { ...doc, ...patch, updatedAt: new Date().toISOString() };
+}
+
+function normalizeCanvasDoc(doc: CanvasDoc): CanvasDoc {
+  const graph = normalizeCanvasGroups(doc.nodes || [], doc.edges || []);
+  return { ...doc, ...graph };
+}
+
+function isVideoTerminalNode(node: CanvasNode | undefined): boolean {
+  return node?.data?.kind === 'video'
+    && node.data.videoStatus === 'done'
+    && Boolean(String(node.data.videoUrl || '').trim());
+}
+
+function pickVideoTerminalFields(data: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const key of [
+    'videoStatus', 'videoProgress', 'videoUrl', 'videoFileName', 'videoTaskId',
+    'videoError', 'videoSubmissionUnknown', 'finishedAt', 'createdAt',
+  ]) {
+    if (data[key] !== undefined) out[key] = data[key];
+  }
+  return out;
+}
+
+/**
+ * 视频终态保护：胜出文档里某节点缺 videoUrl，而另一份文档里同 id 节点已 done+url，
+ * 就把终态字段补回来。避免「本地旧快照 updatedAt 更新 → 覆盖服务端刚生成的视频」。
+ *
+ * 用户主动重新生成时 createdAt 会刷新到完成时间之后，此时不补，允许清空旧视频。
+ */
+export function protectVideoTerminalNodes(chosen: CanvasDoc, other: CanvasDoc): CanvasDoc {
+  if (!Array.isArray(chosen.nodes) || !Array.isArray(other.nodes) || other.nodes.length === 0) return chosen;
+  const otherById = new Map(other.nodes.map((node) => [node.id, node]));
+  let changed = false;
+  const nodes = chosen.nodes.map((node) => {
+    const alternate = otherById.get(node.id);
+    if (!alternate || !isVideoTerminalNode(alternate) || isVideoTerminalNode(node)) return node;
+    const previousDoneAt = Date.parse(String(alternate.data.finishedAt || alternate.data.createdAt || ''));
+    const incomingStartedAt = Date.parse(String(node.data.createdAt || ''));
+    if (Number.isFinite(previousDoneAt) && Number.isFinite(incomingStartedAt) && incomingStartedAt > previousDoneAt) {
+      return node;
+    }
+    changed = true;
+    return {
+      ...node,
+      data: {
+        ...node.data,
+        ...(pickVideoTerminalFields(alternate.data as unknown as Record<string, unknown>) as Partial<CanvasNodeData>),
+      },
+    };
+  });
+  return changed ? { ...chosen, nodes } : chosen;
 }
 
 /** 旧版本可能已经把图片 dataURL 写进本地快照；配额不足时只压缩本地副本。 */
@@ -143,7 +543,9 @@ export const useCanvasStore = create<CanvasState>()(
       addNode: (node) => {
         set((state) => ({
           canvases: state.canvases.map((doc) => (
-            doc.id === state.activeId ? touch(doc, { nodes: [...doc.nodes, node] }) : doc
+            doc.id === state.activeId
+              ? touch(doc, normalizeCanvasGroups([...doc.nodes, node], doc.edges))
+              : doc
           )),
         }));
       },
@@ -152,7 +554,10 @@ export const useCanvasStore = create<CanvasState>()(
         set((state) => ({
           canvases: state.canvases.map((doc) => (
             doc.id === state.activeId
-              ? touch(doc, { nodes: doc.nodes.map((node) => (node.id === id ? { ...node, data: { ...node.data, ...patch } } : node)) })
+              ? touch(doc, normalizeCanvasGroups(
+                doc.nodes.map((node) => (node.id === id ? { ...node, data: { ...node.data, ...patch } } : node)),
+                doc.edges,
+              ))
               : doc
           )),
         }));
@@ -162,7 +567,12 @@ export const useCanvasStore = create<CanvasState>()(
         set((state) => ({
           canvases: state.canvases.map((doc) => (
             doc.id === state.activeId
-              ? touch(doc, { nodes: doc.nodes.filter((node) => node.id !== id), edges: doc.edges.filter((edge) => edge.source !== id && edge.target !== id) })
+              ? touch(doc, isGroupNode(doc.nodes.find((node) => node.id === id))
+                ? deleteCanvasGroup(doc.nodes, doc.edges, id)
+                : normalizeCanvasGroups(
+                  doc.nodes.filter((node) => node.id !== id),
+                  doc.edges.filter((edge) => edge.source !== id && edge.target !== id),
+                ))
               : doc
           )),
         }));
@@ -170,7 +580,9 @@ export const useCanvasStore = create<CanvasState>()(
 
       setGraph: (nodes, edges) => {
         set((state) => ({
-          canvases: state.canvases.map((doc) => (doc.id === state.activeId ? touch(doc, { nodes, edges }) : doc)),
+          canvases: state.canvases.map((doc) => (
+            doc.id === state.activeId ? touch(doc, normalizeCanvasGroups(nodes, edges)) : doc
+          )),
         }));
       },
 
@@ -205,7 +617,7 @@ export const useCanvasStore = create<CanvasState>()(
               ? { ...node, data: { ...node.data, versions: mergedVersions } }
               : node;
           });
-          return changed ? touch(doc, { nodes: [...nodes, ...fresh] }) : doc;
+          return changed ? touch(doc, normalizeCanvasGroups([...nodes, ...fresh], doc.edges)) : doc;
         }),
       })),
 
@@ -214,8 +626,17 @@ export const useCanvasStore = create<CanvasState>()(
         const merged = state.canvases.slice();
         for (const doc of remote) {
           const index = merged.findIndex((item) => item.id === doc.id);
-          if (index === -1) merged.push(doc);
-          else if (Date.parse(doc.updatedAt || '') > Date.parse(merged[index].updatedAt || '')) merged[index] = doc;
+          if (index === -1) {
+            merged.push(normalizeCanvasDoc(doc));
+            continue;
+          }
+          const local = merged[index];
+          const remoteNewer = Date.parse(doc.updatedAt || '') > Date.parse(local.updatedAt || '');
+          // 按 updatedAt 选整份文档，但视频终态永远以「已出成品」的那份为准：
+          // 旧快照的 updatedAt 可能更新，却不该把刚生成的视频冲掉。
+          merged[index] = normalizeCanvasDoc(remoteNewer
+            ? protectVideoTerminalNodes(doc, local)
+            : protectVideoTerminalNodes(local, doc));
         }
         return {
           canvases: merged,
@@ -229,6 +650,7 @@ export const useCanvasStore = create<CanvasState>()(
       adoptCanvases: (remote) => set(() => ({
         canvases: remote
           .slice()
+          .map(normalizeCanvasDoc)
           .sort((a, b) => Date.parse(b.updatedAt || '') - Date.parse(a.updatedAt || '')),
         activeId: newestCanvasId(remote),
       })),
@@ -269,6 +691,7 @@ export const useCanvasStore = create<CanvasState>()(
       }),
       onRehydrateStorage: () => (state) => {
         // 持久化里没有 activeId（或指向已删除画布）时落到第一张
+        if (state) state.canvases = state.canvases.map(normalizeCanvasDoc);
         if (state && (!state.activeId || !state.canvases.some((doc) => doc.id === state.activeId))) {
           state.activeId = state.canvases[0]?.id || '';
         }

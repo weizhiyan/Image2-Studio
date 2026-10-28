@@ -15,6 +15,8 @@ export default function CanvasImage({
   className,
   missingNote,
   onError,
+  loading = 'lazy',
+  decoding = 'async',
   ...rest
 }: CanvasImageProps) {
   const [missing, setMissing] = useState(false);
@@ -42,6 +44,8 @@ export default function CanvasImage({
       src={src}
       alt={alt}
       className={className}
+      loading={loading}
+      decoding={decoding}
       onError={(event) => {
         setMissing(true);
         onError?.(event);

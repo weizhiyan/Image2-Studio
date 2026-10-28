@@ -40,6 +40,13 @@ export function activeVersionOf(data: CanvasNodeData | undefined): CanvasNodeVer
   return versions.find((item) => item.id === wanted) || versions[versions.length - 1];
 }
 
+/** 当前主图实际使用的提示词。已有版本时只认该版本，不回退到节点上可能属于旧版的提示词。 */
+export function activePromptOf(data: CanvasNodeData | undefined): string {
+  const active = activeVersionOf(data);
+  const prompt = active ? active.prompt : data?.prompt;
+  return String(prompt ?? '').trim();
+}
+
 /** 版本展开列表按生成时间倒序：最新结果始终排在第一位，不随手动主图选择变化。 */
 export function newestVersionsFirst(data: CanvasNodeData | undefined): CanvasNodeVersion[] {
   return normalizeVersions(data).reverse();

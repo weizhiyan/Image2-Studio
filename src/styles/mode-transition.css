@@ -1,0 +1,158 @@
+/* 工作台 / 无限画布的模式切换：纯淡出 + 分层入场，不做点阵汇聚。 */
+
+.app-mode-root {
+  --mode-exit: 320ms;
+  --mode-enter: 560ms;
+  --mode-delay-header: 60ms;
+  --mode-delay-content: 100ms;
+  position: relative;
+  width: 100vw;
+  height: 100dvh;
+  overflow: hidden;
+  background: var(--color-bg-canvas);
+}
+
+.app-mode-layer {
+  display: none;
+  position: absolute;
+  inset: 0;
+}
+
+.app-mode-layer.is-mounted {
+  display: block;
+  z-index: 1;
+}
+
+.app-mode-layer.is-outgoing {
+  display: block;
+  z-index: 2;
+  pointer-events: none;
+}
+
+.app-mode-layer.is-outgoing * {
+  pointer-events: none !important;
+}
+
+/* ── 画布退场：节点、连线、工具栏、对话面板、点阵一起淡出 ── */
+.app-mode-layer.is-outgoing[data-mode="canvas"] .hb-shell,
+.app-mode-layer.is-outgoing[data-mode="canvas"] .hb-canvas-wrap {
+  background: transparent !important;
+}
+
+.app-mode-layer.is-outgoing[data-mode="canvas"] .hb-topbar {
+  opacity: 0;
+  visibility: hidden;
+}
+
+.app-mode-layer.is-outgoing[data-mode="canvas"] .canvas-dock,
+.app-mode-layer.is-outgoing[data-mode="canvas"] .canvas-rail,
+.app-mode-layer.is-outgoing[data-mode="canvas"] .hb-chat-panel,
+.app-mode-layer.is-outgoing[data-mode="canvas"] .hb-chat-fab,
+.app-mode-layer.is-outgoing[data-mode="canvas"] .react-flow__node,
+.app-mode-layer.is-outgoing[data-mode="canvas"] .react-flow__edge,
+.app-mode-layer.is-outgoing[data-mode="canvas"] .react-flow__background,
+.app-mode-layer.is-outgoing[data-mode="canvas"] .image-canvas-entry-wave {
+  animation: app-mode-fade-out var(--mode-exit) var(--ease-in) both;
+}
+
+/* ── 工作台入场：退场阶段只保留顶栏，内容在切换完成后滑入 / 淡入 ── */
+.app-mode-layer.is-incoming[data-mode="workbench"]:not(.is-entering) .workbench-composer {
+  opacity: 0;
+  transform: translate3d(-44px, 0, 0);
+}
+
+.app-mode-layer.is-incoming[data-mode="workbench"]:not(.is-entering) .workbench-results-header,
+.app-mode-layer.is-incoming[data-mode="workbench"]:not(.is-entering) .workbench-result-stage > * {
+  opacity: 0;
+}
+
+.app-mode-layer.is-entering[data-mode="workbench"] .workbench-composer {
+  animation: app-mode-composer-in var(--mode-enter) var(--ease-emphasized) both;
+}
+
+.app-mode-layer.is-entering[data-mode="workbench"] .workbench-results-header {
+  animation: app-mode-fade-in var(--mode-enter) var(--ease-out) var(--mode-delay-header) both;
+}
+
+.app-mode-layer.is-entering[data-mode="workbench"] .workbench-result-stage > * {
+  animation: app-mode-fade-in var(--mode-enter) var(--ease-out) var(--mode-delay-content) both;
+}
+
+/* ── 返回画布：工作台退场，画布顶栏与点阵保留，水波由画布自身在进入阶段播放 ── */
+.app-mode-layer.is-outgoing[data-mode="workbench"] .workbench-page {
+  background: transparent;
+}
+
+.app-mode-layer.is-outgoing[data-mode="workbench"] .workbench-header {
+  opacity: 0;
+  visibility: hidden;
+}
+
+.app-mode-layer.is-outgoing[data-mode="workbench"] .workbench-composer {
+  animation: app-mode-composer-out var(--mode-exit) var(--ease-in) both;
+}
+
+.app-mode-layer.is-outgoing[data-mode="workbench"] .workbench-results-header,
+.app-mode-layer.is-outgoing[data-mode="workbench"] .workbench-result-stage > * {
+  animation: app-mode-fade-out var(--mode-exit) var(--ease-in) both;
+}
+
+.app-mode-layer.is-incoming[data-mode="canvas"]:not(.is-entering) .react-flow__node,
+.app-mode-layer.is-incoming[data-mode="canvas"]:not(.is-entering) .react-flow__edge,
+.app-mode-layer.is-incoming[data-mode="canvas"]:not(.is-entering) .canvas-dock,
+.app-mode-layer.is-incoming[data-mode="canvas"]:not(.is-entering) .canvas-rail,
+.app-mode-layer.is-incoming[data-mode="canvas"]:not(.is-entering) .hb-chat-panel,
+.app-mode-layer.is-incoming[data-mode="canvas"]:not(.is-entering) .hb-chat-fab {
+  opacity: 0;
+}
+
+@keyframes app-mode-fade-out {
+  from { opacity: 1; }
+  to { opacity: 0; }
+}
+
+@keyframes app-mode-fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes app-mode-composer-in {
+  from {
+    opacity: 0;
+    transform: translate3d(-44px, 0, 0);
+  }
+
+  to {
+    opacity: 1;
+    transform: translate3d(0, 0, 0);
+  }
+}
+
+@keyframes app-mode-composer-out {
+  from {
+    opacity: 1;
+    transform: translate3d(0, 0, 0);
+  }
+
+  to {
+    opacity: 0;
+    transform: translate3d(-36px, 0, 0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .app-mode-layer .workbench-composer,
+  .app-mode-layer .workbench-results-header,
+  .app-mode-layer .workbench-result-stage > *,
+  .app-mode-layer .canvas-dock,
+  .app-mode-layer .canvas-rail,
+  .app-mode-layer .hb-chat-panel,
+  .app-mode-layer .hb-chat-fab,
+  .app-mode-layer .react-flow__node,
+  .app-mode-layer .react-flow__edge,
+  .app-mode-layer .react-flow__background {
+    animation: none !important;
+    opacity: 1 !important;
+    transform: none !important;
+  }
+}

@@ -1,4 +1,5 @@
 import type { ServerResponse } from 'node:http';
+import type { VideoTaskStatus } from './videoApi.js';
 
 interface SseClient {
   res: ServerResponse;
@@ -103,4 +104,42 @@ export function pushCanvasUpdated(payload: PushedCanvasUpdated): void {
 /** 在线标签页数：huiban_locate 用它告诉 agent「用户那边没开浏览器」，别把定位说成成功了。 */
 export function countOpenTabs(): number {
   return clients.size;
+}
+
+/* ── 视频任务事件 ──
+   与 image 事件并列，但语义不同：一条视频要经历「排队 → 生成中(带进度) → 完成」多次推送，
+   前端靠 taskId 认出是同一条任务，按 phase 分别更新节点上的进度条 / 成品 / 错误。 */
+
+export type VideoEventPhase = 'submitted' | 'progress' | 'download-failed' | 'done' | 'failed';
+
+export interface PushedVideo {
+  type: 'video';
+  /** submitted = 任务已受理；progress = 轮询到的中间态；done = 已落盘；failed = 明确失败。 */
+  phase: VideoEventPhase;
+  canvasId: string;
+  nodeId: string;
+  taskId: string;
+  status?: VideoTaskStatus;
+  /** 0–100：中转站直接给进度，比图片那种干等好看得多。 */
+  progress?: number;
+  fileName?: string;
+  url?: string;
+  error?: string;
+  submissionUnknown?: boolean;
+  recoverable?: boolean;
+  finishedAt?: string;
+}
+
+/** 推给订阅了该画布的标签页；canvasId 为空表示广播（视频任务不跨画布，留口子备用）。 */
+export function pushVideo(payload: PushedVideo | Omit<PushedVideo, 'canvasId'>): void {
+  const event = 'video';
+  const data = JSON.stringify(payload);
+  for (const client of clients) {
+    if ('canvasId' in payload && payload.canvasId && client.canvasId !== payload.canvasId) continue;
+    try {
+      client.res.write(`event: ${event}\ndata: ${data}\n\n`);
+    } catch {
+      clients.delete(client);
+    }
+  }
 }

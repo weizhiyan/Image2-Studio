@@ -1,6 +1,6 @@
 import fs from 'node:fs/promises';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { generateImages, normalizeImageSize } from '../bridge/imageApi';
+import { generateImages, IMAGE_GENERATION_TIMEOUT_MS, normalizeImageSize } from '../bridge/imageApi';
 import type { ModelProfile } from '../bridge/settings';
 
 const profile: ModelProfile = {
@@ -18,7 +18,10 @@ const profile: ModelProfile = {
   responsesModel: 'gpt-5.5',
 };
 
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => {
+  vi.unstubAllGlobals();
+  vi.useRealTimers();
+});
 
 describe('normalizeImageSize', () => {
   it('保留 auto 并回落非法输入', () => {
@@ -130,5 +133,22 @@ describe('normalizeImageSize', () => {
     const tool = (body?.tools as Array<Record<string, unknown>>)[0];
     expect(tool.action).toBe('edit');
     await fs.unlink(image.filePath);
+  });
+
+  it('生成卡住超过 5 分钟会主动报错，不再无限等待', async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal('fetch', vi.fn((_url: string, init: RequestInit) => new Promise((_resolve, reject) => {
+      const abort = () => reject(new DOMException('Aborted', 'AbortError'));
+      if (init.signal?.aborted) {
+        abort();
+        return;
+      }
+      init.signal?.addEventListener('abort', abort, { once: true });
+    })));
+
+    const pending = expect(generateImages(profile, { prompt: '超时测试', n: 1 }))
+      .rejects.toThrow('超过 5 分钟没有返回结果');
+    await vi.advanceTimersByTimeAsync(IMAGE_GENERATION_TIMEOUT_MS);
+    await pending;
   });
 });

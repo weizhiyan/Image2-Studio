@@ -1,8 +1,8 @@
 .image-canvas-page.is-entering .image-canvas-flow .react-flow__nodes,
 .image-canvas-page.is-entering .image-canvas-flow .react-flow__edges {
-  /* 生图页入场编排：画布 660ms → 顶栏 960ms → 工具条 1080ms → 顶栏动作 1230ms → 侧栏 1560ms。
+  /* 生图页入场编排：画布 480ms → 顶栏 780ms → 工具条 840ms → 顶栏动作 990ms → 侧栏 1320ms。
      这条时间线跨 TopNav.css / FloatingChatPanel.css / 本文件，改一处要同步。 */
-  --image-canvas-enter-delay: 660ms;
+  --image-canvas-enter-delay: 480ms;
   --image-canvas-graph-duration: 640ms;
   animation: fade-in var(--image-canvas-graph-duration) var(--ease-in-out) var(--image-canvas-enter-delay) both;
 }
@@ -10,7 +10,7 @@
 .image-canvas-page.is-entering .canvas-dock,
 .image-canvas-page.is-entering .canvas-rail {
   --enter-y: 5px;
-  --image-canvas-enter-delay: 1080ms;
+  --image-canvas-enter-delay: 840ms;
   animation: msg-enter var(--motion-slower) var(--ease-out) var(--image-canvas-enter-delay) both;
 }
 
@@ -61,6 +61,11 @@
 
 .image-canvas-flow .react-flow__node.selected {
   z-index: 96 !important;
+}
+
+.image-canvas-flow .react-flow__node.is-outpainting {
+  opacity: 0;
+  pointer-events: none;
 }
 
 .image-canvas-flow .canvas-edge-beam {
@@ -189,6 +194,7 @@
 .image-canvas-btn {
   height: 34px;
   display: inline-flex;
+  flex: 0 0 auto;
   align-items: center;
   justify-content: center;
   gap: 7px;
@@ -200,8 +206,9 @@
   font-family: var(--font-sans);
   font-size: var(--font-size-sm);
   cursor: pointer;
-  backdrop-filter: blur(16px) saturate(140%);
-  -webkit-backdrop-filter: blur(16px) saturate(140%);
+  white-space: nowrap;
+  backdrop-filter: var(--surface-popover-glass-blur);
+  -webkit-backdrop-filter: var(--surface-popover-glass-blur);
   transition: background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out), opacity var(--motion-fast) var(--ease-out);
 }
 
@@ -389,6 +396,7 @@
     animation: none;
     box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-brand) 60%, transparent);
   }
+
 }
 
 .image-node-reference,
@@ -428,6 +436,39 @@
   display: grid;
   gap: 0;
   padding: 0;
+}
+
+.image-node-kind-label {
+  position: absolute;
+  left: 0;
+  bottom: calc(100% + var(--spacing-1));
+  z-index: 2;
+  display: flex;
+  width: 100%;
+  min-height: var(--spacing-8);
+  align-items: center;
+  gap: var(--spacing-3);
+  padding: 0 var(--spacing-1);
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-md);
+  font-weight: var(--font-weight-medium);
+  line-height: var(--line-height-normal);
+  white-space: nowrap;
+}
+
+.image-node-kind-label svg {
+  width: 16px;
+  height: 16px;
+  flex: none;
+}
+
+.image-node-video .image-node-kind-label {
+  cursor: grab;
+}
+
+.image-node-video .image-node-kind-label:active,
+.image-node-video-player:active {
+  cursor: grabbing;
 }
 
 .image-node-body em {
@@ -722,6 +763,7 @@
 }
 
 .image-node-composer-foot {
+  container-type: inline-size;
   height: 40px;
   flex-shrink: 0;
   display: flex;
@@ -732,11 +774,11 @@
   box-sizing: border-box;
   opacity: 0;
   pointer-events: none;
-  transition: opacity var(--motion-fast) var(--ease-out);
+  transition: opacity var(--motion-tooltip) var(--ease-tooltip);
 }
 
-.image-flow-node.selected .image-node-composer-foot,
-.image-node-composer-shell.editing .image-node-composer-foot {
+.image-flow-node:hover .image-node-composer-foot,
+.image-node-composer-shell:focus-within .image-node-composer-foot {
   opacity: 1;
   pointer-events: auto;
 }
@@ -772,6 +814,56 @@
 .image-node-composer-add svg {
   width: 16px;
   height: 16px;
+}
+
+.image-node-video-optimize {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--spacing-1);
+  min-width: 0;
+  max-width: 100%;
+  flex: 0 1 auto;
+  height: 28px;
+  margin-left: auto;
+  padding: 0 var(--spacing-2);
+  border: 1px solid var(--color-ui-border-subtle);
+  border-radius: var(--radius-xs);
+  background: var(--color-ui-control);
+  color: var(--color-text-secondary);
+  font-family: var(--font-sans);
+  font-size: var(--font-size-2xs);
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out), opacity var(--motion-fast) var(--ease-out);
+}
+
+.image-node-video-optimize svg {
+  width: 14px;
+  height: 14px;
+  flex: 0 0 auto;
+}
+
+.image-node-video-optimize:hover:not(:disabled) {
+  background: var(--color-ui-control-hover);
+  color: var(--color-text-primary);
+}
+
+.image-node-video-optimize:disabled {
+  opacity: 0.48;
+  cursor: not-allowed;
+}
+
+@container (max-width: 280px) {
+  .image-node-video-optimize {
+    width: 28px;
+    flex: 0 0 28px;
+    justify-content: center;
+    padding: 0;
+  }
+
+  .image-node-video-optimize-label {
+    display: none;
+  }
 }
 
 .image-node-composer-send {
@@ -835,6 +927,42 @@
   gap: 4px;
 }
 
+.image-node-result-meta {
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--motion-tooltip) var(--ease-tooltip);
+}
+
+.image-node-media:hover .image-node-result-meta,
+.image-node-media:focus-within .image-node-result-meta {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.image-node-pixel-size {
+  top: auto;
+  right: var(--spacing-2);
+  bottom: var(--spacing-2);
+  left: auto;
+  opacity: 0;
+  transform: translateY(var(--spacing-1));
+  transition:
+    opacity var(--motion-fast) var(--ease-out),
+    transform var(--motion-fast) var(--ease-out);
+}
+
+.image-node-media:hover > .image-node-pixel-size,
+.image-node-media:focus-visible > .image-node-pixel-size {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .image-node-pixel-size {
+    transition: none;
+  }
+}
+
 .image-node-meta-badges .image-node-size-badge {
   position: static;
 }
@@ -876,6 +1004,12 @@
 /* 图片区跟随节点的 grab 光标（可整块拖拽）；双击开大图由页面层 onNodeDoubleClick 处理 */
 .image-node-media {
   outline: none;
+}
+
+.image-node-image .image-node-media:focus-visible,
+.image-node-reference .image-node-media:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--color-brand) 62%, transparent);
+  outline-offset: 2px;
 }
 
 /* 生成结果图加一圈微弱描边，压在深色画布上更"实" */
@@ -1047,8 +1181,8 @@
   font-family: var(--font-sans);
   text-align: center;
   box-shadow: 0 18px 48px var(--shadow-ink);
-  backdrop-filter: blur(16px) saturate(130%);
-  -webkit-backdrop-filter: blur(16px) saturate(130%);
+  backdrop-filter: var(--surface-popover-glass-blur);
+  -webkit-backdrop-filter: var(--surface-popover-glass-blur);
   pointer-events: none;
 }
 
@@ -1140,13 +1274,6 @@
   --pulse-from: 0.55;
   animation:
     image-generation-morph var(--image-morph-duration) var(--image-morph-ease) infinite,
-    pulse-opacity var(--image-breathe-duration) var(--image-breathe-ease) infinite;
-}
-
-/* 智能生成使用不规则的多段轨迹，保持对话生成那种随机感；直连继续沿用上面的矩阵轨迹。 */
-.image-node-running-glow.is-running-enhanced {
-  animation:
-    image-generation-random-morph var(--image-morph-duration) var(--image-morph-ease) infinite,
     pulse-opacity var(--image-breathe-duration) var(--image-breathe-ease) infinite;
 }
 
@@ -1243,12 +1370,12 @@
 }
 
 .image-node-placeholder.failed {
-  color: color-mix(in srgb, var(--color-accent-red) 82%, var(--color-text-primary));
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-accent-red) 30%, transparent);
+  color: var(--color-feedback-error-text);
+  box-shadow: inset 0 0 0 1px var(--color-feedback-error-outline);
 }
 
 .image-node-placeholder.failed em {
-  background: color-mix(in srgb, var(--color-accent-red) 14%, transparent);
+  background: var(--color-feedback-error-bg);
   color: inherit;
 }
 
@@ -1266,8 +1393,8 @@
   box-shadow:
     0 18px 48px var(--shadow-ink-deep),
     inset 0 0 0 1px var(--color-ui-border-subtle);
-  backdrop-filter: blur(18px) saturate(140%);
-  -webkit-backdrop-filter: blur(18px) saturate(140%);
+  backdrop-filter: var(--surface-popover-glass-blur);
+  -webkit-backdrop-filter: var(--surface-popover-glass-blur);
   animation: fade-in var(--motion-normal) var(--ease-out);
 }
 
@@ -1441,8 +1568,8 @@
 }
 
 .image-model-options button.active {
-  background: var(--color-ui-control-active);
-  color: var(--color-text-primary);
+  background: var(--control-bg-selected);
+  color: var(--control-fg-selected);
 }
 
 .image-model-empty {
@@ -1892,51 +2019,6 @@
   }
 }
 
-@keyframes image-generation-random-morph {
-  0% {
-    -webkit-mask-position: 12% 28%, 42% 16%;
-    mask-position: 12% 28%, 42% 16%;
-    -webkit-mask-size: 44% 38%, 28% 34%;
-    mask-size: 44% 38%, 28% 34%;
-  }
-  14% {
-    -webkit-mask-position: 64% 12%, 82% 42%;
-    mask-position: 64% 12%, 82% 42%;
-    -webkit-mask-size: 32% 52%, 42% 30%;
-    mask-size: 32% 52%, 42% 30%;
-  }
-  31% {
-    -webkit-mask-position: 88% 66%, 54% 78%;
-    mask-position: 88% 66%, 54% 78%;
-    -webkit-mask-size: 38% 30%, 34% 46%;
-    mask-size: 38% 30%, 34% 46%;
-  }
-  47% {
-    -webkit-mask-position: 38% 84%, 10% 58%;
-    mask-position: 38% 84%, 10% 58%;
-    -webkit-mask-size: 52% 32%, 30% 42%;
-    mask-size: 52% 32%, 30% 42%;
-  }
-  66% {
-    -webkit-mask-position: 8% 46%, 62% 22%;
-    mask-position: 8% 46%, 62% 22%;
-    -webkit-mask-size: 30% 44%, 48% 34%;
-    mask-size: 30% 44%, 48% 34%;
-  }
-  83% {
-    -webkit-mask-position: 72% 88%, 90% 24%;
-    mask-position: 72% 88%, 90% 24%;
-    -webkit-mask-size: 42% 34%, 26% 48%;
-    mask-size: 42% 34%, 26% 48%;
-  }
-  100% {
-    -webkit-mask-position: 12% 28%, 42% 16%;
-    mask-position: 12% 28%, 42% 16%;
-    -webkit-mask-size: 44% 38%, 28% 34%;
-    mask-size: 44% 38%, 28% 34%;
-  }
-}
-
 @keyframes image-generation-text {
   0%,
   18% { background-position: 100% 0; }
@@ -2202,7 +2284,7 @@
   gap: var(--spacing-1);
   opacity: 0;
   pointer-events: none;
-  transition: opacity var(--motion-fast) var(--ease-out);
+  transition: opacity var(--motion-tooltip) var(--ease-tooltip);
 }
 
 .image-node-version:hover .image-node-version-actions,
@@ -2361,4 +2443,212 @@
 .image-node-composer-redit-cancel:disabled {
   opacity: 0.5;
   cursor: not-allowed;
+}
+
+/* ── 视频节点（kind: 'video'）──
+   外壳、卡片、composer、浮层全部复用上面的类，这里只补「视频特有的那几块」：
+   播放器、进度条、以及视频比例下的盒子收敛。
+   不另起 VideoNodes.css——曾按独立组件写过一版平行样式，结果视觉和图片节点对不上，
+   用户要求「样式跟图像生成节点一样」，所以就该长在同一处。 */
+
+.image-node-video .image-node-media {
+  /* 视频没有像素尺寸可推导，比例由工具栏写进 --image-aspect-ratio（16/9 等） */
+  background: var(--color-bg-overlay);
+}
+
+.image-node-video-player {
+  display: block;
+  width: 100%;
+  height: 100%;
+  aspect-ratio: var(--image-aspect-ratio, 16 / 9);
+  background: var(--color-ink);
+  cursor: grab;
+  object-fit: cover;
+}
+
+.image-node-video-scrim {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  z-index: 4;
+  height: 84px;
+  background: linear-gradient(to top, var(--media-chrome-bg-strong), transparent);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--motion-fast) var(--ease-out);
+}
+
+.image-node-video .image-node-media:hover .image-node-video-scrim,
+.image-node-video .image-node-media:focus-within .image-node-video-scrim {
+  opacity: 1;
+}
+
+.image-node-video-controls {
+  position: absolute;
+  right: var(--spacing-2);
+  bottom: var(--spacing-2);
+  left: var(--spacing-2);
+  z-index: 5;
+  display: flex;
+  min-height: 24px;
+  align-items: center;
+  gap: var(--spacing-2);
+  padding: 0;
+  background: transparent;
+  color: var(--media-chrome-fg);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-2xs);
+  font-variant-numeric: tabular-nums;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--motion-tooltip) var(--ease-tooltip);
+}
+
+.image-node-video .image-node-media:hover .image-node-video-controls,
+.image-node-video .image-node-media:focus-within .image-node-video-controls {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.image-node-video .image-node-meta-badges {
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--motion-tooltip) var(--ease-tooltip);
+}
+
+.image-node-video .image-node-media:hover .image-node-meta-badges,
+.image-node-video .image-node-media:focus-within .image-node-meta-badges {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+@media (hover: none) {
+  .image-node-composer-foot,
+  .image-node-result-meta {
+    opacity: 1;
+    pointer-events: auto;
+  }
+
+  .image-node-video .image-node-video-controls,
+  .image-node-video .image-node-meta-badges {
+    opacity: 1;
+    pointer-events: auto;
+  }
+
+  .image-node-version-actions {
+    opacity: 1;
+    pointer-events: auto;
+  }
+
+  .image-node-video-scrim {
+    opacity: 1;
+  }
+}
+
+.image-node-video-play,
+.image-node-video-audio {
+  width: 24px;
+  height: 24px;
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-2xs);
+  background: transparent;
+  color: var(--media-chrome-fg);
+  cursor: pointer;
+}
+
+.image-node-video-play:hover,
+.image-node-video-audio:hover {
+  background: var(--media-chrome-active);
+}
+
+.image-node-video-play svg,
+.image-node-video-audio svg {
+  width: 14px;
+  height: 14px;
+}
+
+.image-node-video-controls time {
+  flex: none;
+  color: var(--media-chrome-fg-muted);
+}
+
+.image-node-video-seek {
+  width: 100%;
+  min-width: 0;
+  height: 16px;
+  flex: 1;
+  margin: 0;
+  accent-color: var(--color-paper);
+  cursor: pointer;
+}
+
+/* 视频运行态：进度条 + 百分比。与图片的 NodeRunningVisual 挤在同一个容器里，
+   外框流光一致，所以这里只写内部。 */
+.image-node-video-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
+}
+
+.image-node-video-progress-track {
+  position: relative;
+  height: 4px;
+  border-radius: var(--radius-full);
+  background: color-mix(in srgb, var(--color-text-tertiary) 26%, transparent);
+  overflow: hidden;
+}
+
+.image-node-video-progress-fill {
+  height: 100%;
+  border-radius: var(--radius-full);
+  background: var(--color-accent-purple);
+  transition: width var(--motion-normal) var(--ease-out);
+}
+
+.image-node-video-progress .image-node-running-meta strong {
+  color: var(--color-text-primary);
+}
+
+.image-node-video-progress .image-node-running-meta time {
+  color: var(--color-text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+/* 视频进行中：卡片不显示 composer 的输入框，只留进度（发送按钮已在 FlowImageNode 里置灰） */
+.image-node-video.is-running .image-node-composer-content {
+  opacity: 0.55;
+}
+
+.image-node-video-retry {
+  align-self: flex-start;
+  margin-top: var(--spacing-2);
+  border: 1px solid var(--color-ui-border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--color-ui-control);
+  color: var(--color-text-primary);
+  padding: var(--spacing-1) var(--spacing-2);
+  cursor: pointer;
+  font-family: var(--font-sans);
+  font-size: var(--font-size-xs);
+}
+
+.image-node-video-retry:hover {
+  background: var(--color-ui-control-hover);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .image-node-composer-foot,
+  .image-node-result-meta,
+  .image-node-version-actions,
+  .image-node-video-controls,
+  .image-node-video .image-node-meta-badges {
+    transition: none;
+  }
 }

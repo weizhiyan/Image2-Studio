@@ -1,6 +1,6 @@
 import { EventEmitter } from 'node:events';
 import type { ServerResponse } from 'node:http';
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { normalizeAskUserQuestions, type AgentTurn } from '../bridge/agent';
 import { answerChatRun, startChatRun, subscribeChatRun, type StartRunRequest } from '../bridge/runs';
 
@@ -24,7 +24,8 @@ vi.mock('../bridge/agent.js', async (importOriginal) => ({
   ...await importOriginal<typeof import('../bridge/agent')>(),
   callAgentModel: mocks.callAgentModel,
 }));
-vi.mock('../bridge/imageApi.js', () => ({
+vi.mock('../bridge/imageApi.js', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../bridge/imageApi')>(),
   generateImages: vi.fn(async () => [
     { url: '/api/files/first.png', fileName: 'first.png' },
     { url: '/api/files/second.png', fileName: 'second.png' },
@@ -52,6 +53,110 @@ vi.mock('../bridge/settings.js', () => {
 });
 
 describe('chat run image delivery', () => {
+  beforeEach(() => {
+    mocks.callAgentModel.mockReset();
+    mocks.appendCanvasImageNodes.mockClear();
+    mocks.pushImage.mockClear();
+    mocks.putChatThread.mockClear();
+  });
+
+  it('把当前轮次引用的图片作为 Agent 视觉上下文传入', async () => {
+    mocks.callAgentModel.mockReset().mockResolvedValueOnce({
+      text: '我看到了引用图片。', toolCalls: [], protocol: 'json',
+    });
+    mocks.putChatThread.mockClear();
+    const image = 'data:image/png;base64,dGVzdC1pbWFnZQ==';
+    const now = new Date().toISOString();
+    const request: StartRunRequest = {
+      threadId: 'thread-vision', canvasId: 'canvas-vision', assistantMessageId: 'assistant-vision', references: [],
+      thread: {
+        id: 'thread-vision', canvasId: 'canvas-vision', title: '图像识别', createdAt: now, updatedAt: now,
+        messages: [
+          { id: 'user-vision', role: 'user', content: '请描述这张图', attachments: [{ url: image }], createdAt: now },
+          { id: 'assistant-vision', role: 'assistant', content: '', status: 'running', createdAt: now },
+        ],
+      },
+    };
+
+    startChatRun(request);
+    await vi.waitFor(() => expect(mocks.putChatThread).toHaveBeenCalled());
+
+    expect(mocks.callAgentModel).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      visualContextImages: [image],
+    }));
+    mocks.callAgentModel.mockClear();
+  });
+
+  it('只注入本轮选中的角色及其 Skill，不复活历史消息里的其他角色', async () => {
+    mocks.callAgentModel.mockReset().mockResolvedValueOnce({
+      text: '按当前角色处理。', toolCalls: [], protocol: 'json',
+    });
+    mocks.putChatThread.mockClear();
+    const now = new Date().toISOString();
+    const request: StartRunRequest = {
+      threadId: 'thread-role', canvasId: 'canvas-role', assistantMessageId: 'assistant-role', references: [],
+      agentRole: {
+        id: 'role-current',
+        name: '创意设计',
+        category: '视觉',
+        systemPrompt: '先拆解目标，再给三个方向。',
+        skills: [{ id: 'skill-current', name: '品牌语气', content: '克制、具体、避免套话。' }],
+      },
+      thread: {
+        id: 'thread-role', canvasId: 'canvas-role', title: '角色测试', createdAt: now, updatedAt: now,
+        messages: [
+          {
+            id: 'user-old',
+            role: 'user',
+            content: '上一轮',
+            createdAt: now,
+            agentRole: {
+              id: 'role-old',
+              name: '旧角色',
+              systemPrompt: '不应注入的旧提示词',
+              skills: [],
+            },
+          },
+          { id: 'assistant-role', role: 'assistant', content: '', status: 'running', createdAt: now },
+        ],
+      },
+    };
+
+    mocks.putChatThread.mockClear();
+    startChatRun(request);
+    await vi.waitFor(() => expect(mocks.callAgentModel).toHaveBeenCalled());
+    await vi.waitFor(() => expect(mocks.putChatThread).toHaveBeenCalled());
+    const options = mocks.callAgentModel.mock.calls[0][1] as { systemSpec: string };
+    expect(options.systemSpec).toContain('当前对话角色：创意设计（视觉）');
+    expect(options.systemSpec).toContain('先拆解目标，再给三个方向。');
+    expect(options.systemSpec).toContain('## Skill: 品牌语气');
+    expect(options.systemSpec).toContain('克制、具体、避免套话。');
+    expect(options.systemSpec).not.toContain('旧角色');
+    expect(options.systemSpec).not.toContain('不应注入的旧提示词');
+  });
+
+  it('通用模式不注入角色上下文', async () => {
+    mocks.callAgentModel.mockReset().mockResolvedValueOnce({
+      text: '通用回复。', toolCalls: [], protocol: 'json',
+    });
+    mocks.putChatThread.mockClear();
+    const now = new Date().toISOString();
+    startChatRun({
+      threadId: 'thread-general', canvasId: 'canvas-general', assistantMessageId: 'assistant-general', references: [],
+      thread: {
+        id: 'thread-general', canvasId: 'canvas-general', title: '通用', createdAt: now, updatedAt: now,
+        messages: [
+          { id: 'user-general', role: 'user', content: '你好', createdAt: now },
+          { id: 'assistant-general', role: 'assistant', content: '', status: 'running', createdAt: now },
+        ],
+      },
+    });
+    await vi.waitFor(() => expect(mocks.callAgentModel).toHaveBeenCalled());
+    await vi.waitFor(() => expect(mocks.putChatThread).toHaveBeenCalled());
+    const options = mocks.callAgentModel.mock.calls[0][1] as { systemSpec: string };
+    expect(options.systemSpec).not.toContain('当前对话角色：');
+  });
+
   it('追问 schema 限制为最多四题且过滤无效选项', () => {
     const questions = normalizeAskUserQuestions([
       { id: 'subject', title: '主体是什么？', options: ['商品', '场景'] },
@@ -110,6 +215,27 @@ describe('chat run image delivery', () => {
       releaseReply({ text: '', toolCalls: [], protocol: 'tools' });
       client.emit('close');
     }
+  });
+
+  it('工具协议解析失败时保存错误状态，不伪装完成或提交生图', async () => {
+    mocks.callAgentModel.mockRejectedValueOnce(new Error('模型返回的工具调用不完整或格式无法识别，本次未提交生成。请重试。'));
+    const now = new Date().toISOString();
+    const request: StartRunRequest = {
+      threadId: 'thread-protocol', canvasId: 'canvas-protocol', assistantMessageId: 'assistant-protocol', references: [],
+      thread: {
+        id: 'thread-protocol', canvasId: 'canvas-protocol', title: '协议失败', createdAt: now, updatedAt: now,
+        messages: [
+          { id: 'user-protocol', role: 'user', content: '再来一个4×4宫格', createdAt: now },
+          { id: 'assistant-protocol', role: 'assistant', content: '', status: 'running', createdAt: now },
+        ],
+      },
+    };
+    startChatRun(request);
+    await vi.waitFor(() => expect(mocks.putChatThread).toHaveBeenCalled());
+    expect(request.thread.messages[1]).toMatchObject({ status: 'error', error: expect.stringContaining('本次未提交生成') });
+    expect(mocks.appendCanvasImageNodes).not.toHaveBeenCalled();
+    expect(mocks.pushImage).not.toHaveBeenCalled();
+    expect(mocks.callAgentModel).toHaveBeenCalledTimes(1);
   });
 
   it('结构化追问会暂停当前 run，提交答案后继续同一轮', async () => {

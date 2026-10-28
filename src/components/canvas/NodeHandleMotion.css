@@ -4,28 +4,34 @@
    不改那边的文件。磁吸（--hb-magnet-*）已从 FlowImageNode 删除，
    这里把 translate 显式归零，防止旧的 JS 变量残留把把手带偏。 */
 
-/* 「+」把手位移归零：磁吸删除后把手只靠 transform: translateY(-50%) 垂直居中，
-   translate 与 transform 各管一个属性，归零不碰居中体系。 */
+/* 「+」把手默认收在节点内侧；悬停时再滑到现有的外侧最终位置。
+   translate 与 transform 各管一个属性，不破坏 translateY(-50%) 的垂直居中。 */
 .image-flow-node .image-node-connect-add.image-node-connect-add {
-  translate: 0 0;
+  translate: var(--hb-handle-offset-x, 0px) 0;
+  transition:
+    opacity 200ms cubic-bezier(0.42, 0, 1, 1),
+    translate 200ms cubic-bezier(0.42, 0, 1, 1),
+    transform var(--motion-fast) var(--ease-out),
+    background var(--motion-fast) var(--ease-out),
+    color var(--motion-fast) var(--ease-out),
+    box-shadow var(--motion-fast) var(--ease-out) !important;
 }
 
-/* 由内到外的入场方向：target 在左缘从右往左归位、source 在右缘从左往右归位 */
+/* target 在左缘从右往左滑出、source 在右缘从左往右滑出。 */
 .image-flow-node .image-node-connect-add.image-handle-target {
-  --hb-handle-slide-x: 7px;
+  --hb-handle-offset-x: var(--spacing-2);
 }
 
 .image-flow-node .image-node-connect-add.image-handle-source {
-  --hb-handle-slide-x: -7px;
+  --hb-handle-offset-x: calc(0px - var(--spacing-2));
 }
 
-/* 悬停节点 / 选中：入场改成「由内到外」——在 ImageNodes.css 的 opacity + scale 之上
-   叠一层从节点内侧滑出的横移（transform 常驻 translateY(-50%) 保持垂直居中不动）。 */
+/* 悬停节点 / 选中：淡入并滑到现有最终位置；退出时由同一组 transition 平滑收回。 */
 .image-flow-node:hover .image-node-connect-add.image-node-connect-add,
-
 .image-flow-node.selected .image-node-connect-add.image-node-connect-add {
   opacity: 1;
-  animation: hb-handle-slide-in var(--motion-normal) var(--ease-emphasized);
+  translate: 0 0;
+  animation: none;
 }
 
 /* 悬停把手本体：比入场终态再大一圈 + 底色提亮一档 + 外扩柔光
@@ -123,33 +129,10 @@
   overflow-wrap: anywhere;
 }
 
-/* ── 本文件独占的 @keyframes（机制特殊，animations.css 没有对应项） ── */
-/* 把手由内到外入场：常驻 translateY(-50%) 做垂直居中不能丢，入场要在不破坏居中的前提下
-   叠加横移（target 7px / source -7px，见 --hb-handle-slide-x）与 0.55→1 的放大。
-   animations.css 的 fade-slide-x（无缩放）/ spring-in（无横移、不支持居中）都差一环，
-   机制不同不能复用，故在此新增。 */
-@keyframes hb-handle-slide-in {
-  from {
-    opacity: 0;
-    transform: translateY(-50%) translateX(var(--hb-handle-slide-x, 7px)) scale(0.55);
-  }
-
-  60% {
-    opacity: 1;
-  }
-
-  to {
-    opacity: 1;
-    transform: translateY(-50%) translateX(0) scale(1);
-  }
-}
-
 @media (prefers-reduced-motion: reduce) {
-  /* 减弱动效：把手入场、错误环脉冲一律直接落到终态（对齐 ImageNodes.css 的降级写法） */
-  .image-flow-node:hover .image-node-connect-add.image-node-connect-add,
-
-  .image-flow-node.selected .image-node-connect-add.image-node-connect-add {
-    animation: none;
+  /* 减弱动效：把手直接切到终态，错误环保持静态。 */
+  .image-flow-node .image-node-connect-add.image-node-connect-add {
+    transition: none !important;
   }
 
   .image-flow-node.is-error::after {

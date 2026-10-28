@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type CSSProperties, type PointerEvent as ReactPointerEvent } from 'react';
 import { Handle, Position, type NodeProps } from '@xyflow/react';
 import type { CanvasNodeData } from '@/types';
 import {
@@ -11,6 +11,9 @@ import {
   type NodePromptDetail,
   type NodeReferenceRemoveDetail,
   type NodeReferenceReorderDetail,
+  type NodeVideoOptimizeDetail,
+  type NodeVideoRecoverDetail,
+  type NodeVideoRunDetail,
   type NodeResizeStartDetail,
   type NodePreviewDetail,
   type NodeReditCancelDetail,
@@ -23,7 +26,11 @@ import {
 import { nodeAspectRatio, nodeBoxFor, nodeWidthFor } from '@/lib/aspect';
 import { hasUsableTextReference } from '@/lib/references';
 import { activeVersionOf, newestVersionsFirst, normalizeVersions, versionIndexOf, versionLabel } from '@/lib/versions';
+import { videoPlaybackStore } from '@/lib/videoPlayback';
 import CanvasImage from './CanvasImage';
+import { AiGlyphIcon } from './NodeToolbarIcons';
+import { MATRIX_DEFAULTS, RunningMatrix } from './RunningMatrixField';
+import { useNearViewport } from './useNearViewport';
 import './RunningGlow.css';
 import './NodeHandleMotion.css';
 import './NodeVersionGrid.css';
@@ -32,11 +39,28 @@ import './NodeVersionGrid.css';
 function nodeStyleVars(data: CanvasNodeData): Record<string, string> {
   const hasManualHeight = data.nodeHeightManual === true;
   const box = nodeBoxFor(data);
+  const aspect = nodeAspectRatio(data);
   return {
     '--image-node-width': `${nodeWidthFor(data)}px`,
-    '--image-aspect-ratio': String(Math.round(nodeAspectRatio(data) * 100) / 100),
+    '--image-aspect-ratio': String(Math.round(aspect * 100) / 100),
     ...(hasManualHeight ? { '--image-node-height': `${box.height}px` } : {}),
   };
+}
+
+type PixelSize = { width: number; height: number };
+
+/** 原始像素尺寸只接受正数；字符串旧数据也在这里收口。 */
+function pixelSizeOf(width: unknown, height: unknown): PixelSize | null {
+  const parsedWidth = Math.round(Number(width));
+  const parsedHeight = Math.round(Number(height));
+  if (!Number.isFinite(parsedWidth) || !Number.isFinite(parsedHeight) || parsedWidth <= 0 || parsedHeight <= 0) {
+    return null;
+  }
+  return { width: parsedWidth, height: parsedHeight };
+}
+
+function pixelSizeLabel(size: PixelSize): string {
+  return `${size.width} × ${size.height} px`;
 }
 
 
@@ -92,8 +116,14 @@ function NodeRunningVisual({ data, elapsed }: { data: CanvasNodeData; elapsed: s
   const runningMode = data.runningDirect === false ? 'is-running-enhanced' : 'is-running-direct';
   return (
     <>
-      <span className={`image-node-running-dots ${runningMode}`} aria-hidden="true" />
-      <span className={`image-node-running-glow ${runningMode}`} aria-hidden="true" />
+      {data.runningDirect === false ? (
+        <RunningMatrix inline mode="ripple" params={MATRIX_DEFAULTS} />
+      ) : (
+        <>
+          <span className={`image-node-running-dots ${runningMode}`} aria-hidden="true" />
+          <span className={`image-node-running-glow ${runningMode}`} aria-hidden="true" />
+        </>
+      )}
       {data.size ? <span className="image-node-running-size">{data.size}</span> : null}
       <span className="image-node-running-meta">
         <strong>{runningStageTitle(data)}</strong>
@@ -105,10 +135,37 @@ function NodeRunningVisual({ data, elapsed }: { data: CanvasNodeData; elapsed: s
   );
 }
 
-function SendIcon() {
+/**
+ * 视频运行态：与图片的 NodeRunningVisual 并列放在同一个 `.image-node-composer-running` 容器里，
+ * 外框流光因此一致。内部换成进度条——中转站直接给 0–100，比图片那种"干等"信息量大得多。
+ */
+function NodeVideoRunningVisual({ progress }: { progress: number }) {
   return (
+    <div className="image-node-video-progress" role="progressbar" aria-valuenow={progress} aria-valuemin={0} aria-valuemax={100}>
+      <div className="image-node-video-progress-track">
+        <div className="image-node-video-progress-fill" style={{ width: `${Math.max(2, progress)}%` }} />
+      </div>
+      <span className="image-node-running-meta">
+        <strong>视频生成中</strong>
+        <span className="image-node-running-timer" aria-hidden="true" />
+        <time>{progress > 0 ? `${progress}%` : '已提交'}</time>
+      </span>
+    </div>
+  );
+}
+
+function SendIcon() {  return (
     <svg width="16" height="16" viewBox="0 0 18 18" fill="none" aria-hidden="true">
       <path d="M14.5823 1.95466L1.71081 5.91364C0.815138 6.18919 0.652241 7.3866 1.44187 7.89142L5.24484 10.3225C5.4426 10.4488 5.6756 10.5087 5.90979 10.4931C6.14398 10.4776 6.36706 10.3876 6.54643 10.2362L11.2929 6.23098C11.5502 6.01387 11.8974 6.36082 11.6803 6.61839L7.67534 11.3657C7.52399 11.545 7.43401 11.7681 7.41854 12.0022C7.40308 12.2364 7.46295 12.4693 7.58939 12.667L10.0199 16.4694C10.5245 17.2588 11.7221 17.0959 11.9977 16.2005L15.9567 3.32923C16.2161 2.48539 15.4259 1.69524 14.5823 1.95466Z" fill="currentColor" />
+    </svg>
+  );
+}
+
+function UndoPromptIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <path d="M8 5 4 9l4 4" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M4 9h9a6 6 0 0 1 6 6v1" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
     </svg>
   );
 }
@@ -165,16 +222,89 @@ function CopyImageIcon() {
   );
 }
 
+function ImageTypeIcon() {
+  return (
+    <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <rect x="2.25" y="2.25" width="11.5" height="11.5" rx="2" stroke="currentColor" strokeWidth="1.2" />
+      <circle cx="5.5" cy="5.5" r="1.1" fill="currentColor" />
+      <path d="m3.5 11 3-3 2.1 2.1 1.4-1.4 2.5 2.5" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function VideoTypeIcon() {
+  return (
+    <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <rect x="1.75" y="3" width="8.75" height="10" rx="1.5" stroke="currentColor" strokeWidth="1.2" />
+      <path d="m10.5 6 3.75-2v8l-3.75-2" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function VideoPlayIcon({ playing }: { playing: boolean }) {
+  return playing ? (
+    <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <path d="M5 3.5v9M11 3.5v9" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+    </svg>
+  ) : (
+    <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <path d="m5 3.5 7 4.5-7 4.5v-9Z" fill="currentColor" />
+    </svg>
+  );
+}
+
+function VideoAudioIcon({ muted }: { muted: boolean }) {
+  return (
+    <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <path d="M2.5 6.25h2.25L8 3.75v8.5L4.75 9.75H2.5v-3.5Z" stroke="currentColor" strokeWidth="1.25" strokeLinejoin="round" />
+      {muted ? (
+        <path d="m10.25 6.25 3.5 3.5m0-3.5-3.5 3.5" stroke="currentColor" strokeWidth="1.25" strokeLinecap="round" />
+      ) : (
+        <>
+          <path d="M10.25 6.1a2.65 2.65 0 0 1 0 3.8" stroke="currentColor" strokeWidth="1.25" strokeLinecap="round" />
+          <path d="M12.1 4.5a5.1 5.1 0 0 1 0 7" stroke="currentColor" strokeWidth="1.25" strokeLinecap="round" />
+        </>
+      )}
+    </svg>
+  );
+}
+
+function formatVideoTime(seconds: number): string {
+  const safeSeconds = Math.max(0, Math.floor(Number.isFinite(seconds) ? seconds : 0));
+  const minutes = Math.floor(safeSeconds / 60);
+  const remainder = safeSeconds % 60;
+  return `${minutes}:${String(remainder).padStart(2, '0')}`;
+}
+
 export default function FlowImageNode({ id, data, selected }: NodeProps) {
   const d = data as unknown as CanvasNodeData;
   const kind = d.kind;
   const imageUrl = String(d.imageUrl || d.referenceDataUrl || '').trim();
   const isComposer = kind === 'composer';
+  /* ── 视频节点：与 composer 共用同一个外壳与同一套 composer UI，
+     差别只在「选中后浮出的工具栏」和「出什么介质」。样式因此天然一致，
+     不用另起一套 CSS（曾按独立组件写过一版，视觉和交互都对不上，返工）。 ── */
+  const isVideo = kind === 'video';
+  const isGenerator = isComposer || isVideo;
+  const videoUrl = String(d.videoUrl || '').trim();
+  const videoRunning = isVideo && d.videoStatus === 'running';
+  const videoDone = isVideo && d.videoStatus === 'done' && Boolean(videoUrl);
+  const showTypeLabel = isVideo || isComposer || kind === 'image' || kind === 'reference';
+  const videoFailed = isVideo && d.videoStatus === 'error';
+  const videoProgress = Math.max(0, Math.min(100, Number(d.videoProgress || 0)));
   const isRunning = d.status === 'running';
+  const busy = isRunning || videoRunning;
   const sizeLabel = String(d.size || '').trim();
   /* ── 版本链：同一节点上历次生成 / 二次编辑的产物，主图 = activeVersion ── */
   const versions = normalizeVersions(d);
   const activeVersion = activeVersionOf(d);
+  const [naturalImageSize, setNaturalImageSize] = useState<(PixelSize & { url: string }) | null>(null);
+  const storedPixelSize = pixelSizeOf(activeVersion?.width, activeVersion?.height)
+    || pixelSizeOf(d.width, d.height);
+  const naturalPixelSize = naturalImageSize?.url === imageUrl
+    ? pixelSizeOf(naturalImageSize.width, naturalImageSize.height)
+    : null;
+  const pixelSize = storedPixelSize || naturalPixelSize;
   const versionCount = versions.length;
   // 版本大于 1 才有“多版本”语言：卡片背后叠层 + 右上角数字箭头角标
   const hasVersions = versionCount > 1;
@@ -183,6 +313,16 @@ export default function FlowImageNode({ id, data, selected }: NodeProps) {
   const [versionsRendered, setVersionsRendered] = useState(false);
   const [imageCopied, setImageCopied] = useState(false);
   const copyTimerRef = useRef<number | null>(null);
+  const videoPlayerRef = useRef<HTMLVideoElement>(null);
+  const videoNearViewport = useNearViewport(videoPlayerRef, videoDone);
+  const [videoCurrentTime, setVideoCurrentTime] = useState(0);
+  const [videoDuration, setVideoDuration] = useState(0);
+  const [videoPlaying, setVideoPlaying] = useState(false);
+  const videoMuted = useSyncExternalStore(
+    videoPlaybackStore.subscribe,
+    videoPlaybackStore.getSnapshot,
+    videoPlaybackStore.getServerSnapshot,
+  );
   // 二次编辑态：kind 是 composer 且钉着基准图版本；输入区里那张不可移除的引用就是它
   const isRedit = isComposer && Boolean(String(d.reditBaseVersionId || '').trim());
   const reditBase = isRedit
@@ -219,20 +359,33 @@ export default function FlowImageNode({ id, data, selected }: NodeProps) {
   // 连着上游文案节点时，输入框可以空着发送：文案会以「参考：…」并进提示词，
   // 用户没必要把同一段话抄两遍（曾因强制非空，文案节点连上来也发不出去）
   const textReferenceReady = hasUsableTextReference(references);
-  const canSend = !isRunning && Boolean(promptDraft.trim() || textReferenceReady);
+  const submissionNeedsReview = isVideo && d.videoSubmissionUnknown === true;
+  const videoPromptUndoAvailable = isVideo && d.videoPromptOptimized === true && typeof d.videoPromptOriginal === 'string';
+  const canSend = !busy && !submissionNeedsReview && d.videoPromptOptimizing !== true && Boolean(promptDraft.trim() || textReferenceReady);
   // 选中后再次点击输入区才进入可输入态：平时输入框不吃指针事件，卡片整体可以拖
-  const isEditing = isComposer && !imageUrl && d.composerEditing === true && !isRunning;
-  const elapsed = useElapsedLabel(d.createdAt, isRunning);
+  const isEditing = isGenerator && !imageUrl && !videoDone && d.composerEditing === true && !busy;
+  const elapsed = useElapsedLabel(d.createdAt, busy);
   const composerInputRef = useRef<HTMLTextAreaElement>(null);
   /** 手动拉伸过高度：卡片不再跟随内容自适应，输入框交给 flex 铺满 */
-  const hasManualHeight = isComposer && !imageUrl && d.nodeHeightManual === true;
+  const hasManualHeight = isGenerator && !imageUrl && !videoDone && d.nodeHeightManual === true;
   /**
    * 发送按钮下方那排报错：status 置 error 是硬失败（没配模型、参考图在跑、接口报错…），
    * error 字段在运行中非空是软提示（提示词整理失败、已按原文生图）——都要摊在卡片上，
    * 只弹 toast 的话错误撑不过 3 秒，画布上找不到原因。
    */
   const composerError = String(d.error || '').trim()
-    || (d.status === 'error' ? '生成失败，请重新发送' : '');
+    || (d.status === 'error' ? '生成失败，请重新发送' : '')
+    || (isVideo ? String(d.videoPromptError || '') : '')
+    || (videoFailed ? String(d.videoError || '视频生成失败，请重新发送') : '');
+
+  const submitGeneration = () => {
+    if (!canSend) return;
+    if (isVideo) {
+      emitEvent<NodeVideoRunDetail>(NODE_EVENTS.videoRun, { nodeId: id, prompt: promptDraft });
+      return;
+    }
+    emitEvent<NodeRunDetail>(NODE_EVENTS.run, { nodeId: id, prompt: promptDraft });
+  };
 
   useEffect(() => () => {
     if (copyTimerRef.current !== null) window.clearTimeout(copyTimerRef.current);
@@ -256,6 +409,21 @@ export default function FlowImageNode({ id, data, selected }: NodeProps) {
       await navigator.clipboard?.writeText(imageUrl).catch(() => undefined);
     }
   };
+
+  const toggleVideoPlayback = () => {
+    const player = videoPlayerRef.current;
+    if (!player) return;
+    if (player.paused) {
+      void player.play().catch(() => setVideoPlaying(false));
+    } else {
+      player.pause();
+    }
+  };
+
+  useEffect(() => {
+    const player = videoPlayerRef.current;
+    if (player) player.muted = videoMuted;
+  }, [videoMuted, videoDone]);
 
   // 运行中不覆盖本地草稿：失败后原文还在，改几个字就能重发
   useEffect(() => {
@@ -391,7 +559,7 @@ export default function FlowImageNode({ id, data, selected }: NodeProps) {
 
   return (
     <div
-      className={`image-flow-node image-node-${kind} ${isComposer && !imageUrl ? 'image-node-composer-card' : ''} ${hasManualHeight ? 'has-manual-height' : ''} ${imageUrl ? 'has-image' : 'is-empty'} ${selected ? 'selected' : ''} ${isRunning ? 'is-running' : ''} ${d.status === 'error' && !isRunning ? 'is-error' : ''} ${hasVersions ? 'has-versions' : ''} ${versionsExpanded ? 'versions-expanded' : (versionsRendered ? 'versions-leaving' : '')} ${isRedit ? 'is-redit' : ''}`}
+      className={`image-flow-node image-node-${kind} ${isGenerator && !imageUrl && !videoDone ? 'image-node-composer-card' : ''} ${hasManualHeight ? 'has-manual-height' : ''} ${imageUrl || videoDone ? 'has-image' : 'is-empty'} ${selected ? 'selected' : ''} ${isRunning ? 'is-running' : ''} ${videoRunning ? 'is-running is-video-running' : ''} ${(d.status === 'error' || videoFailed) && !busy ? 'is-error' : ''} ${hasVersions ? 'has-versions' : ''} ${versionsExpanded ? 'versions-expanded' : (versionsRendered ? 'versions-leaving' : '')} ${isRedit ? 'is-redit' : ''}`}
       style={nodeStyleVars(d) as CSSProperties}
       // 入场 / 退场 / 新鲜高亮播完即通知页面摘 class，比定时器兜底精确
       onAnimationEnd={(event) => {
@@ -399,7 +567,7 @@ export default function FlowImageNode({ id, data, selected }: NodeProps) {
         emitEvent<NodeAnimationDoneDetail>(NODE_ANIMATION_EVENTS.done, { nodeId: id });
       }}
     >
-      {isRunning ? (
+      {busy ? (
         // 智能生成是紫色流光，直连生成保留白色流光，内部矩阵负责点阵涟漪。
         <span
           className={`image-node-running-border ${d.runningDirect === false ? 'is-running-enhanced' : 'is-running-direct'}`}
@@ -427,11 +595,22 @@ export default function FlowImageNode({ id, data, selected }: NodeProps) {
         <span className="image-node-connect-ring" aria-hidden="true" />
       </Handle>
       <div className={`image-node-body ${sizeLabel ? 'has-size-badge' : ''}`}>
-        {isComposer && !imageUrl ? (
-          <div className={`image-node-composer-shell ${isRunning ? 'running' : ''} ${isEditing ? 'editing' : ''}`}>
+        {showTypeLabel ? (
+          <div className="image-node-kind-label">
+            {videoDone ? <VideoTypeIcon /> : isVideo ? <VideoTypeIcon /> : <ImageTypeIcon />}
+            <span>{isVideo ? '视频' : '图片'}</span>
+          </div>
+        ) : null}
+        {isGenerator && !imageUrl && !videoDone ? (
+          <div className={`image-node-composer-shell ${busy ? 'running' : ''} ${isEditing ? 'editing' : ''}`}>
             {isRunning ? (
               <div className="image-node-composer-running" role="status" aria-live="polite">
                 <NodeRunningVisual data={d} elapsed={elapsed} />
+              </div>
+            ) : null}
+            {videoRunning ? (
+              <div className="image-node-composer-running" role="status" aria-live="polite">
+                <NodeVideoRunningVisual progress={videoProgress} />
               </div>
             ) : null}
             <div className="image-node-composer-content">
@@ -548,11 +727,13 @@ export default function FlowImageNode({ id, data, selected }: NodeProps) {
                 ref={composerInputRef}
                 className={`${isEditing ? 'nodrag nowheel' : ''}`}
                 value={promptDraft}
-                disabled={isRunning}
+                disabled={busy || d.videoPromptOptimizing === true}
                 readOnly={!isEditing}
                 tabIndex={isEditing ? 0 : -1}
                 rows={1}
-                placeholder={textReferenceReady ? '描述你想生成的画面...（留空则按连接的文案生成）' : '描述你想生成的画面...'}
+                placeholder={isVideo
+                  ? (textReferenceReady ? '描述你想生成的视频...（留空则按连接的文案生成）' : '描述你想生成的视频...')
+                  : (textReferenceReady ? '描述你想生成的画面...（留空则按连接的文案生成）' : '描述你想生成的画面...')}
                 onChange={(event) => {
                   const value = event.currentTarget.value;
                   setPromptDraft(value);
@@ -562,7 +743,7 @@ export default function FlowImageNode({ id, data, selected }: NodeProps) {
                   if (event.nativeEvent.isComposing) return;
                   if (event.key === 'Enter' && !event.shiftKey) {
                     event.preventDefault();
-                    if (canSend) emitEvent<NodeRunDetail>(NODE_EVENTS.run, { nodeId: id, prompt: promptDraft });
+                    submitGeneration();
                   }
                 }}
               />
@@ -573,7 +754,7 @@ export default function FlowImageNode({ id, data, selected }: NodeProps) {
                 className="image-node-composer-add nodrag"
                 aria-label="上传参考图"
                 title="上传参考图"
-                disabled={isRunning}
+                disabled={busy}
                 onClick={(event) => {
                   event.stopPropagation();
                   emitEvent<NodeUploadDetail>(NODE_EVENTS.upload, { nodeId: id, reference: true });
@@ -581,7 +762,31 @@ export default function FlowImageNode({ id, data, selected }: NodeProps) {
               >
                 <PlusIcon />
               </button>
-              <span className="hb-hint">{isRunning ? '生成中，可稍候…' : (isRedit ? 'Enter 发送新版本 · Shift+Enter 换行' : 'Enter 发送 · Shift+Enter 换行')}</span>
+              {isVideo ? (
+                <button
+                  type="button"
+                  className="image-node-video-optimize nodrag"
+                  aria-label={d.videoPromptOptimizing ? '正在优化视频脚本' : (videoPromptUndoAvailable ? '撤销视频脚本优化' : '优化视频脚本')}
+                  title={d.videoPromptOptimizing ? '正在优化视频脚本' : (videoPromptUndoAvailable ? '撤销视频脚本优化' : '优化视频脚本')}
+                  aria-busy={d.videoPromptOptimizing === true}
+                  disabled={busy || d.videoPromptOptimizing === true || (!videoPromptUndoAvailable && !promptDraft.trim())}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    emitEvent<NodeVideoOptimizeDetail>(NODE_EVENTS.videoOptimize, {
+                      nodeId: id,
+                      prompt: promptDraft,
+                      action: videoPromptUndoAvailable ? 'undo' : 'optimize',
+                    });
+                  }}
+                >
+                  {d.videoPromptOptimizing
+                    ? <span className="image-composer-submit-spinner" aria-hidden="true" />
+                    : (videoPromptUndoAvailable ? <UndoPromptIcon /> : <AiGlyphIcon />)}
+                  <span className="image-node-video-optimize-label">
+                    {d.videoPromptOptimizing ? '优化中' : (videoPromptUndoAvailable ? '撤销优化' : '优化脚本')}
+                  </span>
+                </button>
+              ) : null}
               {isRedit ? (
                 <button
                   type="button"
@@ -600,15 +805,15 @@ export default function FlowImageNode({ id, data, selected }: NodeProps) {
               <button
                 type="button"
                 className="image-node-composer-send nodrag"
-                aria-label={isRunning ? '生成中' : (promptDraft.trim() ? '发送生成' : '按连接的文案生成')}
-                title={isRunning ? '生成中' : (promptDraft.trim() ? '发送生成' : '按连接的文案生成')}
+                aria-label={busy ? '生成中' : (submissionNeedsReview ? '提交状态待核查' : (isVideo ? '发送生成视频' : (promptDraft.trim() ? '发送生成' : '按连接的文案生成')))}
+                title={busy ? '生成中' : (submissionNeedsReview ? '提交状态待核查，请先核对服务商任务记录' : (isVideo ? '发送生成视频' : (promptDraft.trim() ? '发送生成' : '按连接的文案生成')))}
                 disabled={!canSend}
                 onClick={(event) => {
                   event.stopPropagation();
-                  if (canSend) emitEvent<NodeRunDetail>(NODE_EVENTS.run, { nodeId: id, prompt: promptDraft });
+                  submitGeneration();
                 }}
               >
-                {isRunning ? <span className="image-composer-submit-spinner" aria-hidden="true" /> : <SendIcon />}
+                {busy ? <span className="image-composer-submit-spinner" aria-hidden="true" /> : <SendIcon />}
               </button>
             </div>
             {composerError ? (
@@ -616,6 +821,32 @@ export default function FlowImageNode({ id, data, selected }: NodeProps) {
                 className={`image-node-composer-error${isRunning ? ' is-pending' : ''}`}
                 role={isRunning ? 'note' : 'alert'}
               >{composerError}</em>
+            ) : null}
+            {submissionNeedsReview ? (
+              <button
+                type="button"
+                className="image-node-video-retry nodrag"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  emitEvent<NodeVideoRunDetail>(NODE_EVENTS.videoRun, { nodeId: id, prompt: promptDraft });
+                }}
+              >
+                我已核查，仍要重试
+              </button>
+            ) : null}
+            {isVideo && videoFailed && d.videoDownloadRecoverable === true ? (
+              <button
+                type="button"
+                className="image-node-video-retry nodrag"
+                aria-label="重试接收已生成的视频"
+                disabled={d.videoDownloadRecovering === true}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  emitEvent<NodeVideoRecoverDetail>(NODE_EVENTS.videoRecover, { nodeId: id });
+                }}
+              >
+                {d.videoDownloadRecovering === true ? '正在接收…' : '重试接收视频'}
+              </button>
             ) : null}
           </div>
         ) : null}
@@ -628,8 +859,26 @@ export default function FlowImageNode({ id, data, selected }: NodeProps) {
             className="image-node-media"
             aria-label={d.prompt || d.label}
             title={d.prompt || d.label}
+            role="group"
+            tabIndex={0}
           >
-            <CanvasImage src={imageUrl} alt={d.prompt || d.label} missingNote={d.prompt} draggable={false} />
+            <CanvasImage
+              src={imageUrl}
+              alt={d.prompt || d.label}
+              missingNote={d.prompt}
+              draggable={false}
+              onLoad={(event) => {
+                const next = pixelSizeOf(event.currentTarget.naturalWidth, event.currentTarget.naturalHeight);
+                if (!next) return;
+                setNaturalImageSize((current) => (
+                  current?.url === imageUrl
+                    && current.width === next.width
+                    && current.height === next.height
+                    ? current
+                    : { url: imageUrl, ...next }
+                ));
+              }}
+            />
             {hasVersions ? (
               <NodeVersionBadge
                 total={versionCount}
@@ -637,21 +886,112 @@ export default function FlowImageNode({ id, data, selected }: NodeProps) {
                 onToggle={toggleVersions}
               />
             ) : null}
-            {sizeLabel ? (
-              <div className="image-node-meta-badges">
-                <span className="image-node-size-badge">{sizeLabel}</span>
-                <button
-                  type="button"
-                  className="image-node-copy-button nodrag nowheel"
-                  title={imageCopied ? '已复制图片' : '复制图片'}
-                  aria-label={imageCopied ? '已复制图片' : '复制图片'}
-                  onPointerDown={(event) => event.stopPropagation()}
-                  onClick={copyImage}
-                >
-                  <CopyImageIcon />
-                </button>
-              </div>
+            <div className="image-node-meta-badges image-node-result-meta">
+              <button
+                type="button"
+                className="image-node-copy-button nodrag nowheel"
+                title={imageCopied ? '已复制图片' : '复制图片'}
+                aria-label={imageCopied ? '已复制图片' : '复制图片'}
+                onPointerDown={(event) => event.stopPropagation()}
+                onClick={copyImage}
+              >
+                <CopyImageIcon />
+              </button>
+            </div>
+            {pixelSize ? (
+              <span className="image-node-size-badge image-node-pixel-size">
+                {pixelSizeLabel(pixelSize)}
+              </span>
             ) : null}
+          </div>
+        ) : null}
+
+        {/* 视频成品：容器复用 .image-node-media，卡片描边 / 圆角 / 比例因此与图片节点一致 */}
+        {videoDone ? (
+          <div
+            className="image-node-media"
+            aria-label={d.prompt || d.label}
+            title={d.prompt || d.label}
+            onDoubleClickCapture={(event) => {
+              if (!(event.target as HTMLElement | null)?.closest('video')) return;
+              event.preventDefault();
+              event.stopPropagation();
+              emitEvent<NodePreviewDetail>(NODE_EVENTS.preview, { nodeId: id });
+            }}
+          >
+            <video
+              ref={videoPlayerRef}
+              className="image-node-video-player"
+              src={videoUrl}
+              preload={selected || videoNearViewport ? 'metadata' : 'none'}
+              muted={videoMuted}
+              playsInline
+              onClick={toggleVideoPlayback}
+              onLoadedMetadata={(event) => {
+                setVideoDuration(event.currentTarget.duration || 0);
+                setVideoCurrentTime(event.currentTarget.currentTime || 0);
+              }}
+              onDurationChange={(event) => setVideoDuration(event.currentTarget.duration || 0)}
+              onTimeUpdate={(event) => setVideoCurrentTime(event.currentTarget.currentTime || 0)}
+              onPlay={() => setVideoPlaying(true)}
+              onPause={() => setVideoPlaying(false)}
+              onEnded={() => setVideoPlaying(false)}
+            />
+            <span className="image-node-video-scrim" aria-hidden="true" />
+            <div className="image-node-video-controls">
+              <button
+                type="button"
+                className="image-node-video-play"
+                aria-label={videoPlaying ? '暂停视频' : '播放视频'}
+                title={videoPlaying ? '暂停视频' : '播放视频'}
+                onClick={toggleVideoPlayback}
+              >
+                <VideoPlayIcon playing={videoPlaying} />
+              </button>
+              <button
+                type="button"
+                className="image-node-video-audio nodrag nowheel nopan"
+                aria-label={videoMuted ? '开启视频声音' : '关闭视频声音'}
+                title={videoMuted ? '开启视频声音' : '关闭视频声音'}
+                aria-pressed={videoMuted}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  videoPlaybackStore.toggle();
+                }}
+              >
+                <VideoAudioIcon muted={videoMuted} />
+              </button>
+              <time>{formatVideoTime(videoCurrentTime)}</time>
+              <input
+                className="image-node-video-seek nodrag nowheel nopan"
+                type="range"
+                min={0}
+                max={Math.max(videoDuration, 0.1)}
+                step={0.01}
+                value={Math.min(videoCurrentTime, videoDuration || 0)}
+                aria-label="视频时间进度条"
+                onChange={(event) => {
+                  const currentTime = Number(event.currentTarget.value);
+                  if (videoPlayerRef.current) videoPlayerRef.current.currentTime = currentTime;
+                  setVideoCurrentTime(currentTime);
+                }}
+              />
+              <time>{videoDuration ? formatVideoTime(videoDuration) : '--:--'}</time>
+            </div>
+            <div className="image-node-meta-badges">
+              <span className="image-node-size-badge">
+                {[d.videoRatio, d.videoResolution, `${Number(d.videoSeconds || 5)}s`, d.videoAudio ? '有声' : ''].filter(Boolean).join(' · ')}
+              </span>
+              <a
+                className="image-node-copy-button nowheel"
+                href={videoUrl}
+                download={String(d.videoFileName || 'video.mp4')}
+                title="下载视频"
+                aria-label="下载视频"
+              >
+                <DownloadIcon />
+              </a>
+            </div>
           </div>
         ) : null}
 
@@ -730,7 +1070,7 @@ export default function FlowImageNode({ id, data, selected }: NodeProps) {
           />
         ) : null}
 
-        {!imageUrl && !isComposer ? (
+        {!imageUrl && !isGenerator ? (
           <div className={`image-node-placeholder ${isRunning ? 'running' : ''} ${d.status === 'error' ? 'failed' : ''}`}>
             {sizeLabel && !isRunning ? <span className="image-node-size-badge">{sizeLabel}</span> : null}
             {isRunning ? <NodeRunningVisual data={d} elapsed={elapsed} /> : null}

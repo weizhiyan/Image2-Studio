@@ -1,0 +1,68 @@
+.quantity-segments {
+  display: flex;
+  position: relative;
+  gap: var(--spacing-1);
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+  padding: var(--spacing-1);
+  border-radius: var(--radius-md);
+  background: var(--segment-track-bg);
+}
+
+.quantity-segments > .quantity-segments-thumb {
+  z-index: 0;
+}
+
+.quantity-segments-thumb {
+  position: absolute;
+  top: var(--spacing-1);
+  bottom: var(--spacing-1);
+  left: var(--spacing-1);
+  width: calc((100% - var(--spacing-1) * 2) / var(--segment-count) - var(--spacing-1));
+  border-radius: var(--radius-sm);
+  background: var(--segment-thumb-bg);
+  box-shadow: var(--segment-thumb-shadow);
+  pointer-events: none;
+  transform: translateX(calc(var(--segment-index) * (100% + var(--spacing-1))));
+  transition: transform var(--motion-normal) var(--ease-emphasized);
+}
+
+.quantity-segments > button {
+  flex: 1 1 0;
+  min-width: 0;
+  min-height: var(--spacing-8);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-sm);
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+  transition: background-color var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out);
+}
+
+.quantity-segments > button:hover:not(:disabled) {
+  background: var(--color-ui-control-hover);
+  color: var(--color-text-primary);
+}
+
+.quantity-segments > button[aria-checked="true"] {
+  color: var(--control-fg-selected);
+}
+
+.quantity-segments > button:focus-visible {
+  outline: 1px solid var(--control-border-focus);
+  outline-offset: -1px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .quantity-segments-thumb {
+    transition: none;
+  }
+}
+
+.quantity-segments > button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}

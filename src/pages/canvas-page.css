@@ -282,8 +282,93 @@
   -webkit-user-select: none;
 }
 
-/* 画布选择器：以下规则从灵枢 TopNav.css 原封拷贝（top-nav-workflow-* / workflow-menu-*），
-   类名与灵枢保持一致，方便两边对照。 */
+.agent-connect-btn {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  flex: 0 0 auto;
+  box-sizing: border-box;
+  border: 1px solid var(--control-border);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--color-ui-control) 88%, transparent);
+  color: var(--color-text-secondary);
+  cursor: pointer;
+}
+
+.agent-connect-btn:hover {
+  background: var(--control-bg-hover);
+  color: var(--color-text-primary);
+}
+
+.agent-connect-btn.is-connected {
+  border-color: color-mix(in srgb, var(--color-accent-green) 42%, transparent);
+  background: color-mix(in srgb, var(--color-accent-green-subtle) 42%, transparent);
+  color: var(--color-accent-green);
+}
+
+.agent-connect-btn-dot {
+  position: absolute;
+  right: 6px;
+  bottom: 5px;
+  width: 6px;
+  height: 6px;
+  border-radius: var(--radius-full);
+  background: var(--color-text-tertiary);
+}
+
+.agent-connect-btn.is-connected .agent-connect-btn-dot {
+  background: var(--color-accent-green);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-accent-green) 18%, transparent);
+}
+
+/* 顶栏 Agent 入口的悬停说明：气泡从按钮内侧向下展开。 */
+.agent-connect-btn::after {
+  content: attr(aria-label);
+  position: absolute;
+  top: calc(100% + var(--spacing-2));
+  left: 50%;
+  z-index: 130;
+  width: max-content;
+  max-width: min(260px, calc(100vw - 32px));
+  border: 1px solid var(--surface-popover-border);
+  border-radius: var(--radius-xs);
+  background: var(--surface-popover-glass-bg);
+  box-shadow: var(--surface-popover-glass-shadow);
+  color: var(--color-text-primary);
+  padding: 6px 8px;
+  font-family: var(--font-sans);
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-medium);
+  line-height: 1.4;
+  text-align: center;
+  white-space: normal;
+  pointer-events: none;
+  user-select: none;
+  opacity: 0;
+  transform: translate(-50%, calc(0px - var(--spacing-1)));
+  transition:
+    opacity var(--motion-tooltip) var(--ease-tooltip),
+    transform var(--motion-tooltip) var(--ease-tooltip);
+  backdrop-filter: var(--surface-popover-glass-blur);
+  -webkit-backdrop-filter: var(--surface-popover-glass-blur);
+}
+
+.agent-connect-btn:hover::after,
+.agent-connect-btn:focus-visible::after {
+  opacity: 1;
+  transform: translate(-50%, 0);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .agent-connect-btn::after {
+    transition: none;
+  }
+}
+
+/* 画布选择器与菜单的绘板本地样式。 */
 
 /* 跟随布局流排布（灵枢新版从导航正中改为跟随 tabs 右侧）：名称过长时自身收缩省略 */
 .top-nav-workflow-wrap {
@@ -292,18 +377,17 @@
   min-width: 0;
 }
 
-/* 名称 + 下拉按钮共享一块实色底：取画布级近黑（与分段导航同 token），
-   在画布同色顶栏上托出一个完整的"画布切换"控件；按钮 hover 仍是 interaction 层 */
+/* 名称与下拉按钮作为一个整体控件，使用与画布工具栏一致的玻璃表面和弱描边。 */
 .top-nav-workflow-control {
   height: 36px;
   display: inline-flex;
   align-items: stretch;
   overflow: hidden;
   border-radius: var(--radius-sm);
-  /* 与顶栏「生图设置」按钮同款底色，导航一整排视觉才是一家人 */
-  background: color-mix(in srgb, var(--color-ui-control) 88%, transparent);
-  backdrop-filter: blur(16px) saturate(140%);
-  -webkit-backdrop-filter: blur(16px) saturate(140%);
+  border: 1px solid var(--color-ui-border-subtle);
+  background: var(--surface-popover-glass-bg);
+  backdrop-filter: var(--surface-popover-glass-blur);
+  -webkit-backdrop-filter: var(--surface-popover-glass-blur);
 }
 
 .top-nav-workflow-control:has(.top-nav-workflow-name:hover) .top-nav-workflow-menu-btn, .top-nav-workflow-control:has(.top-nav-workflow-name:focus-visible) .top-nav-workflow-menu-btn, .top-nav-workflow-control:has(.top-nav-workflow-menu-btn:hover) .top-nav-workflow-name, .top-nav-workflow-control:has(.top-nav-workflow-menu-btn:focus-visible) .top-nav-workflow-name {
@@ -385,10 +469,11 @@
   padding: var(--spacing-2);
   border-radius: var(--radius-lg);
   corner-shape: var(--corner-smooth);
+  border: 1px solid var(--surface-popover-border);
   background: var(--surface-popover-glass-bg);
   backdrop-filter: var(--surface-popover-glass-blur);
   -webkit-backdrop-filter: var(--surface-popover-glass-blur);
-  box-shadow: var(--shadow-md);
+  box-shadow: var(--surface-popover-glass-shadow);
 }
 
 .workflow-menu-new, .workflow-menu-item-main {
@@ -403,7 +488,7 @@
   border-radius: var(--radius-sm);
   /* 比菜单底色明显深一档，才看得清这是个按钮 */
   background: var(--color-ui-control);
-  box-shadow: inset 0 0 0 1px var(--color-ui-border);
+  box-shadow: inset 0 0 0 1px var(--color-ui-border-subtle);
   color: var(--color-text-primary);
   font-size: var(--font-size-sm);
   font-weight: var(--font-weight-medium);
@@ -432,15 +517,19 @@
 
 .workflow-menu-item {
   min-height: 38px;
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-xs);
   background: transparent;
   display: flex;
   align-items: center;
   overflow: hidden;
 }
 
-.workflow-menu-item:hover, .workflow-menu-item.active, .workflow-menu-item.switching {
-  background: color-mix(in srgb, var(--color-ui-control-hover) 72%, transparent);
+.workflow-menu-item:hover {
+  background: var(--control-bg-hover);
+}
+
+.workflow-menu-item.active, .workflow-menu-item.switching {
+  background: var(--control-bg-selected);
 }
 
 .workflow-menu-item-main {

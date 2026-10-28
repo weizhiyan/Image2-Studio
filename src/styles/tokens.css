@@ -1,5 +1,4 @@
-/* 灵枢 Design Tokens — 深色优先 */
-/* 源: 视觉前端交互规范.md + UI设计规范.md */
+/* 绘板 Design Tokens — 深色优先。规则见 UI_BASELINE.md。 */
 
 /* ── L0 恒定原色（不随主题翻转）──
    放在独立的 :root 里，而不是在深/浅两个块里各抄一份同样的数字 ——
@@ -25,6 +24,8 @@
   --media-chrome-fg-muted: color-mix(in srgb, var(--color-paper) 72%, transparent);
   --media-chrome-border: color-mix(in srgb, var(--color-paper) 12%, transparent);
   --media-chrome-active: color-mix(in srgb, var(--color-paper) 14%, transparent);
+  --chat-role-avatar-outline: color-mix(in srgb, var(--color-paper) 40%, transparent);
+  --chat-role-avatar-outline-width: 1.5px;
 }
 
 :root,
@@ -60,11 +61,13 @@
   --surface-panel-border: var(--color-ui-border-subtle);
   /* 统一菜单/弹层风格：纯色实底 + ui-border（与④下拉基准一致） */
   --surface-popover-bg: var(--color-bg-surface);
-  --surface-popover-border: var(--color-ui-border);
+  --surface-popover-border: var(--color-ui-border-subtle);
   /* 下拉弹窗统一材质（.workflow-menu 为基准）：半透明底 + 背景模糊。
      所有"下拉选择的弹窗"（模型选择 / 节点内下拉 / 画布切换）都引用这两个 token。 */
   --surface-popover-glass-bg: color-mix(in srgb, var(--color-ui-control) 88%, transparent);
-  --surface-popover-glass-blur: blur(20px) saturate(140%);
+  --surface-popover-glass-blur: blur(56px) saturate(148%);
+  --surface-modal-backdrop-blur: blur(16px) saturate(128%);
+  --chat-composer-glass-bg: color-mix(in srgb, var(--color-bg-canvas) 60%, transparent);
   /* 弹层投影：与上面两件同组，浮层一律「一套背景 + 一道投影」，不再各自写 shadow */
   --surface-popover-glass-shadow: 0 18px 42px var(--shadow-ink-deep);
   --surface-section-bg: var(--color-ui-control-panel);
@@ -102,9 +105,12 @@
   --control-bg: var(--color-ui-control);
   --control-bg-hover: var(--color-ui-control-hover);
   --control-bg-active: var(--color-ui-control-active);
+  --control-bg-selected: color-mix(in srgb, var(--color-paper) 10%, transparent);
+  --control-fg-selected: var(--color-paper);
   --control-border: var(--color-ui-border-subtle);
   --control-border-hover: var(--color-ui-border);
   --control-border-focus: var(--color-border-focus);
+  --chat-fab-border: color-mix(in srgb, var(--color-shadow) 20%, transparent);
   --focus-ring: none;
   --divider-subtle: var(--color-ui-border-subtle);
 
@@ -159,6 +165,10 @@
   --color-accent-teal-subtle: #0A2825;
   --color-accent-red: #E05C5C;
   --color-accent-red-subtle: #2E0F0F;
+  --color-feedback-error-bg: color-mix(in srgb, var(--color-accent-red) 14%, transparent);
+  --color-feedback-error-bg-hover: color-mix(in srgb, var(--color-accent-red) 20%, transparent);
+  --color-feedback-error-text: color-mix(in srgb, var(--color-accent-red) 82%, var(--color-text-primary));
+  --color-feedback-error-outline: color-mix(in srgb, var(--color-accent-red) 30%, transparent);
 
   /* ── 画布纹理 ── */
   --color-canvas-dot: #373745;
@@ -244,22 +254,23 @@
        --radius-2xs  6px  → 高度 ≥15px   徽章 / 计数 / 状态条
        --radius-xs  10px  → 高度 ≥25px   菜单项 / 内层小按钮 / chip
        --radius-sm  12px  → 高度 ≥30px   按钮 / 输入 / 图标按钮 / 分段轨道 / 下拉触发器
-       --radius-md  16px  → 高度 ≥40px   气泡 / 卡片 / 下拉小面板（无固定高度按最小态算）
+       --radius-md  16px  → 高度 ≥40px   气泡 / 下拉小面板（无固定高度按最小态算）
+       --radius-card 20px → 高度 ≥50px   信息卡片
        --radius-lg  24px  → 高度 ≥60px   大面板 / 弹层 / 表格外框
        --radius-xl  32px  → 高度 ≥80px   窗口外壳 / 大弹窗
 
      无固定高度的面（气泡、卡片）按**最小态**算：用户消息气泡单行约 52px，
      所以是 md(16) 而不是 lg(24) —— 24/52 = 0.46，单行时就已经是胶囊了。
 
-     嵌套面（外壳套内层）不要写 `calc(… - 2px)`，在组件顶部起一个局部 Token，
-     见 WorkKnowledgeDialog.css 的 --dialog-radius / --dialog-inner-radius。 */
+     嵌套面（外壳套内层）不要写 `calc(… - 2px)`，在组件顶部起一组成对局部 Token。 */
   --radius-2xs: 6px;
   --radius-xs: 10px;
   --radius-sm: 12px;         /* 控件档：36px 高的按钮/输入/图标按钮都用这个 */
-  --radius-md: 16px;         /* 面档：气泡、卡片、下拉面板 */
+  --radius-md: 16px;         /* 面档：气泡、下拉面板 */
+  --radius-card: 20px;       /* 卡片档：信息卡片 */
   --radius-lg: 24px;         /* 原 --radius-popover(20) 并入此档 */
   --radius-xl: 32px;
-  --radius-full: 999px;      /* 只用于正圆 / 滚动条 thumb / 进度条端头，见 CLAUDE.md */
+  --radius-full: 999px;      /* 只用于正圆 / 滚动条 thumb / 进度条端头，见 UI_BASELINE.md */
 
   /* ── 超椭圆（"苹果圆角"）──
      实测（headless Chrome 逐像素量左上角对角线上的白色起点，标称 R=40）：
@@ -294,6 +305,7 @@
   --motion-instant: 100ms;   /* 纯 opacity、图标换色，快到察觉不到 */
   --motion-fast: 120ms;      /* hover / 按压反馈 */
   --motion-normal: 160ms;    /* 默认档：折叠展开、菜单入场 */
+  --motion-tooltip: var(--motion-normal); /* 悬停气泡统一时长 */
   --motion-slow: 220ms;      /* 弹窗、抽屉、面板入场 */
   --motion-slower: 360ms;    /* 大面积布局位移、画布切换 */
   --motion-stagger: 80ms;    /* 错相延迟：多段 transition / 逐条入场的 delay */
@@ -306,6 +318,7 @@
 
   /* 缓动。--ease-out 是项目里已经手写了 10 次的家族曲线，扶正为默认。 */
   --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-tooltip: cubic-bezier(0.42, 0, 1, 1);
   --ease-in-out: cubic-bezier(0.4, 0, 0.2, 1);
   --ease-in: cubic-bezier(0.4, 0, 1, 1);     /* 仅退场：加速离开，不要用于入场 */
   --ease-emphasized: cubic-bezier(0.2, 0.8, 0.2, 1);
@@ -332,6 +345,8 @@
   --scrim-weak: color-mix(in srgb, var(--color-shadow) 30%, transparent);
   --scrim: color-mix(in srgb, var(--color-shadow) 48%, transparent);
   --scrim-strong: color-mix(in srgb, var(--color-shadow) 75%, transparent);
+  --dialog-scrim: color-mix(in srgb, var(--color-shadow) 74%, transparent);
+  --media-scrim: color-mix(in srgb, var(--color-shadow) 82%, transparent);
 
   /* 玻璃面顶边的内高光。浅色下是 transparent —— 浅色面本身接近白，内高光无从体现。 */
   --bevel-highlight: color-mix(in srgb, var(--color-paper) 3%, transparent);
@@ -409,10 +424,12 @@ html.floating-shell {
   --surface-panel-bg: var(--color-ui-panel);
   --surface-panel-border: var(--color-ui-border-subtle);
   --surface-popover-bg: var(--color-bg-surface);
-  --surface-popover-border: var(--color-ui-border);
+  --surface-popover-border: var(--color-ui-border-subtle);
   /* 与深色块同值：color-mix 内的 --color-ui-control 在浅色下自动变浅，玻璃仍是浅色半透明 */
   --surface-popover-glass-bg: color-mix(in srgb, var(--color-ui-control) 88%, transparent);
-  --surface-popover-glass-blur: blur(20px) saturate(140%);
+  --surface-popover-glass-blur: blur(56px) saturate(148%);
+  --surface-modal-backdrop-blur: blur(16px) saturate(128%);
+  --chat-composer-glass-bg: color-mix(in srgb, var(--color-bg-canvas) 60%, transparent);
   --surface-popover-glass-shadow: 0 18px 42px var(--shadow-ink-deep);
   --surface-section-bg: var(--color-ui-control-panel);
   --surface-section-border: var(--color-ui-border-subtle);
@@ -441,9 +458,12 @@ html.floating-shell {
   --control-bg: var(--color-ui-control);
   --control-bg-hover: var(--color-ui-control-hover);
   --control-bg-active: var(--color-ui-control-active);
+  --control-bg-selected: color-mix(in srgb, var(--color-ink) 8%, transparent);
+  --control-fg-selected: var(--color-ink);
   --control-border: var(--color-ui-border-subtle);
   --control-border-hover: var(--color-ui-border);
   --control-border-focus: var(--color-border-focus);
+  --chat-fab-border: color-mix(in srgb, var(--color-shadow) 20%, transparent);
   --focus-ring: none;
   --divider-subtle: var(--color-ui-border-subtle);
 
@@ -490,6 +510,10 @@ html.floating-shell {
   --color-accent-teal-subtle: #EAFAF8;
   --color-accent-red: #D94A4A;
   --color-accent-red-subtle: #FFECEC;
+  --color-feedback-error-bg: color-mix(in srgb, var(--color-accent-red) 14%, transparent);
+  --color-feedback-error-bg-hover: color-mix(in srgb, var(--color-accent-red) 20%, transparent);
+  --color-feedback-error-text: color-mix(in srgb, var(--color-accent-red) 82%, var(--color-text-primary));
+  --color-feedback-error-outline: color-mix(in srgb, var(--color-accent-red) 30%, transparent);
 
   --color-canvas-dot: #C6CBD4;
 
@@ -507,6 +531,8 @@ html.floating-shell {
   --scrim-weak: color-mix(in srgb, var(--color-shadow) 20%, transparent);
   --scrim: color-mix(in srgb, var(--color-shadow) 32%, transparent);
   --scrim-strong: color-mix(in srgb, var(--color-shadow) 58%, transparent);
+  --dialog-scrim: color-mix(in srgb, var(--color-shadow) 72%, transparent);
+  --media-scrim: color-mix(in srgb, var(--color-shadow) 82%, transparent);
 
   --bevel-highlight: transparent;
 

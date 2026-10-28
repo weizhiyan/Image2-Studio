@@ -14,6 +14,8 @@ const {
   readSettings,
   resolveDefaultModel,
   resolveTextProfile,
+  resolveVideoProfile,
+  videoProfilesOf,
   textProfilesOf,
   writeSettings,
 } = await import('../bridge/settings');
@@ -24,6 +26,10 @@ function imageProfile(id: string, enabled?: boolean) {
 
 function textProfile(id: string, enabled?: boolean) {
   return { ...createProfile(id, 'text' as const), id, enabled };
+}
+
+function videoProfile(id: string, enabled?: boolean) {
+  return { ...createProfile(id, 'video' as const), id, enabled };
 }
 
 describe('配置启停（enabled）', () => {
@@ -80,6 +86,37 @@ describe('配置启停（enabled）', () => {
     expect(JSON.stringify(view)).not.toContain('k-a');
   });
 
+  it('自定义视频协议持久化映射配置，并把模板中的已保存 Key 转为占位符', async () => {
+    const profile = {
+      ...createProfile('自定义视频', 'video'),
+      id: 'video-custom',
+      baseUrl: 'https://video.example/v1',
+      apiKey: 'long-secret-video-key',
+      model: 'custom-video',
+      videoApiMode: 'custom' as const,
+      videoCustomConfig: {
+        createPath: '/videos/generate',
+        pollPath: '/videos/{{taskId}}',
+        imageTransport: 'data-url' as const,
+        headersTemplate: '{"X-API-Key":"Bearer long-secret-video-key"}',
+        requestBodyTemplate: '{"model":"{{model}}","prompt":"{{prompt}}"}',
+        taskIdPath: 'data.task_id',
+        statusPath: 'data.state',
+        progressPath: 'data.progress',
+        outputUrlPath: 'data.result_url',
+        errorPath: 'data.error',
+        statusMap: '{"success":"completed"}',
+      },
+    };
+    const saved = await writeSettings({ profiles: [profile], activeProfileId: profile.id, direct: true });
+    expect(saved.profiles[0].videoApiMode).toBe('custom');
+    expect(saved.profiles[0].videoCustomConfig?.imageTransport).toBe('data-url');
+    expect(saved.profiles[0].videoCustomConfig?.headersTemplate).toContain('{{apiKey}}');
+    const view = publicView(saved);
+    expect(JSON.stringify(view)).not.toContain('long-secret-video-key');
+    expect(view.profiles[0].videoCustomConfig?.outputUrlPath).toBe('data.result_url');
+  });
+
   it('writeSettings 草稿缺省 enabled 时视为启用（界面旧版本不发该字段）', async () => {
     const draft = imageProfile('imgC');
     delete (draft as Record<string, unknown>).enabled;
@@ -112,6 +149,20 @@ describe('配置启停（enabled）', () => {
     expect(saved.profiles[0].id).toBe(first.profiles[0].id);
     expect(saved.profiles[0].apiKey).toBe('secret-key');
   });
+
+  it('仅保存模型设置时保留已存偏好档案', async () => {
+    const preferences = {
+      enabled: true,
+      entries: [{ id: 'pref-1', text: '偏好留白', source: 'manual' as const, createdAt: '2026-10-26T00:00:00.000Z' }],
+      updatedAt: '2026-10-26T00:00:00.000Z',
+    };
+    const profile = imageProfile('pref-preserved');
+    await writeSettings({ profiles: [profile], activeProfileId: profile.id, preferences });
+
+    const saved = await writeSettings({ profiles: [profile], activeProfileId: profile.id, direct: false });
+
+    expect(saved.preferences).toEqual(preferences);
+  });
 });
 
 describe('默认模型必须落在已勾选列表里（resolveDefaultModel）', () => {
@@ -136,5 +187,63 @@ describe('默认模型必须落在已勾选列表里（resolveDefaultModel）', 
       activeProfileId: 'imgA',
     });
     expect(settings.profiles[0].model).toBe('gpt-image-2.5');
+  });
+
+  it('新视频配置保持空白，不预填服务地址、模型或尺寸', () => {
+    expect(createProfile('视频', 'video')).toMatchObject({
+      baseUrl: '',
+      model: '',
+      defaultSize: '',
+    });
+  });
+
+  it('保存空白视频配置时不补入 OpenAI URL 或生图尺寸，也不作为可用模型', async () => {
+    const draft = {
+      ...videoProfile('video-empty-save'),
+      baseUrl: '',
+      defaultSize: '',
+      model: '',
+      models: [],
+      enabledModels: [],
+      apiKey: '',
+    };
+    const settings = await writeSettings({ profiles: [draft], activeProfileId: draft.id, direct: true });
+
+    expect(settings.profiles[0]).toMatchObject({ baseUrl: '', defaultSize: '', model: '' });
+    expect(videoProfilesOf(settings)).toEqual([]);
+    expect(resolveVideoProfile(settings)).toBeNull();
+  });
+
+  it('清空现有视频配置字段时不会从旧值或勾选列表自动补回', async () => {
+    const existing = {
+      ...videoProfile('video-clear-existing'),
+      baseUrl: 'https://old-provider.example/v1',
+      model: 'old-video-model',
+      defaultSize: '1080p',
+      models: ['old-video-model'],
+      enabledModels: ['old-video-model'],
+      apiKey: 'saved-video-key',
+    };
+    await writeSettings({ profiles: [existing], activeProfileId: existing.id, direct: true });
+    const cleared = await writeSettings({
+      profiles: [{ ...existing, baseUrl: '', model: '', defaultSize: '', enabledModels: [] }],
+      activeProfileId: existing.id,
+      direct: true,
+    });
+
+    expect(cleared.profiles[0]).toMatchObject({ baseUrl: '', model: '', defaultSize: '', apiKey: 'saved-video-key' });
+  });
+
+  it('视频模型没填默认值时，读取配置从已勾选列表回填第一个（添加模型即可用）', () => {
+    const profile = {
+      ...videoProfile('video-empty'),
+      baseUrl: '',
+      defaultSize: '',
+      model: '',
+      models: ['veo-3.1'],
+      enabledModels: ['veo-3.1'],
+    };
+    const settings = normalizeSettings({ profiles: [profile], activeProfileId: 'video-empty' });
+    expect(settings.profiles[0]).toMatchObject({ baseUrl: '', defaultSize: '', model: 'veo-3.1' });
   });
 });

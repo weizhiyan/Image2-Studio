@@ -1,5 +1,6 @@
 import type { Edge } from '@xyflow/react';
 import type { CanvasNode } from '@/types';
+import { canConnectCanvasNodeKinds } from '@/lib/canvasConnections';
 
 export interface NodeConnectionMenuProps {
   x: number;
@@ -38,16 +39,15 @@ export default function NodeConnectionMenu({
   onConnect,
 }: NodeConnectionMenuProps) {
   const isTargetDirection = direction === 'target';
+  const anchorNode = nodes.find((node) => node.id === sourceId);
   const targets = nodes.filter((node) => {
     if (node.id === sourceId) return false;
-    if (isTargetDirection) {
-      // 左手柄：素材 / 生成节点都能当上游（生成节点此时当纯文本引用用）
-      if (node.data.kind !== 'reference' && node.data.kind !== 'composer' && node.data.kind !== 'image') return false;
-      return !edges.some((edge) => edge.source === node.id && edge.target === sourceId);
-    }
-    // 右手柄：只把图送给生成 / 结果节点
-    if (node.data.kind !== 'composer' && node.data.kind !== 'image') return false;
-    return !edges.some((edge) => edge.source === sourceId && edge.target === node.id);
+    if (!anchorNode) return false;
+    const sourceKind = isTargetDirection ? node.data.kind : anchorNode.data.kind;
+    const targetKind = isTargetDirection ? anchorNode.data.kind : node.data.kind;
+    if (!canConnectCanvasNodeKinds(sourceKind, targetKind)) return false;
+    return !edges.some((edge) => edge.source === (isTargetDirection ? node.id : sourceId)
+      && edge.target === (isTargetDirection ? sourceId : node.id));
   });
   return (
     <section className="image-add-menu image-connect-menu" role="menu" aria-label="连接到节点" style={{ left: x, top: y }}>

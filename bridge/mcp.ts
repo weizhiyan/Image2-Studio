@@ -16,30 +16,39 @@ import {
 import { countOpenTabs, pushImage, pushLocate } from './hub.js';
 import { fetchRemoteImage } from './providerApi.js';
 import { mediaFileToDataUrl } from './files.js';
+import { clearAgentPresence, markAgentPresence } from './agentPresence.js';
 import {
   appendCanvasImageNodes,
   createCanvasInRegistry,
+  patchCanvasVideoNode,
   readCanvasDoc,
   readCanvasRegistry,
 } from './http.js';
 import type { CanvasNodeRecord, CanvasDocRecord } from './http.js';
+import { listEnabledPromptSkills, type PromptSkill } from './skills.js';
+import { PORT } from './paths.js';
+import { findVideoTaskByNode } from './videoTasks.js';
 
-/* ── 工具说明（Agent 面向的导览） ── */
+/* ── 工具说明(Agent 面向的导览) ── */
 const TOOL_GUIDE = [
-  '- `huiban_generate`：生成图片。指定 canvasId 时结果直接落该画布（节点带 source=mcp），用户在浏览器里立即可见；浏览器没开也会先写进画布文档，下次打开就在。',
-  '- `huiban_canvases`：列出已注册画布（id / 名称 / 节点数 / 更新时间）；生成前先调用它拿 canvasId。',
-  '- `huiban_canvas_create`：新建画布（{ name }），返回 canvasId。用户说“新建画布”而不想离开对话时用它。',
-  '- `huiban_nodes`：列出某画布上的节点（含 imageUrl / fileName），想拿画布里已有的图当参考图时先用它。',
-  '- `huiban_locate`：把用户的浏览器带到某个节点跟前（跨画布也会先切过去再居中）。huiban_generate 默认已自动定位；这个工具用于「再定位一次」「看早先那张」，或上次用了 locate:false 时补上。',
-  '- `huiban_models`：列出每路生图配置的模型清单与默认模型；多 Key / 多中转站时配合 profileId 切换。',
-  '- `huiban_config`：查看生图配置状态（不返回 Key）。',
-  '- `huiban_prompt_guide`：读绘板的「生图提示词规范」——描述结构、忠实性红线、参考图用法、整理强度三档，与界面提示词优化链路同一套规则。agent 想自己构思提示词时先读它。',
-  '- `huiban_optimize`：显式调用语言模型优化提示词（优先使用「生图设置」里选中的语言模型），返回优化后的 prompt 与参考图用途判断；只花语言模型额度，不烧生图。画布的自动优化开关不控制此工具。',
+  '- `huiban_generate`:生成图片。指定 canvasId 时结果直接落该画布(节点带 source=mcp),用户在浏览器里立即可见;浏览器没开也会先写进画布文档,下次打开就在。',
+  '- `huiban_canvases`:列出已注册画布(id / 名称 / 节点数 / 更新时间);生成前先调用它拿 canvasId。',
+  '- `huiban_canvas_create`:新建画布({ name }),返回 canvasId。用户说”新建画布”而不想离开对话时用它。',
+  '- `huiban_nodes`:列出某画布上的节点(含 imageUrl / fileName),想拿画布里已有的图当参考图时先用它。',
+  '- `huiban_locate`:把用户的浏览器带到某个节点跟前(跨画布也会先切过去再居中)。huiban_generate 默认已自动定位;这个工具用于「再定位一次」「看早先那张」,或上次用了 locate:false 时补上。',
+  '- `huiban_models`:列出每路生图配置的模型清单与默认模型;多 Key / 多中转站时配合 profileId 切换。',
+  '- `huiban_config`:查看生图配置状态(不返回 Key)。',
+  '- `huiban_prompt_guide`:读绘板的「生图提示词规范」——描述结构、忠实性红线、参考图用法、整理强度三档,与界面提示词优化链路同一套规则。agent 想自己构思提示词时先读它。',
+  '- `huiban_video_prompt_guide`:读绘板的「视频生成提示词规范」——镜头运动、场景叙事、节奏控制、参考图用法。生成视频时先读它。',
+  '- `huiban_video_generate`:将提示词提交给指定画布上已有的视频节点；提交会产生服务商费用，只能在用户明确要求生成时调用。',
+  '- `huiban_video_task`:查询已提交视频任务的状态与本机结果地址。',
+  '- `huiban_optimize`:显式调用语言模型优化提示词(优先使用「生图设置」里选中的语言模型),返回优化后的 prompt 与参考图用途判断;只花语言模型额度,不烧生图。画布的自动优化开关不控制此工具。',
+  '- `huiban_prompt_guide`:同时返回绘板内启用的 Skills；外部 Agent 调用此工具即可读取并应用这些提示词技能。',
   '',
-  '建议流程：huiban_canvases → 选画布 → huiban_generate{prompt, canvasId}。出图默认自动定位到新节点（节点已在视口内则不挪镜头）——用户手动在页面上生成时没有这个效果，所以只要是你生成的图，就别把定位关掉；真传了 locate:false，必须马上用 huiban_locate{canvasId, nodeId} 补上。',
-  '提示词三步：huiban_prompt_guide 读规范 →（可选）huiban_optimize 让服务端优化 → huiban_generate 出图。',
-  '带参考图：huiban_generate{prompt, referenceImages:["/api/files/x.png"], inputFidelity:"high"}（图生图）；inputFidelity:"low" 是风格参考。',
-  'referenceImages 支持三种：画布媒体路径 /api/files/xxx.png、http(s) 图片链接（bridge 会代取落地）、data:image base64。',
+  '建议流程:huiban_canvases → 选画布 → huiban_generate{prompt, canvasId}。出图默认自动定位到新节点(节点已在视口内则不挪镜头)——用户手动在页面上生成时没有这个效果,所以只要是你生成的图,就别把定位关掉;真传了 locate:false,必须马上用 huiban_locate{canvasId, nodeId} 补上。',
+  '提示词三步:huiban_prompt_guide 读规范 →(可选)huiban_optimize 让服务端优化 → huiban_generate 出图。',
+  '带参考图:huiban_generate{prompt, referenceImages:[“/api/files/x.png”], inputFidelity:”high”}(图生图);inputFidelity:”low” 是风格参考。',
+  'referenceImages 支持三种:画布媒体路径 /api/files/xxx.png、http(s) 图片链接(bridge 会代取落地)、data:image base64。',
 ].join('\n');
 
 /** 比例档位 → 生图尺寸。与前端工具栏的 RATIO_PRESETS 对齐，数值最终仍过 normalizeImageSize 规范化。 */
@@ -70,6 +79,8 @@ export interface McpDeps {
   countOpenTabs: () => number;
   createCanvas: (canvasId: string, name: string) => Promise<{ id: string; name: string }>;
   resolveReferenceDataUrls: (inputs: string[]) => Promise<Array<{ dataUrl: string; url: string }>>;
+  listPromptSkills?: () => Promise<PromptSkill[]>;
+  patchVideoNode?: typeof patchCanvasVideoNode;
 }
 
 /** 参考图归一化：本地媒体 / 网络链接 / dataURL 三种入口，输出「喂接口的 dataURL + 节点上展示的 url」。 */
@@ -205,6 +216,14 @@ export function listMcpTools(): Array<Record<string, unknown>> {
       },
     },
     {
+      name: 'huiban_video_prompt_guide',
+      description: '返回绘板的「视频生成提示词规范」——镜头运动、场景叙事、节奏控制、参考图用法。agent 要生成视频时先读它,再调视频生成工具。不联网、不写数据。',
+      inputSchema: {
+        type: 'object' as const,
+        properties: {},
+      },
+    },
+    {
       name: 'huiban_optimize',
       description: '用绘板「生图设置」里启用的那一路语言模型，按绘板同一套提示词规范优化 prompt（等价界面里的「提示词优化」）。返回优化后的 prompt、参考图用途（style/edit）与用途判定依据。只花语言模型额度，不烧生图、不写任何数据。',
       inputSchema: {
@@ -224,6 +243,39 @@ export function listMcpTools(): Array<Record<string, unknown>> {
         required: ['prompt'],
       },
     },
+    {
+      name: 'huiban_video_generate',
+      description: '将视频提示词提交到绘板画布上已有的视频生成节点。每次调用可能产生服务商费用；仅当用户明确要求生成视频时调用。生成前先用 huiban_canvases / huiban_nodes 找到目标视频节点，并读取 huiban_video_prompt_guide。提交断线时先用 huiban_video_task 核查，禁止盲目重提。',
+      inputSchema: {
+        type: 'object' as const,
+        properties: {
+          canvasId: { type: 'string', description: '目标画布 id，来自 huiban_canvases' },
+          nodeId: { type: 'string', description: '画布上已有的视频节点 id，来自 huiban_nodes' },
+          prompt: { type: 'string', description: '视频脚本 / 提示词，写清主体动作、场景和镜头运动' },
+          profileId: { type: 'string', description: '视频模型配置 id，可选；缺省使用当前可用配置' },
+          model: { type: 'string', description: '视频模型名，可选；缺省使用配置默认模型' },
+          seconds: { type: 'number', description: '视频时长秒数，默认 5' },
+          resolution: { type: 'string', enum: ['480p', '720p', '1080p'], description: '清晰度档位' },
+          ratio: { type: 'string', enum: ['16:9', '9:16', '1:1', '4:3', '3:4', '21:9'], description: '视频画幅' },
+          generateAudio: { type: 'boolean', description: '是否生成声音' },
+          referenceMode: { type: 'string', enum: ['first_frame', 'last_frame', 'style'], description: '参考图用途' },
+          imageFileNames: { type: 'array', items: { type: 'string' }, description: '本机已保存的图片文件名，可由 huiban_nodes 返回的 fileName 提供' },
+          imageUrls: { type: 'array', items: { type: 'string' }, description: '公网 HTTPS 图片 URL' },
+          imageParamName: { type: 'string', description: '模型 schema 声明的图片参数名，可选' },
+          params: { type: 'object', description: '媒体协议模型 schema 的额外参数，可选' },
+        },
+        required: ['canvasId', 'nodeId', 'prompt'],
+      },
+    },
+    {
+      name: 'huiban_video_task',
+      description: '查询 huiban_video_generate 返回的视频任务状态。提交结果未知时先调用它核查，避免重复生成扣费。',
+      inputSchema: {
+        type: 'object' as const,
+        properties: { taskId: { type: 'string', description: '视频任务 id' } },
+        required: ['taskId'],
+      },
+    },
   ];
 }
 
@@ -233,6 +285,122 @@ export async function callMcpTool(
   deps: McpDeps,
 ): Promise<{ content: Array<{ type: 'text'; text: string }> }> {
   const args = rawArgs || {};
+
+  if (name === 'huiban_video_generate') {
+    const canvasId = pickString(args.canvasId);
+    const nodeId = pickString(args.nodeId);
+    const prompt = pickString(args.prompt);
+    if (!canvasId || !nodeId || !prompt) throw new Error('必须提供 canvasId、nodeId 和 prompt');
+    const doc = await deps.readCanvasDoc(canvasId);
+    const node = doc?.nodes?.find((item) => (item as CanvasNodeRecord).id === nodeId) as CanvasNodeRecord | undefined;
+    if (!node || node.data.kind !== 'video') throw new Error('指定节点不是该画布上的视频节点；请先用 huiban_nodes 确认节点 id');
+    const activeTask = await findVideoTaskByNode(nodeId);
+    if (activeTask?.submissionUnknown) {
+      return toolText({
+        ok: false,
+        submissionUnknown: true,
+        error: activeTask.error || '这个节点的上一次提交结果未知。先到服务商后台核查任务，再决定是否重新提交。',
+      });
+    }
+    if (activeTask && (activeTask.status === 'queued' || activeTask.status === 'in_progress') && !activeTask.url) {
+      return toolText({ ok: true, duplicate: true, taskId: activeTask.taskId, status: activeTask.status, message: '该视频节点已有在途任务，不重复提交。' });
+    }
+    const numberOrStored = (key: string, storedKey: string) => (
+      Number.isFinite(Number(args[key])) ? Number(args[key]) : Number(node.data[storedKey] || 0)
+    );
+    const selectedProfileId = pickString(args.profileId) || pickString(node.data.videoProfileId);
+    const selectedModel = pickString(args.model) || pickString(node.data.videoModel);
+    const seconds = numberOrStored('seconds', 'videoSeconds') || 5;
+    const resolution = pickString(args.resolution) || pickString(node.data.videoResolution) || '480p';
+    const ratio = pickString(args.ratio) || pickString(node.data.videoRatio) || '16:9';
+    const generateAudio = typeof args.generateAudio === 'boolean' ? args.generateAudio : node.data.videoAudio === true;
+    const referenceMode = pickString(args.referenceMode) || pickString(node.data.videoReferenceMode) || 'first_frame';
+    const params = args.params && typeof args.params === 'object' && !Array.isArray(args.params)
+      ? args.params as Record<string, unknown>
+      : node.data.videoParams && typeof node.data.videoParams === 'object'
+        ? node.data.videoParams as Record<string, unknown>
+        : {};
+    const connectedReferences = Array.isArray(node.data.references) ? node.data.references as Array<Record<string, unknown>> : [];
+    const suppliedFileNames = Array.isArray(args.imageFileNames) ? args.imageFileNames.map(String) : [];
+    const suppliedUrls = Array.isArray(args.imageUrls) ? args.imageUrls.map(String) : [];
+    const connectedFileNames: string[] = [];
+    const connectedUrls: string[] = [];
+    for (const reference of connectedReferences) {
+      if (reference.kind === 'text') continue;
+      const value = String(reference.url || '').trim();
+      const localFile = value.match(/^\/api\/files\/([^/?#]+)/i);
+      if (localFile) connectedFileNames.push(decodeURIComponent(localFile[1]));
+      else if (/^https:\/\//i.test(value)) connectedUrls.push(value);
+    }
+    const imageFileNames = suppliedFileNames.length > 0 ? suppliedFileNames : connectedFileNames;
+    const imageUrls = suppliedUrls.length > 0 ? suppliedUrls : connectedUrls;
+    if (deps.patchVideoNode) {
+      const patched = await deps.patchVideoNode(canvasId, nodeId, {
+        prompt,
+        videoStatus: 'idle',
+        videoError: '',
+        videoTaskId: '',
+        videoUrl: '',
+        videoFileName: '',
+        videoProgress: 0,
+        videoSubmissionUnknown: false,
+        videoDownloadRecoverable: false,
+        videoDownloadRecovering: false,
+        videoSeconds: seconds,
+        videoResolution: resolution,
+        videoRatio: ratio,
+        videoAudio: generateAudio,
+        videoReferenceMode: referenceMode,
+        videoModel: selectedModel || node.data.videoModel,
+        videoProfileId: selectedProfileId || node.data.videoProfileId,
+        videoParams: params,
+        videoImageUrls: [
+          ...imageUrls,
+          ...imageFileNames.map((fileName) => `/api/files/${encodeURIComponent(fileName)}`),
+        ],
+        createdAt: new Date().toISOString(),
+      });
+      if (!patched) throw new Error('视频节点已不存在，或画布尚未同步到本机 Bridge');
+    }
+    const response = await fetch(`http://127.0.0.1:${PORT}/api/videos`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        canvasId,
+        nodeId,
+        prompt,
+        ...(selectedProfileId ? { profileId: selectedProfileId } : {}),
+        ...(selectedModel ? { model: selectedModel } : {}),
+        seconds,
+        resolution,
+        ratio,
+        generateAudio,
+        referenceMode,
+        ...(imageFileNames.length > 0 ? { imageFileNames } : {}),
+        ...(imageUrls.length > 0 ? { imageUrls } : {}),
+        ...(pickString(args.imageParamName) ? { imageParamName: pickString(args.imageParamName) } : {}),
+        ...(Object.keys(params).length > 0 ? { params } : {}),
+      }),
+    });
+    const result = await response.json().catch(() => null) as { data?: Record<string, unknown>; msg?: string } | null;
+    if (!response.ok || result?.data?.ok !== true) throw new Error(result?.msg || '视频任务提交失败');
+    return toolText({
+      ok: true,
+      taskId: result.data.taskId,
+      duplicate: result.data.duplicate === true,
+      message: result.msg || '视频任务已受理；可用 huiban_video_task 查询状态。',
+      statusTool: 'huiban_video_task',
+    });
+  }
+
+  if (name === 'huiban_video_task') {
+    const taskId = pickString(args.taskId);
+    if (!taskId) throw new Error('必须提供 taskId');
+    const response = await fetch(`http://127.0.0.1:${PORT}/api/videos/${encodeURIComponent(taskId)}`);
+    const result = await response.json().catch(() => null) as { data?: Record<string, unknown>; msg?: string } | null;
+    if (!response.ok || !result?.data) throw new Error(result?.msg || '读取视频任务失败');
+    return toolText(result.data);
+  }
 
   if (name === 'huiban_config') {
     const settings = await deps.readSettings();
@@ -256,6 +424,7 @@ export async function callMcpTool(
     const size = pickString(args.size) || defaultSize || '';
     const textProfile = resolveTextProfile(settings);
     const preferences = settings.preferences;
+    const enabledSkills = await (deps.listPromptSkills?.() || Promise.resolve([]));
     return toolText({
       level,
       levels: Object.entries(LEVEL_SPECS).map(([key, value]) => ({
@@ -275,6 +444,7 @@ export async function callMcpTool(
         promptOptimizationEnabled: settings.promptOptimizationEnabled,
       },
       spec: buildSystemSpec(size, level),
+      enabledSkills: enabledSkills.map(({ name, description, content }) => ({ name, description, content })),
       referenceRules: {
         style: '只迁移参考图的色系 / 光线 / 氛围 / 质感；主体与构图必须全新，inputFidelity=low',
         edit: '保留参考图的主体与构图，只应用用户要求的改动，inputFidelity=high',
@@ -283,6 +453,47 @@ export async function callMcpTool(
         fidelityByUsage: { style: fidelityForUsage('style'), edit: fidelityForUsage('edit') },
       },
       flow: 'huiban_prompt_guide 读规范 → 自己写提示词（或 huiban_optimize 让服务端优化）→ huiban_generate{prompt, canvasId}；带参考图时提示词里的用途要与 huiban_generate 的 referenceUsage 一致',
+    });
+  }
+
+  if (name === 'huiban_video_prompt_guide') {
+    // 视频提示词规范:镜头运动、场景叙事、节奏控制、参考图用法
+    const enabledSkills = await (deps.listPromptSkills?.() || Promise.resolve([]));
+    return toolText({
+      structure: {
+        subject: '主体动作:人物在做什么、物体如何变化、表情与情绪',
+        motion: '镜头运动:推镜头(zoom in)、拉镜头(zoom out)、平移(pan)、跟随(follow)、环绕(orbit)、固定机位(static)、第一人称(POV)',
+        scene: '场景环境:室内外、光线(日出/正午/黄昏/夜晚)、天气(晴/阴/雨/雾)、氛围(温馨/紧张/神秘)',
+        duration: '时长与节奏:4-15秒,慢镜头(slow motion)、延时摄影(time-lapse)、正常速度(real-time)',
+        style: '画面风格:写实(realistic)、动画(animated)、复古胶片(vintage film)、赛博朋克(cyberpunk)、水墨(ink wash)',
+      },
+      examples: [
+        '一只橘猫从沙发跳到窗台,镜头跟随,阳光洒进客厅,5秒,温馨生活风格',
+        '城市街道车流从白天过渡到夜晚,延时摄影,俯视角度,10秒,霓虹灯逐渐点亮',
+        '少女转身回眸,头发随风飘动,慢镜头,背景虚化,柔和光线,6秒',
+        'Logo 从屏幕中央旋转放大,粒子特效环绕,赛博朋克风格,蓝紫色调,8秒',
+        '产品从左侧滑入画面中央,360度环绕展示,白色背景,专业摄影棚光线,12秒',
+      ],
+      referenceRules: {
+        firstFrame: '视频从这张图开始:保留图片的主体、构图和色调,适合品牌 IP 动效、产品展示',
+        lastFrame: '视频到这张图结束:定向过渡,从当前画面渐变到目标图(部分模型支持)',
+        styleReference: '参考图的氛围与风格:只迁移光线、色系、质感,主体与动作全新生成',
+      },
+      typicalScenes: {
+        ipAnimation: 'IP 动效:角色眨眼、挥手、跳跃等微动作,镜头固定或轻微推进,保持品牌识别度。提示词模板:"[角色名]在[背景]中[动作],表情[情绪],[镜头运动],[风格],[时长]秒"',
+        backgroundEffect: '背景动效:云层流动、水波涟漪、粒子飘散、光线变化。提示词模板:"[场景描述],背景中[动效元素],[镜头运动],氛围[形容词],[时长]秒"',
+        productDisplay: '产品展示:360度旋转、从侧面推进到正面、细节特写。提示词模板:"[产品]在[背景]上,[展示动作],专业摄影棚光线,[镜头运动],[时长]秒"',
+        interaction: '交互动效:按钮按下、界面滑动、弹窗展开。提示词模板:"[UI元素][交互动作],从[起始状态]到[结束状态],流畅过渡,[时长]秒"',
+      },
+      tips: [
+        '时长控制:4-6秒适合循环动效,8-12秒适合叙事片段,15秒是当前上限',
+        '镜头稳定性:固定机位(static)最稳定,适合 Logo / 产品展示;跟随(follow)适合动作场景',
+        '避免过度描述:一句话说清「谁在哪里做什么、镜头怎么动、什么风格」即可,过长的提示词反而降低质量',
+        '首帧参考图:IP 动效、产品展示必须用首帧参考图锁定主体,否则 AI 会重新生成不同的主体',
+        '画幅选择:16:9 适合横屏展示(官网 Banner、视频号),9:16 适合竖屏(抖音、快手),1:1 适合社交媒体方图',
+      ],
+      enabledSkills: enabledSkills.map(({ name, description, content }) => ({ name, description, content })),
+      flow: 'huiban_video_prompt_guide 读规范与已启用 Skills → 构思提示词(主体动作+镜头运动+场景+时长+风格) → 在绘板视频节点或工作台提交任务',
     });
   }
 
@@ -642,7 +853,31 @@ export const defaultMcpDeps: McpDeps = {
   appendCanvasImageNodes,
   createCanvas: (canvasId: string, name: string) => createCanvasInRegistry(canvasId, name),
   resolveReferenceDataUrls,
+  listPromptSkills: listEnabledPromptSkills,
+  patchVideoNode: patchCanvasVideoNode,
 };
+
+let presenceHeartbeat: ReturnType<typeof setInterval> | null = null;
+let presenceCanvasId = '';
+let presenceWrite = Promise.resolve();
+
+function noteAgentPresence(canvasId?: string): void {
+  if (canvasId) presenceCanvasId = canvasId;
+  const touch = () => {
+    presenceWrite = presenceWrite.then(async () => {
+      await markAgentPresence({
+        canvasId: presenceCanvasId || undefined,
+        transport: 'stdio',
+      });
+    });
+    return presenceWrite;
+  };
+  void touch();
+  if (!presenceHeartbeat) {
+    presenceHeartbeat = setInterval(() => void touch(), 60_000);
+    presenceHeartbeat.unref?.();
+  }
+}
 
 export function createMcpServer(): Server {
   const server = new Server(
@@ -650,10 +885,20 @@ export function createMcpServer(): Server {
     { capabilities: { tools: {} } },
   );
 
-  server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: listMcpTools() }));
+  server.onclose = () => {
+    if (presenceHeartbeat) clearInterval(presenceHeartbeat);
+    presenceHeartbeat = null;
+    presenceCanvasId = '';
+    void presenceWrite.then(() => clearAgentPresence(process.pid));
+  };
+
+  server.setRequestHandler(ListToolsRequestSchema, async () => {
+    return { tools: listMcpTools() };
+  });
 
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const args = (request.params.arguments || {}) as Record<string, unknown>;
+    noteAgentPresence(typeof args.canvasId === 'string' ? args.canvasId : undefined);
     try {
       return await callMcpTool(request.params.name, args, defaultMcpDeps);
     } catch (error) {

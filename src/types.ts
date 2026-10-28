@@ -1,5 +1,66 @@
-/** 画布节点三类：composer 输入生成、image 生成结果、reference 参考素材。 */
-export type CanvasNodeKind = 'composer' | 'image' | 'reference';
+/** 画布节点：生成输入 / 结果 / 参考素材 / 视频，以及仅用于承载成员的编组节点。 */
+export type CanvasNodeKind = 'composer' | 'image' | 'reference' | 'video' | 'text' | 'group';
+
+/** 编组标题栏可选颜色。neutral 不额外染色，其余映射到现有 accent token。 */
+export type CanvasGroupColor = 'neutral' | 'blue' | 'green' | 'amber' | 'purple';
+
+/**
+ * 视频节点自成一套（kind: 'video'），不复用 composer/image 那套状态机：
+ * 视频是长任务，节点上要挂「排队 / 生成中(进度) / 完成 / 失败」四态，
+ * 而图片是同步等结果，两者生命周期不一样，硬塞进一个 kind 只会互相干扰。
+ */
+export type VideoNodeStatus = 'idle' | 'running' | 'done' | 'error';
+
+/** 视频任务在中转站侧的状态：提交后由 bridge 轮询，经 SSE 推给节点。 */
+export type VideoTaskStatus = 'queued' | 'in_progress' | 'completed' | 'failed' | 'unknown';
+
+/** 视频宽高比：文档给的六个值，adaptive 需要有图输入，界面不暴露。 */
+export const VIDEO_RATIOS = ['16:9', '9:16', '1:1', '4:3', '3:4', '21:9'] as const;
+export type VideoRatio = typeof VIDEO_RATIOS[number];
+
+/** 视频清晰度：档位不是像素值，别传 1080x1920 那种字符串。 */
+export const VIDEO_RESOLUTIONS = ['480p', '720p', '1080p'] as const;
+export type VideoResolution = typeof VIDEO_RESOLUTIONS[number];
+export type VideoReferenceMode = 'first_frame' | 'last_frame' | 'style';
+
+/* ── 视频模型参数 schema ──
+   中转站（/v1/skills/models/{name}）会给出每个模型自己的参数定义：
+   seedance 叫 images、wan2.6 叫 img_url、gk-video 又不一样。
+   界面不再写死「比例 / 画质 / 时长」三件套，而是按这份 schema 动态渲染。 */
+export type VideoParamType = 'select' | 'radio' | 'switch' | 'upload' | 'textarea' | 'number' | 'segment';
+
+export interface VideoParamOption {
+  label: string;
+  value: string;
+}
+
+export interface VideoParamSpec {
+  /** 提交时 params 里的 key。 */
+  name: string;
+  label: string;
+  type: VideoParamType;
+  required?: boolean;
+  description?: string;
+  options?: VideoParamOption[];
+}
+
+export interface VideoModelSchema {
+  name: string;
+  displayName?: string;
+  description?: string;
+  inputHint?: string;
+  tags?: string[];
+  params: VideoParamSpec[];
+}
+
+/** 可选视频模型（设置面板 / 节点模型下拉用）。 */
+export interface VideoModelInfo {
+  name: string;
+  displayName?: string;
+  description?: string;
+  /** 中转站标记当前 Key 能否调用；false 时不要放进可选列表。 */
+  available: boolean;
+}
 
 /**
  * 语言模型的上游接口格式：chat = /chat/completions，responses = /responses，
@@ -58,8 +119,12 @@ export interface CanvasNodeVersion {
 export interface CanvasNodeData {
   kind: CanvasNodeKind;
   label: string;
+  /** group：标题栏色调；成员节点不读取。 */
+  groupColor?: CanvasGroupColor;
   /** composer：正在编辑的提示词；image：生成用的提示词；reference：无。 */
   prompt?: string;
+  /** text：Markdown 文本节点的原始内容；被模型节点连入时作为提示词引用。 */
+  textContent?: string;
   status?: 'idle' | 'running' | 'done' | 'error';
   /** image 节点：媒体服务返回的文件 URL（/api/files/xxx）。 */
   imageUrl?: string;
@@ -131,6 +196,52 @@ export interface CanvasNodeData {
   source?: 'browser' | 'mcp';
   width?: number;
   height?: number;
+
+  /* ── 视频节点（kind: 'video'）──
+     与图片字段分开存，避免两类媒体在同一份 data 上互相踩。
+     videoUrl 走 /api/files/<name>，由 bridge 轮询到完成后落盘推来。 */
+  /** 视频成品地址（/api/files/vid_xxx.mp4）。 */
+  videoUrl?: string;
+  /** 视频文件名：删节点时按它清文件，与 imageUrl 同一套清理逻辑。 */
+  videoFileName?: string;
+  /** 视频时长（秒）：提交时定的，完成后仍带在节点上供展示。 */
+  videoSeconds?: number;
+  /** 清晰度档位（480p / 720p / 1080p）。 */
+  videoResolution?: VideoResolution;
+  /** 提交请求超时或连接中断，服务端可能已受理；需要用户核查后才能重试。 */
+  videoSubmissionUnknown?: boolean;
+  /** 宽高比（16:9 / 9:16 / 1:1 / 4:3 / 3:4 / 21:9）。 */
+  videoRatio?: VideoRatio;
+  /** 是否生成声音。 */
+  videoAudio?: boolean;
+  /** 连接到视频节点的图片用途。 */
+  videoReferenceMode?: VideoReferenceMode;
+  /** 按模型 schema 选出的参数值（key = VideoParamSpec.name），原样进 /media/generate 的 params。 */
+  videoParams?: Record<string, unknown>;
+  /** 该模型里承载参考图的 upload 参数名（images / img_url …），bridge 据此把图床上传结果落位。 */
+  videoImageParamName?: string;
+  /** 视频节点自己的状态：视频是长任务，不用图片那套 running/done。 */
+  videoStatus?: VideoNodeStatus;
+  /** 中转站任务 id：刷新后靠它把节点和 bridge 里的任务重新对上。 */
+  videoTaskId?: string;
+  /** 0–100 生成进度，中转站直接给。 */
+  videoProgress?: number;
+  /** 视频模型名（与图片的 model 分开，因为可能是另一路配置）。 */
+  videoModel?: string;
+  /** 这一路视频配置的 id。 */
+  videoProfileId?: string;
+  /** 首帧 / 参考图：公网 HTTPS 地址（本机图先过图床）。提交时确定，不带原始 /api/files 引用。 */
+  videoImageUrls?: string[];
+  /** 首帧来源的说明文案，展示给用户看「这张图是从哪个节点连过来的」。 */
+  videoSourceLabel?: string;
+  /** 视频任务的失败原因。 */
+  videoError?: string;
+  /** 视频提示词整理状态，属于运行态。 */
+  videoPromptOptimizing?: boolean;
+  videoPromptError?: string;
+  /** 脚本优化后的撤销快照。 */
+  videoPromptOriginal?: string;
+  videoPromptOptimized?: boolean;
   /** React Flow v12 要求节点 data 满足 Record<string, unknown>。 */
   [key: string]: unknown;
 }
@@ -150,8 +261,14 @@ export interface CanvasNode {
   type: string;
   position: { x: number; y: number };
   data: CanvasNodeData;
+  /** React Flow 层级：编组低于成员，保证 8% 彩色底不污染节点卡片。 */
+  zIndex?: number;
   width?: number;
   height?: number;
+  /** group 成员指向父组；position 为相对父组坐标。仅允许一层。 */
+  parentId?: string;
+  extent?: 'parent';
+  expandParent?: boolean;
 }
 
 export interface CanvasEdge {
@@ -160,8 +277,25 @@ export interface CanvasEdge {
   target: string;
 }
 
-/** 配置种类：image = 生图模型；text = 语言 / 多模态模型（发送前整理提示词）。 */
-export type ProfileKind = 'image' | 'text';
+/** 配置种类：image = 生图模型；text = 语言 / 多模态模型（发送前整理提示词）；video = 视频生成模型。 */
+export type ProfileKind = 'image' | 'text' | 'video';
+
+/** 视频配置的请求协议；auto 会按 Base URL / 模型名选择适配器。 */
+export type VideoApiMode = 'auto' | 'openai-videos' | 'xai-videos' | 'grsai-generate' | 'media-v1' | 'custom';
+
+export interface CustomVideoApiConfig {
+  createPath: string;
+  pollPath: string;
+  imageTransport: 'public-url' | 'data-url';
+  headersTemplate: string;
+  requestBodyTemplate: string;
+  taskIdPath: string;
+  statusPath: string;
+  progressPath: string;
+  outputUrlPath: string;
+  errorPath: string;
+  statusMap: string;
+}
 
 /** 一路生图模型配置（Base URL / Key / 模型列表独立，可同时存在多路）。 */
 export interface ModelProfileView {
@@ -186,6 +320,9 @@ export interface ModelProfileView {
   imageApiMode?: ImageApiMode;
   /** Mainline model for Responses API; separate from the image tool model. */
   responsesModel?: string;
+  /** 视频配置的上游协议。 */
+  videoApiMode?: VideoApiMode;
+  videoCustomConfig?: CustomVideoApiConfig;
 }
 
 /** 提示词整理强度：只影响语言模型那一次对话，不改变生图模型参数。 */
@@ -236,8 +373,9 @@ export type GenerateOutcome =
   | { ok: true; jobId: string; images: ImageResult[] }
   | { ok: false; error: string };
 
-/** 生成历史的一条：全部画布的图片节点汇成的时间线（bridge /api/history）。 */
+/** 生成历史的一条：全部画布的图片与视频汇成的时间线（bridge /api/history）。 */
 export interface HistoryItem {
+  mediaType?: 'image' | 'video';
   url: string;
   prompt: string;
   /** 该图在所属结果节点版本链里的序号（1 起）；没有版本链的老节点为空。 */
@@ -258,6 +396,12 @@ export interface HistoryItem {
   canvasId: string;
   canvasName: string;
   createdAt: string;
+  startedAt?: string;
+  finishedAt?: string;
+  videoSeconds?: number;
+  videoResolution?: VideoResolution;
+  videoRatio?: VideoRatio;
+  videoAudio?: boolean;
   source: 'browser' | 'mcp' | string;
 }
 
@@ -400,6 +544,22 @@ export interface ChatModelSelection {
   imageModel?: string;
 }
 
+export interface ChatRoleSkill {
+  id: string;
+  name: string;
+  content: string;
+}
+
+/** 发送时的角色快照：重试与历史回放不依赖角色之后是否被编辑或删除。 */
+export interface ChatRoleSnapshot {
+  id: string;
+  name: string;
+  avatarUrl?: string;
+  category?: string;
+  systemPrompt: string;
+  skills: ChatRoleSkill[];
+}
+
 /** 消息运行态：运行中 / 完成 / 失败 / 已停止 / 刷新后状态未知（不伪装成完成）。 */
 export type ChatMessageStatus = 'running' | 'awaiting_input' | 'done' | 'error' | 'stopped' | 'unknown';
 
@@ -419,6 +579,8 @@ export interface ChatMessage {
   askResponse?: ChatAskResponseSummary;
   /** 发送这轮消息时选择的语言模型 / 生图模型。 */
   modelSelection?: ChatModelSelection;
+  /** 发送这轮消息时选中的角色；未选择时表示通用模式。 */
+  agentRole?: ChatRoleSnapshot;
   /** 本轮上下文徽标：续接了哪一版 / 断链原因。 */
   context?: ChatMessageContext;
   status?: ChatMessageStatus;

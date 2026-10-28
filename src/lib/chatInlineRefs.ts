@@ -26,9 +26,10 @@ export function chatInlineSegments(text: string, references: ChatImageRef[]): Ch
   return segments;
 }
 
-export function chatInlineSignature(text: string, references: ChatImageRef[]): string {
+export function chatInlineSignature(text: string, references: ChatImageRef[], roleId = ''): string {
   return JSON.stringify([
     text,
+    roleId,
     references.map((reference) => [
       reference.nodeId,
       reference.versionId || '',
@@ -37,4 +38,9 @@ export function chatInlineSignature(text: string, references: ChatImageRef[]): s
       reference.url || '',
     ]),
   ]);
+}
+
+export function chatRoleLabel(name: string): string {
+  const characters = Array.from(name.trim());
+  return characters.length > 4 ? `${characters.slice(0, 4).join('')}...` : characters.join('');
 }

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { findClipboardImage } from '../src/lib/clipboardImage';
+import { extractClipboardImageUrl, findClipboardImage, findClipboardImages } from '../src/lib/clipboardImage';
 import { isBase64ReferenceDataUrl } from '../src/lib/imageData';
 
 const img = (name: string) => ({ type: 'image/png', name });
@@ -24,10 +24,32 @@ describe('剪贴板取图', () => {
     expect(file?.name).toBe('copied.jpg');
   });
 
+  it('同一张图同时出现在 files 和 items 时只采用 files，避免重复导入', () => {
+    const file = img('copied.png');
+    const images = findClipboardImages({
+      files: [file],
+      items: [{ kind: 'file', type: 'image/png', getAsFile: () => ({ ...file }) }],
+    });
+    expect(images).toEqual([file]);
+  });
+
+  it('保留 files 列表里的多张图片', () => {
+    expect(findClipboardImages({ files: [img('a.png'), img('b.png')], items: [] }).map((file) => file.name)).toEqual(['a.png', 'b.png']);
+  });
+
   it('没有图片时返回 null，且不误取 string 项', () => {
     expect(findClipboardImage({ files: [], items: [{ kind: 'string', type: 'text/html', getAsFile: () => null }] })).toBeNull();
     expect(findClipboardImage({})).toBeNull();
     expect(findClipboardImage({ files: [{ type: 'application/x-thing' }] })).toBeNull();
+  });
+
+  it('网页图片剪贴板多个文本表示只选择一个图片地址', () => {
+    expect(extractClipboardImageUrl([
+      { type: 'text/plain', text: 'https://example.com/page' },
+      { type: 'text/uri-list', text: '# image\nhttps://example.com/image.png' },
+      { type: 'text/html', text: '<img src="https://example.com/image.png">' },
+    ])).toBe('https://example.com/image.png');
+    expect(extractClipboardImageUrl([{ type: 'text/plain', text: 'just a prompt' }])).toBe('');
   });
 
   it('只把 PNG/JPEG base64 data URL 当作可直接发送的参考图', () => {

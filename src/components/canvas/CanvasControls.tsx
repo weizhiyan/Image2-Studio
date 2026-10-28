@@ -73,7 +73,6 @@ export function CanvasRail({
           const rect = event.currentTarget.getBoundingClientRect();
           onAdd({ x: rect.right + 12, y: rect.top });
         }}
-        title={addTitle}
         aria-label={addTitle}
       >
         <PlusIcon />
@@ -83,7 +82,6 @@ export function CanvasRail({
         className={`canvas-rail-btn canvas-rail-tool ${panTool ? 'is-active' : ''}`}
         type="button"
         onClick={onTogglePanTool}
-        title={panTool ? '抓手：左键拖拽平移画布，点一下切回选择' : '选择：左键框选节点，点一下切成抓手'}
         aria-label={panTool ? '切回选择工具' : '切换成抓手工具'}
         aria-pressed={panTool}
       >
@@ -108,14 +106,13 @@ export function CanvasDock({
 }) {
   return (
     <div className="canvas-dock" role="group" aria-label="画布视图控制">
-      <button className="canvas-dock-btn" type="button" onClick={onReset} title="重置到最佳视角" aria-label="重置到最佳视角">
+      <button className="canvas-dock-btn" type="button" onClick={onReset} aria-label="重置到最佳视角">
         <FitViewIcon />
       </button>
       <button
         className="canvas-dock-btn"
         type="button"
         onClick={onTidy}
-        title="整理画布布局（Ctrl+Z 撤回）"
         aria-label="整理画布布局"
       >
         <TidyIcon />

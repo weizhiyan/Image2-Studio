@@ -37,6 +37,8 @@ interface ChatState {
   activeCanvasId: string;
   /** 面板是否展开（右下角 AI 按钮控制）。 */
   open: boolean;
+  /** 当前会话选中的角色 id；会话态，不持久化，刷新后恢复未选择角色。 */
+  activeRoleId: string;
   draft: string;
   draftAttachments: ChatImageRef[];
   /** 「继续编辑」钉住的基准图草稿：下一轮生成以它为续接源（edit 语义）。 */
@@ -49,6 +51,8 @@ interface ChatState {
   messageScrollTop: number;
   setActiveCanvas: (canvasId: string) => void;
   setOpen: (open: boolean) => void;
+  setActiveRole: (roleId: string) => void;
+  clearActiveRole: () => void;
   setDraft: (text: string) => void;
   addDraftAttachment: (ref: ChatImageRef) => void;
   setDraftAttachments: (refs: ChatImageRef[]) => void;
@@ -233,6 +237,7 @@ export const useChatStore = create<ChatState>()(
       activeThreadId: '',
       activeCanvasId: '',
       open: false,
+      activeRoleId: '',
       draft: '',
       draftAttachments: [],
       draftBase: null,
@@ -262,6 +267,10 @@ export const useChatStore = create<ChatState>()(
       },
 
       setOpen: (open) => set(open ? { open, unread: false } : { open }),
+
+      setActiveRole: (roleId) => set({ activeRoleId: String(roleId || '').trim() }),
+
+      clearActiveRole: () => set({ activeRoleId: '' }),
 
       setDraft: (text) => set({ draft: text }),
 
@@ -326,6 +335,7 @@ export const useChatStore = create<ChatState>()(
         set({
           threads: [...get().threads, thread],
           activeThreadId: thread.id,
+          activeRoleId: '',
           open: true,
           draft: '',
           draftAttachments: [],
@@ -338,7 +348,7 @@ export const useChatStore = create<ChatState>()(
       switchThread: (threadId) => {
         const thread = get().threads.find((item) => item.id === threadId);
         if (!thread) return;
-        set({ activeThreadId: threadId, draft: '', draftAttachments: [], draftBase: null, messageScrollTop: 0 });
+        set({ activeThreadId: threadId, activeRoleId: '', draft: '', draftAttachments: [], draftBase: null, messageScrollTop: 0 });
       },
 
       renameThread: (threadId, title) => {
@@ -367,6 +377,7 @@ export const useChatStore = create<ChatState>()(
           threads: rest,
           activeThreadId: nextActive,
           ...(deletingActive ? {
+            activeRoleId: '',
             draft: '',
             draftAttachments: [],
             draftBase: null,
@@ -484,7 +495,7 @@ export const useChatStore = create<ChatState>()(
       migrate: (persisted) => {
         const state = (persisted || {}) as Record<string, unknown>;
         return {
-          // open / activeCanvasId / activeRun 是会话态不持久化；线程与草稿要跨刷新保留。
+          // open / activeCanvasId / activeRoleId / activeRun 是会话态不持久化；线程与草稿要跨刷新保留。
           // 旧版草稿附件没有 canvasId / versionId 字段，一次性迁移时丢弃（草稿本是暂态）
           threads: migrateThreads(persisted),
           draft: typeof state.draft === 'string' ? state.draft : '',

@@ -2,10 +2,12 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { SIZE_PRESETS } from '@/lib/aspect';
 import { pickSingleLanguageProfileId, withSingleLanguageProfile } from '@/lib/profileEnable';
 import { useSettingsStore } from '@/stores/settingsStore';
-import { fetchModels, postPreferenceAction, revealSavedApiKey, testConnection } from '@/lib/bridge';
+import { fetchModels, fetchVideoModels, revealSavedApiKey, testConnection } from '@/lib/bridge';
 import { describeRequestError } from '@/lib/errors';
 import { TrashIcon } from '@/components/canvas/NodeChrome';
-import type { ImageApiMode, PreferenceProfile, ProfileKind, TextApiFormat } from '@/types';
+import ChatRolesSettings from '@/components/ChatRolesSettings';
+import type { CustomVideoApiConfig, ImageApiMode, ProfileKind, TextApiFormat, VideoApiMode } from '@/types';
+import { renderVideoHeadersTemplate, renderVideoRequestTemplate } from '../../bridge/videoRequestTemplate';
 import './model-config.css';
 
 function EyeIcon() {
@@ -56,6 +58,8 @@ interface ProfileDraft {
   textFormat: TextApiFormat;
   imageApiMode: ImageApiMode;
   responsesModel: string;
+  videoApiMode: VideoApiMode;
+  videoCustomConfig: CustomVideoApiConfig;
   keyConfigured: boolean;
   /** false = 停用这路配置：不参与默认竞选，列表置灰 */
   enabled: boolean;
@@ -77,6 +81,95 @@ export interface ProfileRowProps {
   onSelect: (id: string) => void;
   onToggleEnabled: (id: string) => void;
   onDelete: (id: string) => void;
+}
+
+interface ProfileOverviewCardProps {
+  draft: ProfileDraft;
+  selected: boolean;
+  canTest: boolean;
+  testing: boolean;
+  saving: boolean;
+  onOpen: (id: string) => void;
+  onToggleModel: (profileId: string, model: string) => void;
+  onTest: (profileId: string) => void;
+}
+
+export function ProfileOverviewCard({
+  draft,
+  selected,
+  canTest,
+  testing,
+  saving,
+  onOpen,
+  onToggleModel,
+  onTest,
+}: ProfileOverviewCardProps) {
+  const modelNames = Array.from(new Set([...draft.models, ...draft.enabledModels, draft.model].map((name) => name.trim()).filter(Boolean)));
+  const isModelEnabled = (name: string) => draft.enabledModels.includes(name)
+    || (draft.enabledModels.length === 0 && draft.model === name);
+  const enabledModels = modelNames.filter(isModelEnabled);
+  const enabledCount = draft.enabledModels.length || (draft.model ? 1 : 0);
+
+  return (
+    <article
+      className={`model-config-overview-card${selected ? ' is-current' : ''}${draft.enabled ? '' : ' is-disabled'}`}
+      role="group"
+      aria-label={`编辑 ${draft.name || '未命名配置'} 配置`}
+      tabIndex={0}
+      onClick={() => onOpen(draft.id)}
+      onKeyDown={(event) => {
+        if (event.target !== event.currentTarget || (event.key !== 'Enter' && event.key !== ' ')) return;
+        event.preventDefault();
+        onOpen(draft.id);
+      }}
+    >
+      <header className="model-config-overview-card-head">
+        <div className="model-config-overview-title">
+          <strong>{draft.name || '未命名配置'}</strong>
+          {!draft.enabled ? <span>配置已停用</span> : null}
+        </div>
+        <div className="model-config-overview-actions">
+          <span>{enabledCount} 个已选模型</span>
+          <button
+            type="button"
+            className="model-config-overview-test"
+            disabled={!canTest || testing || saving}
+            onClick={(event) => {
+              event.stopPropagation();
+              onTest(draft.id);
+            }}
+          >
+            {testing ? '测试中...' : '测试'}
+          </button>
+        </div>
+      </header>
+      <div className="model-config-overview-models">
+        {enabledModels.map((name) => (
+          <div className="model-config-overview-model is-enabled" key={name}>
+            <span title={name}>{name}</span>
+            <button
+              type="button"
+              role="switch"
+              aria-checked="true"
+              aria-label={`停用模型 ${name}`}
+              title="停用模型"
+              className="model-config-profile-switch on"
+              disabled={saving}
+              onClick={(event) => {
+                event.stopPropagation();
+                onToggleModel(draft.id, name);
+              }}
+            >
+              <span className="model-config-profile-switch-track" aria-hidden="true"><i /></span>
+            </button>
+          </div>
+        ))}
+        {enabledModels.length === 0 ? (
+          <span className="model-config-overview-empty">还没有模型</span>
+        ) : null}
+      </div>
+    </article>
+  );
 }
 
 export function ProfileRow({
@@ -137,6 +230,44 @@ export function ProfileRow({
 
 /** 旧配置没有语言模型时，Responses 链路的兼容兜底。 */
 const DEFAULT_RESPONSES_MODEL = 'gpt-5.5';
+const DEFAULT_CUSTOM_VIDEO_CONFIG: CustomVideoApiConfig = {
+  createPath: '/videos',
+  pollPath: '/videos/{{taskId}}',
+  imageTransport: 'public-url',
+  headersTemplate: '{}',
+  requestBodyTemplate: JSON.stringify({
+    model: '{{model}}',
+    prompt: '{{prompt}}',
+    seconds: '{{seconds}}',
+    ratio: '{{ratio}}',
+  }, null, 2),
+  taskIdPath: 'id',
+  statusPath: 'status',
+  progressPath: 'progress',
+  outputUrlPath: 'video_url',
+  errorPath: 'error.message',
+  statusMap: '{}',
+};
+
+function customVideoPreviewValues(model: string): Record<string, unknown> {
+  const images = ['https://example.invalid/first-frame.png', 'https://example.invalid/last-frame.png'];
+  return {
+    model: model || 'your-video-model',
+    prompt: 'Sample video prompt',
+    seconds: 5,
+    secondsString: '5',
+    ratio: '16:9',
+    resolution: '720p',
+    imageUrls: images,
+    firstImageUrl: images[0],
+    lastImageUrl: images[1],
+    generateAudio: false,
+    watermark: false,
+    referenceMode: 'first_frame',
+    params: {},
+    apiKey: '[redacted]',
+  };
+}
 
 interface SettingsPanelProps {
   onClose: () => void;
@@ -156,32 +287,34 @@ export default function SettingsPanel({ onClose }: SettingsPanelProps) {
   const [activeId, setActiveId] = useState('');
   const [textProfileId, setTextProfileId] = useState('');
   const [direct, setDirect] = useState(true);
-  /** 设置弹窗的三个 Tab：生图模型 / 语言模型 / 偏好档案（参考图：前两者各自独立管理）。 */
-  const [tab, setTab] = useState<'image' | 'text' | 'preferences'>('image');
-  /** 偏好档案：跟随 store，任何操作后重新 load 同步。 */
-  const [prefs, setPrefs] = useState<PreferenceProfile>({ enabled: false, entries: [], updatedAt: '' });
-  const [prefBusy, setPrefBusy] = useState<'' | 'distill' | 'clear'>('');
-  const [prefNotice, setPrefNotice] = useState('');
+  /** 设置弹窗分类；偏好档案页只承载 AI 对话角色。 */
+  const [tab, setTab] = useState<'image' | 'text' | 'video' | 'preferences'>('image');
   const [selectedId, setSelectedId] = useState('');
+  const [editorOpen, setEditorOpen] = useState(false);
+  const [roleDetailOpen, setRoleDetailOpen] = useState(false);
+  const [videoAdvancedOpen, setVideoAdvancedOpen] = useState(false);
+  const [videoTemplatePreview, setVideoTemplatePreview] = useState('');
+  const [videoTemplatePreviewError, setVideoTemplatePreviewError] = useState('');
   const [apiKeyVisible, setApiKeyVisible] = useState(false);
   const [revealingApiKey, setRevealingApiKey] = useState(false);
   const [manualModel, setManualModel] = useState('');
   const [pickerOpen, setPickerOpen] = useState(false);
   const [fetching, setFetching] = useState(false);
   const [testing, setTesting] = useState(false);
+  const [testingProfileId, setTestingProfileId] = useState('');
   const [saving, setSaving] = useState(false);
   const [notice, setNotice] = useState('');
   const [errorText, setErrorText] = useState('');
   const pickerRef = useRef<HTMLDivElement>(null);
-  /** 是否已完成首次水合：保存成功后 settings 会刷新一次，那时只同步数据、不切回默认配置 */
+  /** 配置草稿只做首次水合，后续 store 刷新不覆盖本地编辑。 */
   const hydratedRef = useRef(false);
 
   useEffect(() => {
     if (!settings) return;
+    const firstHydration = !hydratedRef.current;
     // 首次水合才定"当前看哪一路"：保存成功后 settings 也会刷新，
     // 那时若再 setSelectedId 会把用户正在编辑的那一路弹回默认配置（旧行为，顺手修掉）
-    if (!hydratedRef.current) {
-      hydratedRef.current = true;
+    if (firstHydration) {
       const firstImage = settings.profiles.find((profile) => (profile.kind || 'image') === 'image')?.id;
       const fallbackId = settings.activeProfileId || firstImage || settings.profiles[0]?.id || '';
       setActiveId(fallbackId);
@@ -189,30 +322,38 @@ export default function SettingsPanel({ onClose }: SettingsPanelProps) {
       setTextProfileId(settings.textProfileId || settings.profiles.find((profile) => profile.kind === 'text')?.id || '');
     }
     setDirect(settings.direct !== false);
-    setPrefs(settings.preferences || { enabled: false, entries: [], updatedAt: '' });
-    // 保存成功后 settings 会刷新一次：已输入但还没被 store 认下的 Key 要原样留在输入框里，
-    // 否则用户刚填完 Key 点保存，输入框瞬间清空，看起来就像"Key 没存上"。
-    // 老配置里可能躺着两路同时启用的语言模型：按 textProfileId 归一，只留一路
-    const languageKeepId = pickSingleLanguageProfileId(settings.profiles, settings.textProfileId);
-    setDrafts((current) => settings.profiles.map((profile) => {
-      const typed = current.find((draft) => draft.id === profile.id)?.apiKey || '';
-      return {
-      id: profile.id,
-      name: profile.name,
-      baseUrl: profile.baseUrl,
-      apiKey: typed,
-      model: profile.model,
-      defaultSize: profile.defaultSize,
-      models: profile.models || [],
-      enabledModels: profile.enabledModels || [],
-      kind: profile.kind || 'image',
-      textFormat: profile.textFormat || 'auto',
-      imageApiMode: profile.imageApiMode || 'images',
-      responsesModel: profile.responsesModel || DEFAULT_RESPONSES_MODEL,
-      keyConfigured: profile.keyConfigured,
-      enabled: profile.kind === 'text' ? profile.id === languageKeepId : profile.enabled !== false,
-      };
-    }));
+    if (firstHydration) {
+      // 只首次把服务端配置灌入草稿。打开面板时可能已有一次刷新在途；若每次 settings
+      // 更新都重建草稿，会覆盖用户刚输入的 URL / Key / 模型。首次读取期间新增的临时草稿要保留。
+      const languageKeepId = pickSingleLanguageProfileId(settings.profiles, settings.textProfileId);
+      setDrafts((current) => {
+        const serverDrafts = settings.profiles.map((profile) => {
+          const local = current.find((draft) => draft.id === profile.id);
+          if (local) return { ...local, keyConfigured: profile.keyConfigured };
+          return {
+            id: profile.id,
+            name: profile.name,
+            baseUrl: profile.baseUrl,
+            apiKey: '',
+            model: profile.model,
+            defaultSize: profile.defaultSize,
+            models: profile.models || [],
+            enabledModels: profile.enabledModels || [],
+            kind: profile.kind || 'image',
+            textFormat: profile.textFormat || 'auto',
+            imageApiMode: profile.imageApiMode || 'images',
+            responsesModel: profile.responsesModel || DEFAULT_RESPONSES_MODEL,
+            videoApiMode: profile.videoApiMode || 'auto',
+            videoCustomConfig: profile.videoCustomConfig || DEFAULT_CUSTOM_VIDEO_CONFIG,
+            keyConfigured: profile.keyConfigured,
+            enabled: profile.kind === 'text' ? profile.id === languageKeepId : profile.enabled !== false,
+          };
+        });
+        const serverIds = new Set(settings.profiles.map((profile) => profile.id));
+        return [...serverDrafts, ...current.filter((draft) => draft.id.startsWith('new_') && !serverIds.has(draft.id))];
+      });
+      hydratedRef.current = true;
+    }
   }, [settings]);
 
   /* Esc 关闭，对齐灵枢 Dialog */
@@ -234,7 +375,11 @@ export default function SettingsPanel({ onClose }: SettingsPanelProps) {
     return () => window.removeEventListener('pointerdown', onPointerDown);
   }, [pickerOpen]);
 
-  const selected = drafts.find((draft) => draft.id === selectedId) || drafts[0] || null;
+  const selected = tab === 'preferences'
+    ? null
+    : drafts.find((draft) => draft.id === selectedId && draft.kind === tab)
+      || drafts.find((draft) => draft.kind === tab)
+      || null;
   const error = errorText || storeError;
   const canTest = Boolean(selected && (selected.apiKey.trim() || selected.keyConfigured)
     && (selected.kind === 'image' || selected.model.trim()));
@@ -242,12 +387,15 @@ export default function SettingsPanel({ onClose }: SettingsPanelProps) {
   useEffect(() => {
     setApiKeyVisible(false);
     setRevealingApiKey(false);
+    setManualModel('');
+    setVideoTemplatePreview('');
+    setVideoTemplatePreviewError('');
   }, [selectedId]);
 
   /** 切 tab 时把选中项指到该类型的第一路：否则右栏还显示着另一类型的配置 */
   useEffect(() => {
     if (tab === 'preferences') return;
-    const wanted = tab === 'image' ? 'image' : 'text';
+    const wanted = tab === 'image' ? 'image' : tab === 'video' ? 'video' : 'text';
     if (selected && (selected.kind || 'image') === wanted) return;
     const first = drafts.find((draft) => (draft.kind || 'image') === wanted);
     if (first) setSelectedId(first.id);
@@ -286,6 +434,42 @@ export default function SettingsPanel({ onClose }: SettingsPanelProps) {
   const patchSelected = (patch: Partial<ProfileDraft>) => {
     if (!selected) return;
     patchDraft(selected.id, patch);
+  };
+
+  const patchSelectedVideoConfig = (patch: Partial<CustomVideoApiConfig>) => {
+    if (!selected || selected.kind !== 'video') return;
+    patchSelected({ videoCustomConfig: { ...selected.videoCustomConfig, ...patch } });
+    setVideoTemplatePreview('');
+    setVideoTemplatePreviewError('');
+  };
+
+  const previewCustomVideoConfig = () => {
+    if (!selected || selected.kind !== 'video') return;
+    setVideoTemplatePreviewError('');
+    try {
+      const values = customVideoPreviewValues(selected.model);
+      const configuredHeaders = renderVideoHeadersTemplate(selected.videoCustomConfig.headersTemplate, values);
+      const hasCustomAuth = Object.keys(configuredHeaders).some((name) => /^(authorization|x-api-key|api-key)$/i.test(name));
+      const headers = {
+        ...(!hasCustomAuth ? { Authorization: 'Bearer [redacted]' } : {}),
+        ...configuredHeaders,
+        'Content-Type': 'application/json',
+      };
+      for (const name of Object.keys(headers)) {
+        if (/authorization|api[-_]?key|token/i.test(name)) headers[name as keyof typeof headers] = '[redacted]';
+      }
+      const requestBody = renderVideoRequestTemplate(selected.videoCustomConfig.requestBodyTemplate, values);
+      setVideoTemplatePreview(JSON.stringify({
+        method: 'POST',
+        endpoint: selected.videoCustomConfig.createPath,
+        imageTransport: selected.videoCustomConfig.imageTransport,
+        headers,
+        body: requestBody,
+      }, null, 2));
+    } catch (error) {
+      setVideoTemplatePreviewError(error instanceof Error ? error.message : '模板预览失败');
+      setVideoTemplatePreview('');
+    }
   };
 
   /**
@@ -331,19 +515,26 @@ export default function SettingsPanel({ onClose }: SettingsPanelProps) {
 
   const handleAddProfile = (kind: ProfileKind) => {
     const index = drafts.filter((draft) => draft.kind === kind).length + 1;
+    const nameByKind: Record<ProfileKind, string> = {
+      image: `生图模型 ${index}`,
+      text: `语言模型 ${index}`,
+      video: `视频模型 ${index}`,
+    };
     const draft: ProfileDraft = {
       id: `new_${Date.now().toString(36)}`,
-      name: kind === 'text' ? `语言模型 ${index}` : `生图模型 ${index}`,
-      baseUrl: 'https://api.openai.com/v1',
+      name: nameByKind[kind] || `配置 ${index}`,
+      baseUrl: kind === 'video' ? '' : 'https://api.openai.com/v1',
       apiKey: '',
       model: '',
-      defaultSize: SIZE_PRESETS[0],
+      defaultSize: kind === 'video' ? '' : SIZE_PRESETS[0],
       models: [],
       enabledModels: [],
       kind,
       textFormat: 'auto',
       imageApiMode: 'images',
       responsesModel: DEFAULT_RESPONSES_MODEL,
+      videoApiMode: 'auto',
+      videoCustomConfig: DEFAULT_CUSTOM_VIDEO_CONFIG,
       keyConfigured: false,
       enabled: true,
     };
@@ -352,6 +543,7 @@ export default function SettingsPanel({ onClose }: SettingsPanelProps) {
       kind === 'text' ? [...withSingleLanguageProfile(current, draft.id), draft] : [...current, draft]
     ));
     setSelectedId(draft.id);
+    setEditorOpen(true);
     if (kind === 'text') setTextProfileId(draft.id);
     setNotice('');
     setErrorText('');
@@ -384,6 +576,53 @@ export default function SettingsPanel({ onClose }: SettingsPanelProps) {
 
   const handleFetch = async () => {
     if (!selected) return;
+    const usesGrsaiVideoProtocol = selected.kind === 'video' && (
+      selected.videoApiMode === 'grsai-generate'
+      || (selected.videoApiMode === 'auto' && (/grsai|dakka/i.test(selected.baseUrl) || selected.model.toLowerCase() === 'minimax-h3'))
+    );
+    if (usesGrsaiVideoProtocol) {
+      setNotice('GrsAI 生成协议没有兼容的模型列表接口；请按服务商提供的模型名手动添加，现有配置会保留。');
+      setErrorText('');
+      return;
+    }
+    // 视频模型走 /skills/models?type=video：只列视频模型，并过滤掉当前 Key 调不了的
+    // （available_for_this_key=false 硬调必 403，放进列表只会误导）。
+    if (selected.kind === 'video') {
+      setFetching(true);
+      setNotice('');
+      setErrorText('');
+      try {
+        const result = await fetchVideoModels({
+          profileId: selected.id,
+          baseUrl: selected.baseUrl.trim(),
+          apiKey: selected.apiKey.trim(),
+          videoApiMode: selected.videoApiMode,
+        });
+        const infos = result.models;
+        const protocolNote = result.protocol
+          ? `协议：${result.protocol}${result.confidence ? `（${result.confidence === 'high' ? '高' : result.confidence === 'medium' ? '中' : '低'}置信度）` : ''}`
+          : '';
+        const normalized = Array.from(new Set(infos.map((item) => String(item.name || '').trim()).filter(Boolean)));
+        if (normalized.length === 0) {
+          setNotice([protocolNote, '这个 Key 没有可用的视频模型——请检查渠道分组权限，或手动填写模型名'].filter(Boolean).join('；'));
+          return;
+        }
+        const kept = selected.enabledModels.filter((item) => normalized.includes(item));
+        // 没勾选过时自动启用第一个：用户「加了模型」就该能用，不该再被默认模型卡住
+        const nextEnabled = kept.length > 0 ? kept : [normalized[0]];
+        const nextModels = Array.from(new Set([...normalized, ...nextEnabled]));
+        const nextModel = nextEnabled.includes(selected.model)
+          ? selected.model
+          : nextEnabled[0] || '';
+        patchSelected({ models: nextModels, enabledModels: nextEnabled, model: nextModel });
+        setNotice([`已获取 ${normalized.length} 个视频模型`, protocolNote, result.evidence].filter(Boolean).join('；'));
+      } catch (err) {
+        setErrorText(err instanceof Error ? err.message : '拉取视频模型失败');
+      } finally {
+        setFetching(false);
+      }
+      return;
+    }
     setFetching(true);
     setNotice('');
     setErrorText('');
@@ -417,13 +656,8 @@ export default function SettingsPanel({ onClose }: SettingsPanelProps) {
           ? `已获取 ${normalized.length} 个模型；原勾选未出现在列表里，请手动调整`
           : `已获取 ${normalized.length} 个模型，请手动勾选需要使用的模型`);
     } catch (err) {
-      // 失败必须亮出真实原因（最常见是这路还没配 Key：「尚未配置 API Key」），
-      // 别再一律显示「接口不可用」把真问题盖掉
       setErrorText(describeRequestError(err, selected.baseUrl));
-      // 同时清空这一路的模型勾选与默认模型：留着拉不回来的模型名，
-      // 只会让界面谎称「有模型可用」，点到生成才失败。修好地址/Key 再拉一次即可。
-      patchSelected({ models: [], enabledModels: [], model: '' });
-      setNotice('获取模型失败，已清空该路的模型勾选与默认模型；请修正后重新获取，或在下方手动填写模型名');
+      setNotice('获取模型失败；已保留当前模型配置，可修正地址后重试或继续手动维护模型名');
     } finally {
       setFetching(false);
     }
@@ -443,39 +677,29 @@ export default function SettingsPanel({ onClose }: SettingsPanelProps) {
     setNotice(`已加入模型 ${name}`);
   };
 
-  const handleTest = async () => {
-    if (!selected) return;
+  const handleTest = async (profileId = selected?.id || '') => {
+    const target = drafts.find((draft) => draft.id === profileId);
+    if (!target) return;
     setTesting(true);
+    setTestingProfileId(target.id);
     setNotice('');
     setErrorText('');
     try {
       const message = await testConnection({
-        baseUrl: selected.baseUrl.trim(),
-        apiKey: selected.apiKey.trim(),
-        model: selected.model.trim(),
-        profileId: selected.id,
-        kind: selected.kind,
+        baseUrl: target.baseUrl.trim(),
+        apiKey: target.apiKey.trim(),
+        model: target.model.trim(),
+        profileId: target.id,
+        kind: target.kind,
+        videoApiMode: target.kind === 'video' ? target.videoApiMode : undefined,
+        videoCustomConfig: target.kind === 'video' ? target.videoCustomConfig : undefined,
       });
       setNotice(message);
     } catch (err) {
-      setErrorText(describeRequestError(err, selected.baseUrl));
+      setErrorText(describeRequestError(err, target.baseUrl));
     } finally {
       setTesting(false);
-    }
-  };
-
-  /** 偏好档案操作：bridge 落盘后重新 load，让档案列表与 store 保持一致 */
-  const runPrefAction = async (action: 'distill' | 'clear' | 'remove' | 'toggle', payload: Record<string, unknown> = {}, busy: 'distill' | 'clear' | '' = '') => {
-    setPrefBusy(busy);
-    setPrefNotice('');
-    try {
-      await postPreferenceAction(action, payload);
-      await load();
-      setPrefNotice('偏好档案已更新');
-    } catch (err) {
-      setPrefNotice(err instanceof Error ? err.message : '偏好档案操作失败');
-    } finally {
-      setPrefBusy('');
+      setTestingProfileId('');
     }
   };
 
@@ -487,6 +711,11 @@ export default function SettingsPanel({ onClose }: SettingsPanelProps) {
     setSaving(true);
     setNotice('');
     setErrorText('');
+    if (!settings || loading || storeError) {
+      setSaving(false);
+      setErrorText('模型配置尚未成功读取，当前内容不会保存或覆盖原配置。请先重新读取。');
+      return;
+    }
     // 草稿为空 = 配置还没加载完（或加载失败）：这时保存会把已存配置整组清空，必须先拦住
     if (draftsToSave.length === 0) {
       setSaving(false);
@@ -500,6 +729,24 @@ export default function SettingsPanel({ onClose }: SettingsPanelProps) {
       return;
     }
     try {
+      for (const customVideo of draftsToSave.filter((draft) => draft.kind === 'video' && draft.videoApiMode === 'custom')) {
+        const parseObject = (value: string, label: string) => {
+          const parsed: unknown = JSON.parse(value);
+          if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error(`${label}必须是 JSON 对象`);
+        };
+        if (!customVideo.videoCustomConfig.createPath.trim()) throw new Error('自定义视频协议缺少提交路径');
+        if (!customVideo.videoCustomConfig.pollPath.trim()) throw new Error('自定义异步视频协议缺少查询任务路径');
+        if (!customVideo.videoCustomConfig.outputUrlPath.trim()) throw new Error('自定义视频协议缺少视频地址字段路径');
+        parseObject(customVideo.videoCustomConfig.requestBodyTemplate, '请求体模板');
+        parseObject(customVideo.videoCustomConfig.headersTemplate || '{}', '请求头模板');
+        parseObject(customVideo.videoCustomConfig.statusMap || '{}', '状态映射');
+        const sampleValues = customVideoPreviewValues(customVideo.model);
+        renderVideoRequestTemplate(customVideo.videoCustomConfig.requestBodyTemplate, sampleValues);
+        renderVideoHeadersTemplate(customVideo.videoCustomConfig.headersTemplate, sampleValues);
+        if (!customVideo.videoCustomConfig.pollPath.includes('{{taskId}}')) {
+          throw new Error('轮询路径需要包含 {{taskId}}，例如 /videos/{{taskId}}');
+        }
+      }
       const selectedDraftIndex = selected ? draftsToSave.findIndex((draft) => draft.id === selected.id) : -1;
       // 保存前再归一一次：不管界面怎么绕，落盘的必须还是"语言模型只启用一路"
       const normalizedDrafts = withSingleLanguageProfile(draftsToSave, pickSingleLanguageProfileId(draftsToSave, textProfileIdToSave));
@@ -518,6 +765,8 @@ export default function SettingsPanel({ onClose }: SettingsPanelProps) {
           kind: draft.kind,
           textFormat: draft.textFormat,
           imageApiMode: draft.imageApiMode,
+          videoApiMode: draft.videoApiMode,
+          videoCustomConfig: draft.kind === 'video' ? draft.videoCustomConfig : undefined,
           // 生图配置不能把语言模型名写成 Responses 主模型；运行时会按该路生图模型校验。
           responsesModel: draft.kind === 'text' ? draft.model : draft.responsesModel,
           enabled: draft.enabled,
@@ -526,6 +775,17 @@ export default function SettingsPanel({ onClose }: SettingsPanelProps) {
         textProfileId: textProfileIdToSave,
         direct,
       });
+      const persistedIds = new Map(normalizedDrafts.map((draft, index) => [
+        draft.id,
+        savedSettings.profiles[index]?.id || draft.id,
+      ]));
+      const persistedProfiles = new Map(savedSettings.profiles.map((profile) => [profile.id, profile]));
+      // 保存期间输入框仍可编辑；用最新本地字段，只把 Bridge 分配的稳定 ID / Key 状态同步回来。
+      setDrafts((current) => current.map((draft) => {
+        const id = persistedIds.get(draft.id) || draft.id;
+        const persisted = persistedProfiles.get(id);
+        return { ...draft, id, keyConfigured: persisted?.keyConfigured ?? draft.keyConfigured };
+      }));
       // 新配置的临时 ID 会在 bridge 保存时换成稳定 ID；同步回来避免保存后选中态跳回第一路。
       const persistedSelected = selectedDraftIndex >= 0 ? savedSettings.profiles[selectedDraftIndex] : undefined;
       if (persistedSelected) setSelectedId(persistedSelected.id);
@@ -544,6 +804,34 @@ export default function SettingsPanel({ onClose }: SettingsPanelProps) {
     }
   };
 
+  const toggleOverviewModel = (profileId: string, modelName: string) => {
+    const target = drafts.find((draft) => draft.id === profileId);
+    if (!target) return;
+    const wasEnabled = target.enabledModels.includes(modelName)
+      || (target.enabledModels.length === 0 && target.model === modelName);
+    const enabledModels = wasEnabled
+      ? target.enabledModels.filter((name) => name !== modelName)
+      : Array.from(new Set([...target.enabledModels, modelName]));
+    const nextModel = enabledModels.includes(target.model) ? target.model : enabledModels[0] || '';
+    const nextDrafts = drafts.map((draft) => (
+      draft.id === profileId ? { ...draft, enabledModels, model: nextModel } : draft
+    ));
+    setDrafts(nextDrafts);
+    window.setTimeout(() => void handleSave(nextDrafts, activeId, textProfileId), 0);
+  };
+
+  const currentKind: ProfileKind | null = tab === 'image' || tab === 'text' || tab === 'video' ? tab : null;
+  const overviewProfiles = currentKind ? drafts.filter((draft) => draft.kind === currentKind) : [];
+  const canTestProfile = (draft: ProfileDraft) => Boolean(
+    (draft.apiKey.trim() || draft.keyConfigured)
+    && (draft.kind === 'image' || draft.model.trim()),
+  );
+  const deleteSelectedProfile = () => {
+    if (!selected) return;
+    handleDeleteProfile(selected.id);
+    setEditorOpen(false);
+  };
+
   const profileSummary = useMemo(() => drafts.map((draft) => ({
     id: draft.id,
     name: draft.name || '未命名配置',
@@ -558,10 +846,11 @@ export default function SettingsPanel({ onClose }: SettingsPanelProps) {
     selected
     && (selected.keyConfigured || selected.apiKey.trim())
     && selected.model.trim()
-    && (selected.kind === 'text' || selected.enabledModels.includes(selected.model)),
+    && (selected.kind === 'text' || selected.enabledModels.length === 0 || selected.enabledModels.includes(selected.model)),
   );
-  const imageProfiles = profileSummary.filter((profile) => profile.kind !== 'text');
+  const imageProfiles = profileSummary.filter((profile) => profile.kind === 'image');
   const textProfiles = profileSummary.filter((profile) => profile.kind === 'text');
+  const videoProfiles = profileSummary.filter((profile) => profile.kind === 'video');
   const renderProfileRow = (profile: (typeof profileSummary)[number]) => (
     <ProfileRow
       key={profile.id}
@@ -579,65 +868,6 @@ export default function SettingsPanel({ onClose }: SettingsPanelProps) {
       onDelete={handleDeleteProfile}
     />
   );
-  /** 偏好档案 Tab 的整块内容：归纳 / 清空 / 条目列表都在这里 */
-  const prefsPanel = (
-                <div className="model-config-prefs">
-                  <div className="model-config-prefs-head">
-                    <div>
-                      <strong>偏好档案</strong>
-                      <span>由生成记录归纳 + 图片预览里「偏好录入」；开启后作为长期偏好注入优化对话（与本次要求冲突时以本次为准）</span>
-                    </div>
-                    <button
-                      type="button"
-                      role="switch"
-                      aria-checked={prefs.enabled}
-                      aria-label="注入偏好档案"
-                      title={prefs.enabled ? '已启用：整理时带上偏好档案' : '已关闭：整理时不参考偏好档案'}
-                      className={`model-config-enhance-switch is-bare ${prefs.enabled ? 'on' : ''}`}
-                      onClick={() => void runPrefAction('toggle', { enabled: !prefs.enabled })}
-                    >
-                      <span className="model-config-enhance-switch-track" aria-hidden="true"><i /></span>
-                    </button>
-                  </div>
-                  <div className="model-config-prefs-actions">
-                    <button
-                      type="button"
-                      className="model-config-prefs-action"
-                      disabled={prefBusy === 'distill'}
-                      onClick={() => void runPrefAction('distill', {}, 'distill')}
-                    >
-                      {prefBusy === 'distill' ? '归纳中...' : '归纳生成记录（调用语言模型）'}
-                    </button>
-                    <button
-                      type="button"
-                      className="model-config-prefs-action"
-                      disabled={prefBusy === 'clear' || prefs.entries.length === 0}
-                      onClick={() => void runPrefAction('clear', {}, 'clear')}
-                    >
-                      清空
-                    </button>
-                  </div>
-                  {prefNotice ? <p className="model-config-prefs-notice" role="status">{prefNotice}</p> : null}
-                  <div className="model-config-prefs-list">
-                    {prefs.entries.length === 0 ? (
-                      <p className="model-config-prefs-empty">还没有档案：点「归纳生成记录」自动生成，或在图片预览里点「偏好录入」手动添加</p>
-                    ) : prefs.entries.map((entry) => (
-                      <span key={entry.id} className="model-config-prefs-chip" title={entry.text}>
-                        <i className={`is-${entry.source}`}>{entry.source === 'manual' ? '手动' : '归纳'}</i>
-                        <em>{entry.text}</em>
-                        <button
-                          type="button"
-                          aria-label={`删除偏好：${entry.text}`}
-                          onClick={() => void runPrefAction('remove', { id: entry.id })}
-                        >
-                          ×
-                        </button>
-                      </span>
-                    ))}
-                  </div>
-                </div>
-  );
-
   return (
     <div className="hb-modal-overlay" role="presentation">
       <div
@@ -664,13 +894,14 @@ export default function SettingsPanel({ onClose }: SettingsPanelProps) {
           <div className="model-config-notice" role="status">{notice}</div>
         ) : null}
 
+        {!editorOpen && !roleDetailOpen ? (
         <div className="model-config-tabs" role="tablist" aria-label="设置分类">
           <button
             type="button"
             role="tab"
             aria-selected={tab === 'image'}
             className={`model-config-tab ${tab === 'image' ? 'active' : ''}`}
-            onClick={() => setTab('image')}
+            onClick={() => { setTab('image'); setEditorOpen(false); }}
           >
             生图模型
           </button>
@@ -679,40 +910,87 @@ export default function SettingsPanel({ onClose }: SettingsPanelProps) {
             role="tab"
             aria-selected={tab === 'text'}
             className={`model-config-tab ${tab === 'text' ? 'active' : ''}`}
-            onClick={() => setTab('text')}
+            onClick={() => { setTab('text'); setEditorOpen(false); }}
           >
             语言模型
           </button>
           <button
             type="button"
             role="tab"
+            aria-selected={tab === 'video'}
+            className={`model-config-tab ${tab === 'video' ? 'active' : ''}`}
+            onClick={() => { setTab('video'); setEditorOpen(false); }}
+          >
+            视频模型
+          </button>
+          <button
+            type="button"
+            role="tab"
             aria-selected={tab === 'preferences'}
             className={`model-config-tab ${tab === 'preferences' ? 'active' : ''}`}
-            onClick={() => setTab('preferences')}
+            onClick={() => { setTab('preferences'); setEditorOpen(false); }}
           >
             偏好档案
           </button>
         </div>
+        ) : null}
 
-        {tab !== 'preferences' ? (
+        {tab === 'preferences' ? (
+          <div className="model-config-modal-body model-config-roles-panel">
+            <ChatRolesSettings onDetailChange={setRoleDetailOpen} />
+          </div>
+        ) : editorOpen ? (
           <>
-        <div className="model-config-split">
-          <aside className="model-config-profiles" aria-label={tab === 'image' ? '生图配置列表' : '语言模型配置列表'}>
+        <div className="model-config-detail-head">
+          <button type="button" className="model-config-back" onClick={() => setEditorOpen(false)}>
+            <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
+              <path d="M10 3.5 5.5 8l4.5 4.5M6 8h7" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+            <span>返回</span>
+          </button>
+          <div className="model-config-detail-actions">
+            <strong>{selected?.name || '模型配置'}</strong>
+            {selected ? (
+              <>
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={selected.enabled}
+                  aria-label={`${selected.enabled ? '停用' : '启用'} ${selected.name}`}
+                  title={selected.enabled ? '停用这路配置' : '启用这路配置'}
+                  className={`model-config-profile-switch ${selected.enabled ? 'on' : ''}`}
+                  disabled={saving}
+                  onClick={() => toggleDraftEnabled(selected)}
+                >
+                  <span className="model-config-profile-switch-track" aria-hidden="true"><i /></span>
+                </button>
+                <button type="button" className="model-config-delete-action" aria-label={`删除 ${selected.name}`} title="删除配置" onClick={deleteSelectedProfile}>
+                  <TrashIcon />
+                  <span>删除</span>
+                </button>
+              </>
+            ) : null}
+          </div>
+        </div>
+        <div className="model-config-split is-detail">
+          <aside className="model-config-profiles" aria-label={tab === 'image' ? '生图配置列表' : tab === 'video' ? '视频配置列表' : '语言模型配置列表'}>
             <div className="model-config-profile-list">
-              <section className="model-config-profile-group" aria-label={tab === 'image' ? '生图配置' : '语言模型配置'}>
-                {(tab === 'image' ? imageProfiles : textProfiles).length > 0
-                  ? (tab === 'image' ? imageProfiles : textProfiles).map(renderProfileRow)
+              <section className="model-config-profile-group" aria-label={tab === 'image' ? '生图配置' : tab === 'video' ? '视频配置' : '语言模型配置'}>
+                  {(tab === 'image' ? imageProfiles : tab === 'video' ? videoProfiles : textProfiles).length > 0
+                  ? (tab === 'image' ? imageProfiles : tab === 'video' ? videoProfiles : textProfiles).map(renderProfileRow)
                   : (
                     <p className="model-config-profile-empty">
-                      {tab === 'image' ? '还没有生图配置' : '还没有语言模型配置'}
+                      {!settings || storeError
+                        ? (loading ? '正在读取已保存的模型配置…' : '配置读取失败；本机原配置未被清空')
+                        : tab === 'image' ? '还没有生图配置' : tab === 'video' ? '还没有视频配置' : '还没有语言模型配置'}
                     </p>
                   )}
               </section>
             </div>
             <div className="model-config-profile-adds">
-              <button type="button" className={`model-config-profile-add ${tab === 'text' ? 'is-text' : ''}`} onClick={() => handleAddProfile(tab === 'image' ? 'image' : 'text')}>
+              <button type="button" className={`model-config-profile-add ${tab === 'text' ? 'is-text' : ''}`} disabled={!settings || loading || Boolean(storeError)} onClick={() => handleAddProfile(tab === 'image' ? 'image' : tab === 'video' ? 'video' : 'text')}>
                 <PlusIcon />
-                <span>{tab === 'image' ? '添加生图配置' : '添加语言模型配置'}</span>
+                <span>{tab === 'image' ? '添加生图配置' : tab === 'video' ? '添加视频配置' : '添加语言模型配置'}</span>
               </button>
             </div>
           </aside>
@@ -720,16 +998,24 @@ export default function SettingsPanel({ onClose }: SettingsPanelProps) {
           <div className="model-config-modal-body">
             {!selected ? (
               <div className="model-config-loading" role="status">
-                <strong>{storeError ? '配置读取失败' : '配置加载中…'}</strong>
-                <span>
-                  {/* bridge 不在时 fetch 抛的是 "Failed to fetch"，直接展示用户看不懂 */}
-                  {/fetch failed|failed to fetch/i.test(storeError)
-                    ? '无法连接本机服务：请确认 bridge（端口 3788）是否在运行，terminal 里执行 npm start 或双击 启动.command 即可'
-                    : (storeError || '如果一直停在这里，说明本机 bridge（3788）没有在运行；terminal 里执行 npm start 或 启动.command 即可。')}
-                </span>
-                <button type="button" onClick={() => void load()} disabled={loading}>
-                  {loading ? '读取中…' : (storeError ? '重试读取' : '重新载入')}
-                </button>
+                {drafts.length > 0 && !loading && !storeError ? (
+                  <>
+                    <strong>{tab === 'video' ? '还没有视频配置' : tab === 'text' ? '还没有语言模型配置' : '还没有生图配置'}</strong>
+                    <span>从左侧添加配置后，再填写接口和模型信息。</span>
+                  </>
+                ) : (
+                  <>
+                    <strong>{storeError ? '配置读取失败' : '配置加载中…'}</strong>
+                    <span>
+                      {storeError
+                        ? `${/fetch failed|failed to fetch|timed out/i.test(storeError) ? '无法读取本机 Bridge（端口 3788）' : storeError}。原配置仍保存在本机，没有被清空。`
+                        : '正在从本机 Bridge（端口 3788）读取配置。'}
+                    </span>
+                    <button type="button" onClick={() => void load()} disabled={loading}>
+                      {loading ? '读取中…' : (storeError ? '重试读取' : '重新载入')}
+                    </button>
+                  </>
+                )}
               </div>
             ) : null}
             {selected ? (
@@ -737,12 +1023,12 @@ export default function SettingsPanel({ onClose }: SettingsPanelProps) {
                 {/* 没配好就黄字拍在脸上：以前要等画布上生成失败才知道少选了模型 */}
                 {!selectedReady ? (
                   <p className="model-config-warn" role="alert">
-                    {selected?.kind === 'text' ? '这路语言模型还没配好' : '这路生图模型还没配好'}
-                    ：填好 API Key，再获取并勾选模型，或在下方手动填写准确模型名{selected?.kind === 'text' ? '' : '，否则画布上无法出图'}。
+                    {selected?.kind === 'text' ? '这路语言模型还没配好' : selected?.kind === 'video' ? '这路视频模型还没配好' : '这路生图模型还没配好'}
+                    ：填好 API Key，再获取并勾选模型，或在下方手动填写准确模型名{selected?.kind === 'text' ? '' : selected?.kind === 'video' ? '，否则视频节点无法生成' : '，否则画布上无法出图'}。
                   </p>
                 ) : null}
+                <div className="model-config-provider-module">
                 <section className="model-config-group" aria-label="基础信息">
-                  <h3 className="model-config-group-title">基础信息</h3>
                   <div className="model-config-form-grid">
                 <div className="model-config-field">
                   <span className="model-config-field-label">配置名称</span>
@@ -750,7 +1036,7 @@ export default function SettingsPanel({ onClose }: SettingsPanelProps) {
                     <input
                       className="model-config-input"
                       value={selected.name}
-                      placeholder={selected.kind === 'text' ? '例如：提示词优化模型' : '例如：主中转站 / 备用 Key'}
+                      placeholder={selected.kind === 'text' ? '例如：提示词优化模型' : selected.kind === 'video' ? '例如：视频中转站' : '例如：主中转站 / 备用 Key'}
                       onChange={(event) => patchSelected({ name: event.target.value })}
                     />
                   </div>
@@ -769,8 +1055,8 @@ export default function SettingsPanel({ onClose }: SettingsPanelProps) {
                         <option value="responses">Responses（/responses）</option>
                       </select>
                     </div>
-                  ) : (
-                    <div className="model-config-field is-compact">
+                  ) : selected.kind === 'image' ? (
+                    <div className="model-config-field">
                       <span className="model-config-field-label">默认尺寸</span>
                       <select
                         className="model-config-select"
@@ -782,19 +1068,18 @@ export default function SettingsPanel({ onClose }: SettingsPanelProps) {
                         ))}
                       </select>
                     </div>
-                  )}
+                  ) : null}
                   </div>
                 </section>
 
                 <section className="model-config-group" aria-label="服务连接">
-                  <h3 className="model-config-group-title">服务连接</h3>
                   <div className="model-config-form-grid">
                     <div className="model-config-field">
                       <span className="model-config-field-label">API Base URL</span>
                       <input
                         className="model-config-input"
                         value={selected.baseUrl}
-                        placeholder="https://api.openai.com/v1"
+                        placeholder={selected.kind === 'video' ? '填写中转站提供的视频 API Base URL' : 'https://api.openai.com/v1'}
                         onChange={(event) => patchSelected({ baseUrl: event.target.value })}
                       />
                     </div>
@@ -822,8 +1107,8 @@ export default function SettingsPanel({ onClose }: SettingsPanelProps) {
                 </section>
 
                 <section className="model-config-group" aria-label="默认模型">
-                  <h3 className="model-config-group-title">默认使用模型</h3>
                   <div className="model-config-field">
+                  <span className="model-config-field-label">默认使用模型</span>
                   <div className="model-config-model-picker" ref={pickerRef}>
                     <button
                       type="button"
@@ -857,9 +1142,9 @@ export default function SettingsPanel({ onClose }: SettingsPanelProps) {
                   </div>
                 </div>
                 </section>
+                </div>
 
-                <section className="model-config-group" aria-label="可用模型">
-                  <h3 className="model-config-group-title">可用模型</h3>
+                <section className="model-config-group model-config-model-catalog" aria-label="可用模型">
                   <div className="model-config-model-section">
                   <div className="model-config-model-section-head">
                     <div>
@@ -912,9 +1197,158 @@ export default function SettingsPanel({ onClose }: SettingsPanelProps) {
                   </div>
                 </section>
 
-                <div className="model-config-foot-hint">
-                  Key 由本机 bridge 进程保管，只存在这台机器上。生图配置的「测试」只请求模型列表，不会生成图片；语言模型的「测试」会发送一条短文本请求，可能消耗少量文本额度。
-                </div>
+                {selected.kind === 'video' ? (
+                  <section className="model-config-advanced-panel" aria-label="视频高级接口设置">
+                    <button
+                      type="button"
+                      className="model-config-advanced-toggle"
+                      aria-expanded={videoAdvancedOpen}
+                      onClick={() => setVideoAdvancedOpen((open) => !open)}
+                    >
+                      <span className={`model-config-advanced-chevron${videoAdvancedOpen ? ' is-open' : ''}`} aria-hidden="true">
+                        <svg viewBox="0 0 16 16" fill="none"><path d="m3.5 6 4.5 4 4.5-4" /></svg>
+                      </span>
+                      <span className="model-config-advanced-copy">
+                        <strong>高级接口设置</strong>
+                        <small>仅在接口类型或字段与默认值不同时修改</small>
+                      </span>
+                      <span className="model-config-advanced-status">
+                        {selected.videoApiMode === 'custom' ? '自定义接口' : selected.videoApiMode === 'auto' ? '自动识别' : '协议预设'}
+                      </span>
+                    </button>
+                    {videoAdvancedOpen ? (
+                      <div className="model-config-advanced-content">
+                        <label className="model-config-field">
+                          <span className="model-config-field-label">接口类型</span>
+                          <select
+                            className="model-config-select"
+                            value={selected.videoApiMode}
+                            onChange={(event) => {
+                              const videoApiMode = event.target.value as VideoApiMode;
+                              patchSelected({ videoApiMode });
+                            }}
+                          >
+                            <option value="auto">自动识别</option>
+                            <option value="openai-videos">OpenAI 兼容</option>
+                            <option value="xai-videos">Grok Imagine（xAI 格式）</option>
+                            <option value="grsai-generate">GrsAI Generate</option>
+                            <option value="media-v1">Media API</option>
+                            <option value="custom">自定义接口</option>
+                          </select>
+                        </label>
+                        {selected.videoApiMode === 'custom' ? (
+                          <>
+                            <p className="model-config-custom-hint">
+                              根据服务商文档填写。请求体使用 JSON 和变量，不执行 JavaScript；常用变量：model、prompt、seconds、ratio、resolution、imageUrls。
+                            </p>
+                            <div className="model-config-form-grid">
+                              <label className="model-config-field">
+                                <span className="model-config-field-label">创建任务路径</span>
+                                <input
+                                  className="model-config-input"
+                                  value={selected.videoCustomConfig.createPath}
+                                  placeholder="/videos/generations"
+                                  onChange={(event) => patchSelectedVideoConfig({ createPath: event.target.value })}
+                                />
+                              </label>
+                              <label className="model-config-field">
+                                <span className="model-config-field-label">查询任务路径</span>
+                                <input
+                                  className="model-config-input"
+                                  value={selected.videoCustomConfig.pollPath}
+                                  placeholder="/videos/{{taskId}}"
+                                  onChange={(event) => patchSelectedVideoConfig({ pollPath: event.target.value })}
+                                />
+                              </label>
+                              <label className="model-config-field">
+                                <span className="model-config-field-label">本机图片发送方式</span>
+                                <select
+                                  className="model-config-select"
+                                  value={selected.videoCustomConfig.imageTransport}
+                                  onChange={(event) => patchSelectedVideoConfig({ imageTransport: event.target.value as CustomVideoApiConfig['imageTransport'] })}
+                                >
+                                  <option value="public-url">公网 HTTPS 图片链接</option>
+                                  <option value="data-url">内联 Data URL</option>
+                                </select>
+                              </label>
+                            </div>
+                            <label className="model-config-field">
+                              <span className="model-config-field-label">请求体 JSON</span>
+                              <textarea
+                                className="model-config-template model-config-template-tall"
+                                value={selected.videoCustomConfig.requestBodyTemplate}
+                                spellCheck={false}
+                                onChange={(event) => patchSelectedVideoConfig({ requestBodyTemplate: event.target.value })}
+                              />
+                            </label>
+                            <div className="model-config-template-preview-actions">
+                              <button type="button" className="model-config-prefs-action" onClick={previewCustomVideoConfig}>
+                                预览请求
+                              </button>
+                              <span>仅本机预览，不会调用服务商</span>
+                            </div>
+                            {videoTemplatePreviewError ? <p className="model-config-error" role="alert">{videoTemplatePreviewError}</p> : null}
+                            {videoTemplatePreview ? <pre className="model-config-template-preview">{videoTemplatePreview}</pre> : null}
+                            <details className="model-config-optional-settings">
+                              <summary>
+                                <span>附加请求头（JSON，可选）</span>
+                                {selected.videoCustomConfig.headersTemplate.trim() !== '{}' ? <small>已配置</small> : null}
+                              </summary>
+                              <p className="model-config-custom-hint">
+                                这是 JSON，不是 JS。通常留空即可，系统会自动发送 API Key；只有服务商要求额外请求头时才填写。
+                              </p>
+                              <textarea
+                                className="model-config-template"
+                                value={selected.videoCustomConfig.headersTemplate}
+                                spellCheck={false}
+                                placeholder={'{\n  "X-API-Key": "{{apiKey}}"\n}'}
+                                onChange={(event) => patchSelectedVideoConfig({ headersTemplate: event.target.value })}
+                              />
+                            </details>
+                            <details className="model-config-optional-settings">
+                              <summary>
+                                <span>响应字段映射（仅字段不同时修改）</span>
+                              </summary>
+                              <div className="model-config-custom-mappings">
+                                <label className="model-config-field">
+                                  <span className="model-config-field-label">任务 ID 路径</span>
+                                  <input className="model-config-input" value={selected.videoCustomConfig.taskIdPath} onChange={(event) => patchSelectedVideoConfig({ taskIdPath: event.target.value })} />
+                                </label>
+                                <label className="model-config-field">
+                                  <span className="model-config-field-label">状态路径</span>
+                                  <input className="model-config-input" value={selected.videoCustomConfig.statusPath} onChange={(event) => patchSelectedVideoConfig({ statusPath: event.target.value })} />
+                                </label>
+                                <label className="model-config-field">
+                                  <span className="model-config-field-label">进度路径</span>
+                                  <input className="model-config-input" value={selected.videoCustomConfig.progressPath} onChange={(event) => patchSelectedVideoConfig({ progressPath: event.target.value })} />
+                                </label>
+                                <label className="model-config-field">
+                                  <span className="model-config-field-label">视频地址路径</span>
+                                  <input className="model-config-input" value={selected.videoCustomConfig.outputUrlPath} onChange={(event) => patchSelectedVideoConfig({ outputUrlPath: event.target.value })} />
+                                </label>
+                                <label className="model-config-field">
+                                  <span className="model-config-field-label">错误信息路径</span>
+                                  <input className="model-config-input" value={selected.videoCustomConfig.errorPath} onChange={(event) => patchSelectedVideoConfig({ errorPath: event.target.value })} />
+                                </label>
+                                <label className="model-config-field model-config-field-wide">
+                                  <span className="model-config-field-label">状态值映射 JSON</span>
+                                  <textarea
+                                    className="model-config-template"
+                                    value={selected.videoCustomConfig.statusMap}
+                                    spellCheck={false}
+                                    placeholder={'{\n  "success": "completed",\n  "error": "failed"\n}'}
+                                    onChange={(event) => patchSelectedVideoConfig({ statusMap: event.target.value })}
+                                  />
+                                </label>
+                              </div>
+                            </details>
+                          </>
+                        ) : null}
+                      </div>
+                    ) : null}
+                  </section>
+                ) : null}
+
               </>
             ) : null}
           </div>
@@ -930,7 +1364,7 @@ export default function SettingsPanel({ onClose }: SettingsPanelProps) {
               <button
                 type="button"
                 className="model-config-save"
-                disabled={saving}
+                disabled={saving || loading || Boolean(storeError) || !settings}
                 onClick={() => void handleSave()}
               >
                 {saving ? '保存中...' : '保存配置'}
@@ -940,9 +1374,50 @@ export default function SettingsPanel({ onClose }: SettingsPanelProps) {
         </div>
           </>
         ) : (
-          <div className="model-config-modal-body model-config-tab-panel">
-            {prefsPanel}
-          </div>
+          <section className="model-config-overview" aria-label="模型配置列表">
+            <div className="model-config-overview-toolbar">
+              <button
+                type="button"
+                className="model-config-profile-add"
+                disabled={!settings || loading || Boolean(storeError) || !currentKind}
+                onClick={() => { if (currentKind) handleAddProfile(currentKind); }}
+              >
+                <PlusIcon />
+                <span>添加模型</span>
+              </button>
+            </div>
+            {!settings || loading ? (
+              <div className="model-config-loading" role="status">
+                <strong>配置加载中…</strong>
+                <span>正在读取本机模型配置。</span>
+              </div>
+            ) : storeError ? (
+              <div className="model-config-loading" role="status">
+                <strong>配置读取失败</strong>
+                <button type="button" onClick={() => void load()} disabled={loading}>重试读取</button>
+              </div>
+            ) : overviewProfiles.length > 0 ? (
+              <div className="model-config-overview-list">
+                {overviewProfiles.map((draft) => (
+                  <ProfileOverviewCard
+                    key={draft.id}
+                    draft={draft}
+                    selected={draft.id === selectedId}
+                    canTest={canTestProfile(draft)}
+                    testing={testingProfileId === draft.id}
+                    saving={saving}
+                    onOpen={(id) => { setSelectedId(id); setEditorOpen(true); }}
+                    onToggleModel={toggleOverviewModel}
+                    onTest={(id) => void handleTest(id)}
+                  />
+                ))}
+              </div>
+            ) : (
+              <div className="model-config-overview-empty">
+                <strong>{tab === 'image' ? '还没有生图模型' : tab === 'text' ? '还没有语言模型' : '还没有视频模型'}</strong>
+              </div>
+            )}
+          </section>
         )}
       </div>
     </div>

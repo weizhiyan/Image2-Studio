@@ -1,4 +1,4 @@
-import type { CanvasNodeVersion } from '@/types';
+import type { CanvasGroupColor, CanvasNodeVersion } from '@/types';
 
 /** 节点组件 ↔ 页面协调层走自定义事件：节点保持纯展示，页面持有 ReactFlow 实例。 */
 
@@ -49,7 +49,29 @@ export const NODE_EVENTS = {
   versionsFit: 'hb:image-node-versions-fit',
   /** composer：参考图 chips 拖拽换序（影响「图一 / 图二」编号与发送顺序）。 */
   referenceReorder: 'hb:image-node-reference-reorder',
+  /* ── 视频节点（kind: 'video'）──
+     视频是长任务，事件语义与图片的 run 不同：提交后节点进入进度态，
+     bridge 轮询到结果经 SSE 回填，取消只是摘掉本地监听、上游任务照样跑（省得重复计费）。 */
+  videoRun: 'hb:video-node-run',
+  videoOptimize: 'hb:video-node-optimize',
+  videoCancel: 'hb:video-node-cancel',
+  videoRecover: 'hb:video-node-recover',
+  videoRedit: 'hb:video-node-redit',
+  textContent: 'hb:canvas-text-content',
+  textOptimize: 'hb:canvas-text-optimize',
+  textOptimizeResult: 'hb:canvas-text-optimize-result',
 } as const;
+
+/** 编组节点只负责发意图；改图、撤销与级联删除仍由 CanvasPage 统一处理。 */
+export const CANVAS_GROUP_EVENTS = {
+  rename: 'hb:canvas-group-rename',
+  color: 'hb:canvas-group-color',
+  dissolve: 'hb:canvas-group-dissolve',
+} as const;
+
+export interface CanvasGroupRenameDetail { nodeId: string; label: string }
+export interface CanvasGroupColorDetail { nodeId: string; color: CanvasGroupColor }
+export interface CanvasGroupActionDetail { nodeId: string }
 
 export interface NodePromptDetail { nodeId: string; prompt: string }
 export interface NodeRunDetail { nodeId: string; prompt: string }
@@ -72,3 +94,14 @@ export interface NodeConnectDetail {
   clientY: number;
   direction: 'source' | 'target';
 }
+
+/** 视频节点提交：参数已保存在节点 data，页面按节点当前值提交。 */
+export interface NodeVideoRunDetail { nodeId: string; prompt: string }
+export interface NodeVideoOptimizeDetail { nodeId: string; prompt: string; action?: 'optimize' | 'undo' }
+export interface NodeVideoCancelDetail { nodeId: string }
+export interface NodeVideoRecoverDetail { nodeId: string }
+export interface NodeTextContentDetail { nodeId: string; text: string }
+export interface NodeTextOptimizeDetail { nodeId: string; text: string }
+export interface NodeTextOptimizeResultDetail { nodeId: string; text?: string; error?: string }
+/** 视频完成后「再生成一版」：节点退回输入态，提示词与参数保留。 */
+export interface NodeVideoReditDetail { nodeId: string }

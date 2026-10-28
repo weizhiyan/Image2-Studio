@@ -5,12 +5,13 @@ import { MEDIA_DIR } from './paths.js';
 import { imageExtensionOf } from './files.js';
 import { pushImage } from './hub.js';
 import { findProfile, readSettings, resolveTextProfile, type ModelProfile } from './settings.js';
-import { generateImages } from './imageApi.js';
+import { generateImages, IMAGE_GENERATION_TIMEOUT_MESSAGE, IMAGE_GENERATION_TIMEOUT_MS } from './imageApi.js';
 import { detectReferenceUsage, enhancePromptDetailed, fidelityForUsage, type EnhanceParams, type PromptEnhancementResult } from './textApi.js';
 import { buildMemoryContext, memoryPromptBlock, type MemoryMessage, type PersistedMemory } from './chatMemory.js';
 import { appendCanvasImageNodes, readCanvasDoc, type CanvasNodeRecord } from './http.js';
 import { putChatThread, readChatThreads } from './chat.js';
 import { askUserToolDef, callAgentModel, generateImageToolDef, normalizeAskUserQuestions, type AgentMessage, type AgentToolCall, type AskUserQuestion } from './agent.js';
+import { normalizePromptRoleSnapshot, promptRoleContext, type PromptRoleSnapshot } from './skills.js';
 
 /**
  * Agent 运行循环（方案 §12/§13）：
@@ -112,6 +113,8 @@ export interface StartRunRequest {
   /** 占位 assistant 消息 id：事件与最终落盘都认它。 */
   assistantMessageId: string;
   modelSelection?: { textProfileId?: string; imageProfileId?: string; imageModel?: string };
+  /** 发送时选中的角色快照；未选择时不注入任何角色或 Skill。 */
+  agentRole?: PromptRoleSnapshot;
 }
 
 interface ChatRun {
@@ -138,7 +141,7 @@ const MAX_BUFFERED_EVENTS = 500;
 /** 单轮 agent 循环的模型回合数 / 生图次数上限（方案 §12：单轮最多 2 次生图）。 */
 const MAX_MODEL_ROUNDS = 4;
 const MAX_TOOL_CALLS_PER_RUN = 2;
-const IMAGE_TOOL_TIMEOUT_MS = 180_000;
+const IMAGE_TOOL_TIMEOUT_MS = IMAGE_GENERATION_TIMEOUT_MS;
 
 function withImageToolTimeout<T>(run: ChatRun, task: Promise<T>): Promise<T> {
   return new Promise<T>((resolve, reject) => {
@@ -147,7 +150,7 @@ function withImageToolTimeout<T>(run: ChatRun, task: Promise<T>): Promise<T> {
       if (settled) return;
       settled = true;
       run.abort.abort();
-      reject(new Error('生图接口超过 180 秒没有返回结果，已自动停止；请检查该模型的图生图接口或稍后重试'));
+      reject(new Error(IMAGE_GENERATION_TIMEOUT_MESSAGE));
     }, IMAGE_TOOL_TIMEOUT_MS);
     task.then((value) => {
       if (settled) return;
@@ -820,6 +823,8 @@ function finalizeMessage(
 }
 
 async function executeRun(run: ChatRun, request: StartRunRequest): Promise<void> {
+  request.agentRole = normalizePromptRoleSnapshot(request.agentRole);
+  const rolePrompt = promptRoleContext(request.agentRole);
   const settings = await readSettings();
   const textProfile = resolveTextProfile(settings, request.modelSelection?.textProfileId);
   const imageProfile = findProfile(settings, request.modelSelection?.imageProfileId);
@@ -841,6 +846,8 @@ async function executeRun(run: ChatRun, request: StartRunRequest): Promise<void>
     { inheritMode: memory.visualWorkingSet.inheritMode, baseImageUrl: memory.visualWorkingSet.base?.url },
   );
   await hydrateAgentHistoryImages(messages);
+  const currentUserMessage = [...messages].reverse().find((message) => message.role === 'user');
+  const visualContextImages = currentUserMessage?.images || [];
   const memoryUpdatedAt = new Date().toISOString();
   request.thread.memory = {
     ...(request.thread.memory || {}),
@@ -868,8 +875,9 @@ async function executeRun(run: ChatRun, request: StartRunRequest): Promise<void>
     for (let round = 0; round < MAX_MODEL_ROUNDS; round += 1) {
       if (run.status !== 'running') break;
       const turn = await callAgentModel(textProfile as ModelProfile, {
-        systemSpec: `${buildAgentSystemSpec()}\n\n${memoryPromptBlock(memory)}`,
+        systemSpec: `${buildAgentSystemSpec()}\n\n${memoryPromptBlock(memory)}${rolePrompt}`,
         messages,
+        visualContextImages,
         tools: [generateImageToolDef(), askUserToolDef()],
         onTextDelta: (chunk) => emit(run, { type: 'message_delta', text: chunk }),
         signal: run.abort.signal,

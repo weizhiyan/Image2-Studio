@@ -12,6 +12,7 @@ const emptyState = {
   activeThreadId: '',
   activeCanvasId: '',
   open: false,
+  activeRoleId: '',
   draft: '',
   draftAttachments: [],
   draftBase: null,
@@ -182,6 +183,35 @@ describe('chatStore 全局线程', () => {
     expect(useChatStore.getState().draft).toBe('');
     expect(useChatStore.getState().draftAttachments).toHaveLength(0);
     expect(useChatStore.getState().draftBase).toBeNull();
+  });
+
+  it('角色选择不跨线程：新建、切换和删除当前线程都恢复通用', () => {
+    const store = useChatStore.getState();
+    const first = store.createThread('canvas-1');
+    store.setActiveRole('role-a');
+    expect(useChatStore.getState().activeRoleId).toBe('role-a');
+
+    const second = store.createThread('canvas-2');
+    expect(useChatStore.getState().activeRoleId).toBe('');
+
+    store.setActiveRole('role-b');
+    store.switchThread(first);
+    expect(useChatStore.getState().activeRoleId).toBe('');
+
+    store.setActiveRole('role-c');
+    store.deleteThread(first);
+    expect(useChatStore.getState().activeRoleId).toBe('');
+    expect(useChatStore.getState().activeThreadId).toBe(second);
+  });
+
+  it('删除其他线程不改变当前角色', () => {
+    const store = useChatStore.getState();
+    const current = store.createThread('canvas-1');
+    const other = store.createThread('canvas-2');
+    store.switchThread(current);
+    store.setActiveRole('role-a');
+    store.deleteThread(other);
+    expect(useChatStore.getState().activeRoleId).toBe('role-a');
   });
 });
 

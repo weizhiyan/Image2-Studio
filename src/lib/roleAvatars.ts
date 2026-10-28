@@ -1,0 +1,18 @@
+export const ROLE_AVATARS = [
+  { name: '鸭子', url: '/avatars/role-01.webp' },
+  { name: '公鸡', url: '/avatars/role-02.webp' },
+  { name: '杜宾', url: '/avatars/role-03.webp' },
+  { name: '墨镜猫', url: '/avatars/role-04.webp' },
+  { name: '青蛙', url: '/avatars/role-05.webp' },
+  { name: '鲨鱼', url: '/avatars/role-06.webp' },
+  { name: '仓鼠', url: '/avatars/role-07.webp' },
+  { name: '公牛', url: '/avatars/role-08.webp' },
+  { name: '耳机少年', url: '/avatars/role-09.webp' },
+  { name: '蓝帽少年', url: '/avatars/role-10.webp' },
+  { name: '丸子头女孩', url: '/avatars/role-11.webp' },
+  { name: '短发青年', url: '/avatars/role-12.webp' },
+  { name: '粉发女孩', url: '/avatars/role-13.webp' },
+  { name: '黑发少年', url: '/avatars/role-14.webp' },
+  { name: '大胡子', url: '/avatars/role-15.webp' },
+  { name: '圆眼镜', url: '/avatars/role-16.webp' },
+] as const;

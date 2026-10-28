@@ -51,7 +51,7 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  color: var(--color-accent-blue);
+  color: var(--control-fg-selected);
 }
 
 .image-node-model-picker .image-model-option-check svg {
@@ -276,4 +276,96 @@
   flex: 0 0 auto;
   gap: 0;
   padding: 0;
+}
+
+.image-node-toolbar.hb-video-toolbar .hb-video-model-anchor {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+
+.image-node-toolbar.hb-video-toolbar .hb-video-model-label {
+  max-width: 156px;
+}
+
+.image-node-toolbar.hb-video-toolbar .hb-video-settings-button {
+  gap: var(--spacing-2);
+}
+
+.image-node-toolbar.hb-video-toolbar .hb-video-settings-label {
+  max-width: 228px;
+}
+
+.image-node-toolbar .video-settings-popover {
+  width: 304px;
+  max-width: min(calc(100vw - 24px), 304px);
+}
+
+.video-settings-ratio-tabs .gen-settings-tab {
+  font-size: var(--font-size-xs);
+  white-space: nowrap;
+}
+
+.video-settings-audio-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 32px;
+  padding: 0 var(--spacing-1);
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-sm);
+}
+
+.video-settings-audio-row .image-node-toolbar-switch {
+  padding: 0;
+}
+
+/* ── schema 驱动的视频参数控件（media-v1）──
+   中转站按模型给出参数定义，字段名与档位各家不同：
+   档位多的（时长 15 档）用原生 select，少的用上面的分段 Tab。 */
+.video-param-select,
+.video-param-input {
+  box-sizing: border-box;
+  width: 100%;
+  height: var(--control-height-compact);
+  border: 1px solid var(--color-border-default);
+  border-radius: var(--radius-sm);
+  background: var(--color-bg-surface);
+  color: var(--color-text-primary);
+  padding: 0 var(--spacing-2);
+  font-family: var(--font-sans);
+  font-size: var(--font-size-sm);
+  outline: none;
+}
+
+.video-param-select:focus-visible,
+.video-param-input:focus-visible {
+  border-color: var(--color-border-focus);
+}
+
+.video-param-hint {
+  margin: 0;
+  padding: 0 var(--spacing-1);
+  color: var(--color-text-tertiary);
+  font-size: var(--font-size-xs);
+  line-height: var(--line-height-normal);
+}
+
+.video-param-hint.is-error {
+  color: color-mix(in srgb, var(--color-accent-red) 78%, var(--color-text-primary));
+}
+
+.video-price-hint {
+  border-radius: var(--radius-xs);
+  background: var(--color-ui-control-panel);
+  padding: var(--spacing-2);
+}
+
+.video-price-hint.is-low {
+  color: var(--color-accent-amber);
+}
+
+.video-param-required {
+  color: var(--color-accent-red);
+  font-style: normal;
 }

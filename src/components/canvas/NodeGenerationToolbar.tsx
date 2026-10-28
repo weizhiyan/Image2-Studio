@@ -8,6 +8,7 @@ import {
   resolveAutoRatio,
 } from '@/lib/aspect';
 import type { ImageModelOption } from '@/lib/imageModelOptions';
+import QuantitySegments from '@/components/QuantitySegments';
 import { AiGlyphIcon, ChevronGlyphIcon, ModelGlyphIcon, RatioGlyphIcon } from './NodeToolbarIcons';
 import './GenSettingsPopover.css';
 
@@ -16,11 +17,6 @@ type OpenMenu = 'model' | 'gen' | null;
 /** 比例弹窗 Tab 档位（Figma 2665:1983 只收四档）：自动打头，其后手动档从宽到窄。
  *  lib 的 RATIO_TOOLBAR_OPTIONS 是旧九档全量清单，弹窗 UI 只展示这四档。 */
 const RATIO_TABS = [AUTO_RATIO, '1:1', '16:9', '9:16'] as const;
-
-/** 数量弹窗档位：Figma 2665:1983 定稿四档（一张 ~ 四张）。
- *  lib 的 MAX_IMAGE_COUNT 是接口上限，超出的档位不进弹窗；老数据里 5~8 的历史取值
- *  临时放开显示，否则那一格会「一个档都没亮」，看着像坏了。 */
-const COUNT_TABS = 4;
 
 /** 分段滑块位置：把「当前档索引 / 总档数」写进行内变量，CSS 的 ::after 滑块据此位移。
  *  变量在 CSS 里有兜底声明（见 GenSettingsPopover.css），不会触发幽灵 Token 守护。 */
@@ -233,28 +229,13 @@ export default function NodeGenerationToolbar({
           </div>
           <div className="gen-settings-block">
             <span className="gen-settings-block-title">数量</span>
-            <div
-              className="gen-settings-tabs"
-              style={segmentStyle(clampImageCount(imageCount) - 1, Math.min(MAX_IMAGE_COUNT, Math.max(COUNT_TABS, imageCount)))}
-            >
-              {Array.from({ length: Math.min(MAX_IMAGE_COUNT, Math.max(COUNT_TABS, imageCount)) }, (_, index) => {
-                const count = index + 1;
-                const active = count === imageCount;
-                return (
-                  <button
-                    key={count}
-                    type="button"
-                    role="menuitemradio"
-                    aria-checked={active}
-                    className={`gen-settings-tab ${active ? 'active' : ''}`}
-                    title={`一次生成 ${count} 张`}
-                    onClick={() => onSelectImageCount(count)}
-                  >
-                    <span>{count}</span>
-                  </button>
-                );
-              })}
-            </div>
+            <QuantitySegments
+              ariaLabel="图片数量"
+              min={1}
+              max={Math.min(MAX_IMAGE_COUNT, Math.max(4, imageCount))}
+              value={clampImageCount(imageCount)}
+              onChange={onSelectImageCount}
+            />
           </div>
         </div>
       ) : null}

@@ -10,6 +10,8 @@ export function collectMediaUrls(data: CanvasNodeData): string[] {
   };
   push(data.imageUrl);
   for (const version of data.versions || []) push(version.imageUrl);
+  // 视频节点的成品：与图片同一套清理逻辑，只是字段不同（视频文件体积大，漏删更疼）
+  push(data.videoUrl);
   return urls;
 }
 

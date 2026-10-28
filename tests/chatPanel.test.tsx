@@ -112,6 +112,34 @@ describe('ChatMessageList', () => {
     expect(html).toContain('点击画布图片即可引用');
   });
 
+  it('完成的 AI 回复提供应用为视频节点入口', () => {
+    useChatStore.getState().appendMessage('thread-1', {
+      role: 'assistant',
+      content: '镜头缓慢推进，一只纸船顺着河面漂远。',
+      status: 'done',
+    });
+    const html = renderToStaticMarkup(<ChatMessageList {...handlers} />);
+    expect(html).toContain('应用为视频节点');
+  });
+
+  it('隐藏旧版 AI 回复中的 DSML 工具源码，保留普通文字', () => {
+    useChatStore.getState().appendMessage('thread-1', {
+      role: 'assistant',
+      content: [
+        '我按刚确认的方案直接生成。',
+        '<｜｜DSML｜｜ calls><｜｜DSML｜｜ invoke name="generate_image">',
+        '<｜｜DSML｜｜ parameter name="args" string="false">{"prompt":"test"}</｜｜DSML｜｜ parameter>',
+        '</｜｜DSML｜｜ invoke></｜｜DSML｜｜ calls>',
+      ].join(''),
+      status: 'done',
+    });
+
+    const html = renderToStaticMarkup(<ChatMessageList {...handlers} />);
+    expect(html).toContain('我按刚确认的方案直接生成。');
+    expect(html).not.toContain('DSML');
+    expect(html).not.toContain('generate_image');
+  });
+
   it('用户消息：引用 chips（版本级快照）+ 气泡', () => {
     useChatStore.getState().appendMessage('thread-1', {
       role: 'user',
@@ -196,6 +224,27 @@ describe('ChatMessageList', () => {
     expect(html).toContain('hb-chat-tool');
     expect(html).toContain('简约咖啡杯 logo');
     expect(html).toContain('已完成');
+  });
+
+  it('工具失败时默认保持折叠，但错误原因仍然常驻可见', () => {
+    useChatStore.getState().appendMessage('thread-1', { role: 'user', content: '生成图片' });
+    useChatStore.getState().appendMessage('thread-1', {
+      role: 'assistant',
+      content: '',
+      status: 'error',
+      error: '上游接口超时',
+      toolCalls: [{
+        id: 'c-error',
+        name: 'generate_image',
+        args: { prompt: '一只猫', count: 1 },
+        status: 'error',
+        error: '上游接口超时',
+        steps: ['正在调用生图工具'],
+      }],
+    });
+    const html = renderToStaticMarkup(<ChatMessageList {...handlers} />);
+    expect(html).toContain('上游接口超时');
+    expect(html).not.toContain('"prompt": "一只猫"');
   });
 
   it('上下文徽标：续接 / 重置两种文案', () => {

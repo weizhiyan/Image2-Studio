@@ -10,8 +10,8 @@
   place-items: center;
   padding: var(--spacing-4);
   background: color-mix(in srgb, var(--color-bg-base) 76%, transparent);
-  backdrop-filter: blur(8px);
-  -webkit-backdrop-filter: blur(8px);
+  backdrop-filter: var(--surface-modal-backdrop-blur);
+  -webkit-backdrop-filter: var(--surface-modal-backdrop-blur);
 }
 
 .model-config-modal {
@@ -29,8 +29,6 @@
   box-shadow: var(--shadow-lg);
   --enter-y: 6px;
   --enter-scale: 0.99;
-  /* 短值下拉（默认尺寸）收窄后的宽度：刚好放得下 "1024x1024"，不占满半栏 */
-  --model-config-compact-field-width: 136px;
   animation: spring-in var(--motion-normal) var(--ease-out) both;
 }
 
@@ -85,23 +83,23 @@
 .model-config-form-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: var(--spacing-2);
+  column-gap: var(--spacing-6);
+  row-gap: var(--spacing-4);
 }
 
-/* 右栏分组（参考图：基础信息 / 服务连接 / 可用模型）：
-   分组只靠标题层级 + 间距区分，不套卡片——内容不多的表单一块一块包描边只会显得乱。
-   卡片感只留给左栏配置行与「可用模型」的勾选网格（它们是可扫描的列表）。 */
+/* 编辑字段用标签与间距分组，不额外堆分组标题或卡片边框。 */
 .model-config-group {
   display: grid;
   gap: var(--spacing-3);
 }
 
-.model-config-group-title {
-  margin: 0;
-  color: var(--color-text-primary);
-  font-size: var(--font-size-md);
-  font-weight: var(--font-weight-semibold);
-  line-height: 1.4;
+.model-config-provider-module {
+  display: grid;
+  gap: var(--spacing-6);
+}
+
+.model-config-model-catalog {
+  margin-top: var(--spacing-4);
 }
 
 /* 可用模型两列网格（参考图）：长模型名一列放不下，两列能扫更多；
@@ -115,20 +113,271 @@
   padding: 0;
 }
 
-/* 短值字段（默认尺寸）不撑满半栏：靠左收窄，右侧空出来的位置让下一行更好对齐 */
-.model-config-form-grid > .model-config-field.is-compact {
-  justify-self: start;
-  width: var(--model-config-compact-field-width);
-}
-
-.model-config-form-grid > .model-config-field.is-compact .model-config-select {
-  width: 100%;
-}
-
 .model-config-field {
   display: grid;
   gap: 6px;
   min-width: 0;
+}
+
+.model-config-field-wide {
+  grid-column: 1 / -1;
+}
+
+.model-config-image-host-json {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 68px;
+  resize: vertical;
+  border: 1px solid var(--control-border);
+  border-radius: var(--radius-md);
+  background: var(--control-bg);
+  color: var(--color-text-primary);
+  padding: var(--spacing-2);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  line-height: var(--line-height-normal);
+}
+
+.model-config-image-host-json:focus-visible {
+  border-color: var(--control-border-focus);
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.model-config-image-host-preset {
+  align-self: end;
+  display: grid;
+  gap: var(--spacing-1);
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-xs);
+  line-height: var(--line-height-normal);
+}
+
+.model-config-image-host-preset strong {
+  color: var(--color-text-primary);
+  font-weight: var(--font-weight-medium);
+}
+
+.model-config-image-host-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--spacing-3);
+}
+
+.model-config-advanced-toggle {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-2);
+  padding: var(--spacing-2) 0;
+  border: 0;
+  background: transparent;
+  color: var(--color-text-secondary);
+  font: inherit;
+  font-size: var(--font-size-sm);
+  text-align: left;
+  cursor: pointer;
+}
+
+.model-config-advanced-toggle:hover {
+  color: var(--color-text-primary);
+}
+
+.model-config-advanced-panel {
+  display: grid;
+  gap: 0;
+  padding: 0 var(--spacing-3);
+  border: 1px solid var(--surface-panel-border);
+  border-radius: var(--radius-md);
+  background: var(--surface-panel-bg);
+}
+
+.model-config-advanced-panel .model-config-advanced-toggle {
+  min-height: var(--control-height);
+  color: var(--color-text-primary);
+  text-align: left;
+}
+
+.model-config-advanced-panel .model-config-advanced-toggle:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.model-config-advanced-copy {
+  display: grid;
+  gap: var(--spacing-1);
+  min-width: 0;
+}
+
+.model-config-advanced-copy strong {
+  color: var(--color-text-primary);
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-medium);
+}
+
+.model-config-advanced-copy small {
+  color: var(--color-text-tertiary);
+  font-size: var(--font-size-xs);
+  line-height: var(--line-height-normal);
+}
+
+.model-config-advanced-chevron {
+  width: 16px;
+  height: 16px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: transform var(--motion-fast) var(--ease-out);
+}
+
+.model-config-advanced-chevron.is-open {
+  transform: rotate(180deg);
+}
+
+.model-config-advanced-chevron svg {
+  width: 14px;
+  height: 14px;
+  stroke: currentColor;
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.model-config-advanced-status {
+  margin-left: auto;
+  color: var(--color-text-tertiary);
+  font-size: var(--font-size-xs);
+}
+
+.model-config-advanced-status.is-configured {
+  color: var(--color-accent-green);
+}
+
+.model-config-advanced-content {
+  display: grid;
+  gap: var(--spacing-3);
+  padding-top: var(--spacing-1);
+}
+
+.model-config-advanced-panel .model-config-advanced-content {
+  gap: var(--spacing-3);
+  padding: var(--spacing-3) 0;
+  border-top: 1px solid var(--divider-subtle);
+}
+
+.model-config-optional-settings {
+  display: grid;
+  gap: var(--spacing-2);
+  padding-top: var(--spacing-2);
+  border-top: 1px solid var(--divider-subtle);
+}
+
+.model-config-optional-settings summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--spacing-2);
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-sm);
+  cursor: pointer;
+  list-style: none;
+}
+
+.model-config-optional-settings summary::-webkit-details-marker {
+  display: none;
+}
+
+.model-config-optional-settings summary::after {
+  content: '+';
+  color: var(--color-text-tertiary);
+  font-size: var(--font-size-md);
+}
+
+.model-config-optional-settings[open] summary::after {
+  content: '-';
+}
+
+.model-config-optional-settings summary:hover {
+  color: var(--color-text-primary);
+}
+
+.model-config-optional-settings summary:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.model-config-optional-settings summary small {
+  margin-left: auto;
+  color: var(--color-text-tertiary);
+  font-size: var(--font-size-xs);
+}
+
+.model-config-optional-settings .model-config-custom-hint {
+  margin: 0;
+}
+
+.model-config-custom-hint {
+  margin: 0;
+  color: var(--color-text-tertiary);
+  font-size: var(--font-size-xs);
+  line-height: var(--line-height-normal);
+  overflow-wrap: anywhere;
+}
+
+.model-config-template {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 76px;
+  resize: vertical;
+  border: 1px solid var(--control-border);
+  border-radius: var(--radius-sm);
+  background: var(--control-bg);
+  color: var(--color-text-primary);
+  padding: var(--spacing-2);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  line-height: var(--line-height-normal);
+}
+
+.model-config-template-tall {
+  min-height: 156px;
+}
+
+.model-config-template:focus-visible {
+  border-color: var(--control-border-focus);
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.model-config-custom-mappings {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--spacing-3);
+}
+
+.model-config-template-preview-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-3);
+  color: var(--color-text-tertiary);
+  font-size: var(--font-size-xs);
+}
+
+.model-config-template-preview {
+  max-height: 240px;
+  overflow: auto;
+  margin: 0;
+  padding: var(--spacing-3);
+  border: 1px solid var(--surface-panel-border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-panel-bg);
+  color: var(--color-text-secondary);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  line-height: var(--line-height-normal);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 .model-config-name-row {
@@ -309,7 +558,7 @@
 
 .model-config-model-section-head {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   justify-content: space-between;
   gap: var(--spacing-4);
 }
@@ -517,12 +766,6 @@
   color: var(--color-accent-red);
 }
 
-.model-config-foot-hint {
-  color: var(--color-text-tertiary);
-  font-size: var(--font-size-xs);
-  line-height: var(--line-height-normal);
-}
-
 .model-config-modal-foot {
   flex: none;
   display: flex;
@@ -585,7 +828,7 @@
 
 /* ── 多路生图配置：左侧配置列表 + 右侧编辑器（参考图：左栏配置卡片，右栏裸表单分组） ── */
 .model-config-modal-wide {
-  width: min(820px, 100%);
+  width: min(1000px, 100%);
 }
 
 .model-config-split {
@@ -596,6 +839,14 @@
   align-items: stretch;
   gap: 0;
   padding: var(--spacing-4);
+}
+
+.model-config-split.is-detail {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.model-config-split.is-detail > .model-config-profiles {
+  display: none;
 }
 
 /* 左栏：透明底，配置行自己是卡片；不用分区底色，少一层"块"感 */
@@ -611,6 +862,95 @@
 .model-config-split > .model-config-modal-body {
   padding-top: 0;
   padding-bottom: 0;
+}
+
+.model-config-detail-head {
+  flex: none;
+  min-height: 48px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--spacing-3);
+  padding: 0 var(--spacing-4);
+  margin-bottom: var(--spacing-2);
+  border-bottom: 1px solid var(--divider-subtle);
+}
+
+.model-config-detail-actions {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-3);
+}
+
+.model-config-detail-actions > strong {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--color-text-primary);
+  font-size: var(--font-size-md);
+  font-weight: var(--font-weight-semibold);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.model-config-back {
+  min-height: var(--control-height-compact);
+  display: inline-flex;
+  align-items: center;
+  gap: var(--spacing-1);
+  border: 0;
+  border-radius: var(--radius-xs);
+  background: transparent;
+  color: var(--color-text-secondary);
+  font: inherit;
+  font-size: var(--font-size-sm);
+  padding: 0 var(--spacing-2);
+  cursor: pointer;
+}
+
+.model-config-back svg {
+  width: var(--icon-glyph-sm);
+  height: var(--icon-glyph-sm);
+  flex: none;
+}
+
+.model-config-back:hover {
+  background: var(--control-bg-hover);
+  color: var(--color-text-primary);
+}
+
+.model-config-back:focus-visible,
+.model-config-overview-card:focus-visible {
+  outline: 1px solid var(--control-border-focus);
+  outline-offset: 2px;
+}
+
+.model-config-delete-action {
+  min-height: var(--control-height);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--spacing-1);
+  padding: 0 var(--spacing-3);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: var(--color-feedback-error-bg);
+  color: var(--color-feedback-error-text);
+  font: inherit;
+  font-size: var(--font-size-sm);
+  cursor: pointer;
+  transition: background-color var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out);
+}
+
+.model-config-delete-action svg {
+  width: var(--icon-glyph-sm);
+  height: var(--icon-glyph-sm);
+  flex: none;
+}
+
+.model-config-delete-action:hover {
+  background: var(--color-feedback-error-bg-hover);
+  color: var(--color-feedback-error-text);
 }
 
 .model-config-profile-list {
@@ -1100,7 +1440,7 @@
   padding: 0 var(--spacing-3);
   border: 1px solid var(--color-ui-border);
   border-radius: var(--radius-sm);
-  background: var(--color-ui-control);
+  background: var(--surface-section-bg);
   color: var(--color-text-secondary);
   font-family: var(--font-sans);
   font-size: var(--font-size-xs);
@@ -1150,7 +1490,7 @@
   padding: 4px var(--spacing-2);
   border: 1px solid var(--color-ui-border);
   border-radius: var(--radius-xs);
-  background: color-mix(in srgb, var(--surface-section-bg) 72%, transparent);
+  background: var(--surface-section-bg);
   color: var(--color-text-secondary);
   font-size: var(--font-size-xs);
 }
@@ -1246,19 +1586,337 @@
   background: var(--color-text-primary);
 }
 
-/* 偏好档案 Tab：单列面板，不吃模型配置那套左右分栏 */
-.model-config-tab-panel {
+/* 偏好档案入口只承载角色管理；详情正文由角色组件独立滚动。 */
+.model-config-modal-body.model-config-roles-panel {
+  display: flex;
+  align-content: stretch;
+  gap: 0;
+  overflow: hidden;
+  padding: 0;
+}
+
+.model-config-overview {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  padding: var(--spacing-3) var(--spacing-4) var(--spacing-4);
+}
+
+.model-config-overview-toolbar {
+  flex: none;
+  display: flex;
+  justify-content: flex-end;
+  padding-bottom: var(--spacing-3);
+}
+
+.model-config-overview-toolbar > .model-config-profile-add {
+  box-sizing: border-box;
+  width: 100%;
+  height: 44px;
+  min-height: 44px;
+  background: var(--color-ui-control);
+  border-color: var(--control-border-hover);
+}
+
+.model-config-overview-toolbar > .model-config-profile-add:hover:not(:disabled) {
+  background: var(--color-ui-control-active);
+}
+
+.model-config-overview-list {
+  min-height: 0;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: start;
   align-content: start;
+  gap: var(--spacing-3);
+  overflow: auto;
+  padding: 1px;
 }
 
-.model-config-tab-panel .model-config-prefs {
-  margin: 0;
+.model-config-overview-card {
+  min-width: 0;
+  display: grid;
+  gap: var(--spacing-3);
   padding: var(--spacing-4);
-  border: 1px solid var(--divider-subtle);
-  border-radius: var(--radius-sm);
-  background: color-mix(in srgb, var(--surface-section-bg) 72%, transparent);
+  border: 0;
+  border-radius: var(--radius-card);
+  background: var(--color-ui-control-active);
+  cursor: pointer;
+  transition: background-color var(--motion-fast) var(--ease-out);
 }
 
-.model-config-tab-panel .model-config-prefs-list {
-  max-height: 300px;
+.model-config-overview-card:hover {
+  background: var(--control-bg-selected);
+}
+
+.model-config-overview-card.is-current {
+  background: var(--control-bg-selected);
+}
+
+.model-config-overview-card-head {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--spacing-3);
+}
+
+.model-config-overview-title {
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  gap: var(--spacing-2);
+}
+
+.model-config-overview-title strong {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--color-text-primary);
+  font-size: var(--font-size-md);
+  font-weight: var(--font-weight-semibold);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.model-config-overview-title > span,
+.model-config-overview-actions > span {
+  flex: none;
+  color: var(--color-text-tertiary);
+  font-size: var(--font-size-xs);
+}
+
+.model-config-overview-actions {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-3);
+}
+
+.model-config-overview-test {
+  min-height: var(--control-height-compact);
+  border: 0;
+  border-radius: var(--radius-xs);
+  background: transparent;
+  color: var(--color-text-secondary);
+  font: inherit;
+  font-size: var(--font-size-sm);
+  padding: 0 var(--spacing-2);
+  cursor: pointer;
+}
+
+.model-config-overview-test:hover:not(:disabled) {
+  background: var(--control-bg-hover);
+  color: var(--color-text-primary);
+}
+
+.model-config-overview-test:disabled {
+  color: var(--color-text-tertiary);
+  cursor: not-allowed;
+}
+
+.model-config-overview-models {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--spacing-2);
+}
+
+.model-config-overview-model {
+  min-width: 0;
+  min-height: 48px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--spacing-2);
+  padding: 0 var(--spacing-3);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: var(--color-ui-control);
+}
+
+.model-config-overview-model > span {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-sm);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.model-config-overview-model.is-enabled > span {
+  color: var(--color-text-primary);
+}
+
+.model-config-overview-empty {
+  align-self: center;
+  color: var(--color-text-tertiary);
+  font-size: var(--font-size-sm);
+  padding: var(--spacing-4);
+}
+
+.model-config-overview > .model-config-loading {
+  flex: 1;
+  align-content: center;
+}
+
+@media (max-width: 860px) {
+  .model-config-overview-list {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 680px) {
+  .model-config-form-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .model-config-overview-models {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .model-config-overview-card-head {
+    align-items: flex-start;
+  }
+
+  .model-config-overview-title {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: var(--spacing-1);
+  }
+
+  .model-config-overview-actions {
+    gap: var(--spacing-1);
+  }
+
+  .model-config-detail-head {
+    padding: 0 var(--spacing-3);
+  }
+
+  .model-config-detail-actions {
+    gap: var(--spacing-1);
+  }
+}
+
+.model-config-skills {
+  display: grid;
+  gap: var(--spacing-3);
+  margin-top: var(--spacing-6);
+  border-top: 1px solid var(--divider-subtle);
+  padding-top: var(--spacing-4);
+}
+
+.model-config-skills-head,
+.model-config-skill-row {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-2);
+}
+
+.model-config-skills-head > div,
+.model-config-skill-copy {
+  min-width: 0;
+  flex: 1;
+  display: grid;
+  gap: var(--spacing-1);
+}
+
+.model-config-skills-head strong,
+.model-config-skill-copy strong,
+.model-config-skill-editor h3 {
+  color: var(--color-text-primary);
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-semibold);
+}
+
+.model-config-skills-head span,
+.model-config-skill-copy span {
+  color: var(--color-text-tertiary);
+  font-size: var(--font-size-xs);
+  line-height: var(--line-height-normal);
+}
+
+.model-config-skills-list {
+  display: grid;
+  gap: var(--spacing-1);
+}
+
+.model-config-skill-row {
+  min-height: 48px;
+  border-radius: var(--radius-xs);
+  background: var(--color-ui-control-panel);
+  padding: var(--spacing-2);
+}
+
+.model-config-skill-row .model-config-prefs-action {
+  flex: none;
+}
+
+.model-config-skill-delete {
+  width: var(--control-height-compact);
+  height: var(--control-height-compact);
+  flex: none;
+  border: 0;
+  border-radius: var(--radius-xs);
+  background: transparent;
+  color: var(--color-text-tertiary);
+  font-size: var(--font-size-lg);
+  cursor: pointer;
+}
+
+.model-config-skill-delete:hover {
+  background: var(--color-accent-red-subtle);
+  color: var(--color-accent-red);
+}
+
+.model-config-skill-editor {
+  display: grid;
+  gap: var(--spacing-3);
+  border-radius: var(--radius-sm);
+  background: var(--color-ui-control-panel);
+  padding: var(--spacing-3);
+}
+
+.model-config-skill-editor h3 {
+  margin: 0;
+}
+
+.model-config-skill-fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--spacing-3);
+}
+
+.model-config-skill-content {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 180px;
+  resize: vertical;
+  border: 1px solid var(--control-border);
+  border-radius: var(--radius-sm);
+  background: var(--control-bg);
+  color: var(--color-text-primary);
+  padding: var(--spacing-2);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  line-height: var(--line-height-code);
+}
+
+.model-config-skill-content:focus-visible {
+  border-color: var(--control-border-focus);
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.model-config-skill-fields small {
+  color: var(--color-text-tertiary);
+  font-size: var(--font-size-2xs);
+}
+
+@media (max-width: 620px) {
+  .model-config-skill-fields {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }

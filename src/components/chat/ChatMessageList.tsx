@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { activeThreadOf, useChatStore } from '@/stores/chatStore';
-import type { ChatAskResponseSummary, ChatMessage, ChatToolCall } from '@/types';
+import type { ChatAskResponseSummary, ChatImageRef, ChatMessage, ChatToolCall } from '@/types';
 import { chatInlineSegments } from '@/lib/chatInlineRefs';
+import { extractVideoScript } from '@/lib/videoPrompt';
 import { CopyGlyphIcon, CopySuccessGlyphIcon, FoldGlyphIcon, IdGlyphIcon, LocateGlyphIcon, RetryGlyphIcon } from './ChatIcons';
-import { AiGlyphIcon } from '@/components/canvas/NodeToolbarIcons';
+import { AiGlyphIcon, VideoGlyphIcon } from '@/components/canvas/NodeToolbarIcons';
 import './ChatPanel.css';
 
 /* ── 基础 Markdown（段落 / 列表 / 引用 / 代码块 / 行内代码与加粗）── */
@@ -30,7 +31,7 @@ function renderInline(text: string, keyPrefix: string): ReactNode[] {
   return nodes;
 }
 
-function MarkdownText({ text }: { text: string }) {
+export function MarkdownText({ text }: { text: string }) {
   const blocks = useMemo(() => {
     const lines = String(text || '').split('\n');
     const out: ReactNode[] = [];
@@ -216,12 +217,9 @@ function useCopyFeedback(): [boolean, (text: string) => void] {
 }
 
 function ToolCallCard({ call, onRetry }: { call: ChatToolCall; onRetry?: () => void }) {
-  const [open, setOpen] = useState(call.status === 'error');
-  // 失败自动展开：卡片常先以 running 挂载（消息 append 时 toolCalls 还是空的或 running），
-  // error 是 tool_finished 后到的事件，useState 初值抓不到——不同步的话折叠态只有卡外一行红字
-  useEffect(() => {
-    if (call.status === 'error') setOpen(true);
-  }, [call.status]);
+  // 对话主路径只展示状态摘要；完整参数属于调试信息，用户主动点击后再展开。
+  // 失败原因在卡片外常驻，因此折叠不会隐藏真正需要处理的信息。
+  const [open, setOpen] = useState(false);
   const statusText = call.status === 'running' ? '进行中' : call.status === 'error' ? '失败' : call.status === 'stopped' ? '已停止' : '已完成';
   const summary = argsSummary(call.args);
   const elapsed = useElapsed(call.startedAt, call.status === 'running', call.durationMs);
@@ -394,23 +392,45 @@ function messageLocator(message: ChatMessage, threadId: string): string {
   ].join('\n');
 }
 
+const DSML_MARKER_CORE = String.raw`(?:\|{1,2}|｜{1,2})\s*DSML\s*(?:\|{1,2}|｜{1,2})`;
+const DSML_OPEN_MARKER_PATTERN = String.raw`<\s*${DSML_MARKER_CORE}\s*>?`;
+const DSML_MARKER_PATTERN = String.raw`<\s*/?\s*${DSML_MARKER_CORE}\s*>?`;
+
+function assistantDisplayContent(message: ChatMessage): string {
+  const callBlockPattern = new RegExp(
+    `${DSML_OPEN_MARKER_PATTERN}\\s*calls\\s*>[\\s\\S]*?${DSML_MARKER_PATTERN}\\s*calls\\s*>`,
+    'ig',
+  );
+  const content = String(message.content || '');
+  const cleaned = content.replace(callBlockPattern, '').trim();
+  if (cleaned) return cleaned;
+  if (cleaned === content.trim()) return cleaned;
+  return message.toolCalls?.length ? '' : '这条历史消息包含旧版工具调用记录，执行状态无法恢复。';
+}
+
 function MessageRow({
   message,
   onLocate,
   onPreview,
   onRetry,
+  onApplyVideoScript,
 }: {
   message: ChatMessage;
   onLocate: (ref: { canvasId: string; nodeId: string; versionId?: string; force?: boolean }) => void;
   onPreview: (url: string, title: string) => void;
   onRetry: (messageId: string) => void;
+  onApplyVideoScript?: (prompt: string, references?: ChatImageRef[]) => void;
 }) {
   const thread = useChatStore(activeThreadOf);
   const [copied, copyText] = useCopyFeedback();
   const [copiedId, copyIdText] = useCopyFeedback();
   const copyMessageId = (target: ChatMessage) => copyIdText(messageLocator(target, thread?.id || ''));
-  /** 生图失败汇总：agent 常用文字兜底回复，错误不能只躺在折叠的工具卡里。 */
-  const failedCalls = (message.toolCalls || []).filter((call) => call.status === 'error');
+  const displayContent = message.role === 'assistant' ? assistantDisplayContent(message) : message.content;
+  const messageIndex = thread?.messages.findIndex((item) => item.id === message.id) ?? -1;
+  const priorUserMessage = messageIndex > 0
+    ? thread?.messages.slice(0, messageIndex).reverse().find((item) => item.role === 'user')
+    : undefined;
+  const videoReferences = priorUserMessage?.attachments || [];
 
   if (message.role === 'user') {
     return (
@@ -429,7 +449,7 @@ function MessageRow({
           >
             {copiedId ? <CopySuccessGlyphIcon /> : <IdGlyphIcon />}
           </button>
-          {message.content ? (
+          {message.content && (!message.status || message.status === 'done') ? (
             <button
               type="button"
               title={copied ? '消息内容已复制' : '复制消息内容'}
@@ -449,13 +469,13 @@ function MessageRow({
   const hasRunningToolCall = (message.toolCalls || []).some((call) => call.status === 'running');
   return (
     <div className="hb-chat-msg hb-chat-msg-assistant">
-      {message.status === 'awaiting_input' && !message.content ? (
+      {message.status === 'awaiting_input' && !displayContent ? (
         <div className="hb-chat-pending" role="status">
           <span className="hb-chat-dots" aria-hidden="true"><i /><i /><i /></span>
           <em>等待你补充信息…</em>
         </div>
       ) : null}
-      {message.status === 'running' && !message.content && !hasRunningToolCall ? (
+      {message.status === 'running' && !displayContent && !hasRunningToolCall ? (
         <div className="hb-chat-pending" role="status">
           <span className="hb-chat-dots" aria-hidden="true">
             <i /><i /><i />
@@ -463,7 +483,7 @@ function MessageRow({
           <em>正在思考…</em>
         </div>
       ) : null}
-      {message.content ? <MarkdownText text={message.content} /> : null}
+      {displayContent ? <MarkdownText text={displayContent} /> : null}
       {message.toolCalls?.map((call) => (
         <ToolCallCard key={call.id} call={call} onRetry={canRetry ? () => onRetry(message.id) : undefined} />
       ))}
@@ -503,13 +523,6 @@ function MessageRow({
       {message.status === 'error' ? (
         <div className="hb-chat-error">{message.error || '这一轮出错了（未拿到具体原因），可点「重试」重发；点消息上的「ID」复制定位信息反馈给开发者。'}</div>
       ) : null}
-      {/* 生图失败汇总：消息整体 done 但中间有工具失败时，错误摘要单独一行，
-         不要求用户去展开工具卡才发现「哦原来失败过」。 */}
-      {message.status !== 'error' && failedCalls.length > 0 ? (
-        <div className="hb-chat-error">
-          本轮有 {failedCalls.length} 次生图失败：{failedCalls[0].error || '未知错误'}
-        </div>
-      ) : null}
       {canRetry && message.status !== 'unknown' ? (
         <button type="button" className="hb-chat-tool-retry" onClick={() => onRetry(message.id)}>
           <RetryGlyphIcon />
@@ -517,7 +530,7 @@ function MessageRow({
         </button>
       ) : null}
       {label ? <div className="hb-chat-context">{label}</div> : null}
-      <div className={`hb-chat-text-actions ${message.content ? '' : 'hb-chat-text-actions-idle'}`}>
+      <div className={`hb-chat-text-actions ${displayContent ? '' : 'hb-chat-text-actions-idle'}`}>
         <button
           type="button"
           title={copiedId ? '消息 ID 已复制' : '复制消息 ID'}
@@ -526,16 +539,28 @@ function MessageRow({
         >
           {copiedId ? <CopySuccessGlyphIcon /> : <IdGlyphIcon />}
         </button>
-        {message.content ? (
+        {displayContent ? (
           <button
             type="button"
             title={copied ? '回复已复制' : '复制回复'}
             aria-label="复制回复内容"
-            onClick={() => copyText(message.content)}
+            onClick={() => copyText(displayContent)}
           >
             {copied ? <CopySuccessGlyphIcon /> : <CopyGlyphIcon />}
           </button>
         ) : null}
+          {displayContent ? (
+            <button
+              type="button"
+              className="hb-chat-video-script-action"
+              title="把这段回复放进视频节点"
+              aria-label="把这段回复放进视频节点"
+              onClick={() => onApplyVideoScript?.(extractVideoScript(displayContent), videoReferences)}
+            >
+              <VideoGlyphIcon />
+              <span>应用为视频节点</span>
+            </button>
+          ) : null}
       </div>
     </div>
   );
@@ -546,13 +571,18 @@ export default function ChatMessageList({
   onLocate,
   onPreview,
   onRetry,
+  onApplyVideoScript,
 }: {
   onLocate: (ref: { canvasId: string; nodeId: string; versionId?: string; force?: boolean }) => void;
   onPreview: (url: string, title: string) => void;
   onRetry: (messageId: string) => void;
+  onApplyVideoScript?: (prompt: string, references?: ChatImageRef[]) => void;
 }) {
   const thread = useChatStore(activeThreadOf);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const followLatestRef = useRef(true);
+  const previousThreadIdRef = useRef('');
+  const previousLastMessageIdRef = useRef('');
   const setMessageScrollTop = useChatStore((state) => state.setMessageScrollTop);
   const messageScrollTop = useChatStore((state) => state.messageScrollTop);
   const messages = thread?.messages || [];
@@ -560,15 +590,24 @@ export default function ChatMessageList({
   const lastRunning = lastMessage?.status === 'running' || lastMessage?.status === 'awaiting_input';
   const lastMessageSignature = `${lastMessage?.id || ''}:${lastMessage?.status || ''}:${lastMessage?.content?.length || 0}:${lastMessage?.media?.length || 0}:${lastMessage?.toolCalls?.length || 0}`;
 
-  // 展开 / 切线程时恢复滚动位置；运行中跟到底
+  // 展开 / 切线程时恢复滚动位置；只有用户仍停在底部时才跟随流式更新。
+  // 用户主动向上滚动后，生成过程不能再把视角强行拽回底部。
   useEffect(() => {
     const element = scrollRef.current;
     if (!element) return;
-    if (lastRunning) {
+    const threadChanged = previousThreadIdRef.current !== thread?.id;
+    if (threadChanged) {
+      previousThreadIdRef.current = thread?.id || '';
+      followLatestRef.current = true;
+    } else if (lastMessage?.role === 'user' && lastMessage.id !== previousLastMessageIdRef.current) {
+      followLatestRef.current = true;
+    }
+    previousLastMessageIdRef.current = lastMessage?.id || '';
+    if (lastRunning && followLatestRef.current) {
       element.scrollTop = element.scrollHeight;
       return;
     }
-    if (messageScrollTop > 0) element.scrollTop = messageScrollTop;
+    if (threadChanged && messageScrollTop > 0) element.scrollTop = messageScrollTop;
   }, [thread?.id, lastRunning, messageScrollTop, messages.length, lastMessageSignature]);
 
   if (messages.length === 0) {
@@ -588,7 +627,12 @@ export default function ChatMessageList({
     <div
       className="hb-chat-messages"
       ref={scrollRef}
-      onScroll={(event) => setMessageScrollTop(event.currentTarget.scrollTop)}
+      onScroll={(event) => {
+        const element = event.currentTarget;
+        const distanceFromBottom = element.scrollHeight - element.scrollTop - element.clientHeight;
+        followLatestRef.current = distanceFromBottom <= 24;
+        setMessageScrollTop(element.scrollTop);
+      }}
     >
       {messages.map((message) => (
         <MessageRow
@@ -597,6 +641,7 @@ export default function ChatMessageList({
           onLocate={onLocate}
           onPreview={onPreview}
           onRetry={onRetry}
+          onApplyVideoScript={onApplyVideoScript}
         />
       ))}
     </div>

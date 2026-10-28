@@ -68,8 +68,8 @@ describe('FlowImageNode 生成态动效', () => {
 
   it('智能生成使用独立的随机感点阵，并保留紫色旋转描边', () => {
     const html = renderComposer({ ...base, runningDirect: false, stage: 'enhance' });
-    expect(html).toContain('image-node-running-dots is-running-enhanced');
-    expect(html).toContain('image-node-running-glow is-running-enhanced');
+    expect(html).toContain('running-matrix is-inline');
+    expect(html).not.toContain('image-node-running-glow is-running-enhanced');
     expect(html).toContain('image-node-running-border is-running-enhanced');
   });
 });

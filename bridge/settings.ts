@@ -1,8 +1,44 @@
 import fs from 'node:fs/promises';
 import { SETTINGS_FILE } from './paths.js';
 
-/** 配置种类：image = 生图模型；text = 语言/多模态模型（发送前整理提示词用）。 */
-export type ProfileKind = 'image' | 'text';
+/** 配置种类：image = 生图模型；text = 语言/多模态模型（发送前整理提示词用）；video = 视频生成模型。 */
+export type ProfileKind = 'image' | 'text' | 'video';
+export type VideoApiMode = 'auto' | 'openai-videos' | 'xai-videos' | 'grsai-generate' | 'media-v1' | 'custom';
+
+export interface CustomVideoApiConfig {
+  createPath: string;
+  pollPath: string;
+  imageTransport: 'public-url' | 'data-url';
+  headersTemplate: string;
+  requestBodyTemplate: string;
+  taskIdPath: string;
+  statusPath: string;
+  progressPath: string;
+  outputUrlPath: string;
+  errorPath: string;
+  statusMap: string;
+}
+
+export function defaultCustomVideoApiConfig(): CustomVideoApiConfig {
+  return {
+    createPath: '/videos',
+    pollPath: '/videos/{{taskId}}',
+    imageTransport: 'public-url',
+    headersTemplate: '{}',
+    requestBodyTemplate: JSON.stringify({
+      model: '{{model}}',
+      prompt: '{{prompt}}',
+      seconds: '{{seconds}}',
+      ratio: '{{ratio}}',
+    }, null, 2),
+    taskIdPath: 'id',
+    statusPath: 'status',
+    progressPath: 'progress',
+    outputUrlPath: 'video_url',
+    errorPath: 'error.message',
+    statusMap: '{}',
+  };
+}
 
 /**
  * 语言模型的上游接口格式：
@@ -102,6 +138,10 @@ export interface ModelProfile {
   enabled?: boolean;
   /** Responses API 顶层主模型（负责理解上下文并调用图像工具），与 model 分离。 */
   responsesModel?: string;
+  /** 视频配置的上游协议。 */
+  videoApiMode?: VideoApiMode;
+  /** 仅 custom 协议使用；模板是 JSON，不执行任意代码。 */
+  videoCustomConfig?: CustomVideoApiConfig;
 }
 
 export interface StoredSettings {
@@ -165,20 +205,71 @@ export function createProfileId(): string {
   return `profile_${Date.now().toString(36)}_${seq.toString(36)}${Math.random().toString(36).slice(2, 6)}`;
 }
 
+export function normalizeProfileKind(value: unknown): ProfileKind {
+  return value === 'text' || value === 'video' ? value : 'image';
+}
+
+export function normalizeVideoApiMode(value: unknown): VideoApiMode {
+  return value === 'openai-videos' || value === 'xai-videos' || value === 'grsai-generate' || value === 'media-v1' || value === 'custom' ? value : 'auto';
+}
+
+export function normalizeCustomVideoApiConfig(value: unknown, knownApiKey = ''): CustomVideoApiConfig {
+  const source = value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+  const defaults = defaultCustomVideoApiConfig();
+  const text = (key: keyof CustomVideoApiConfig, maxLength = 16_000) => (
+    typeof source[key] === 'string' ? String(source[key]).slice(0, maxLength) : defaults[key]
+  );
+  const config: CustomVideoApiConfig = {
+    createPath: text('createPath', 2_000),
+    pollPath: text('pollPath', 2_000),
+    imageTransport: source.imageTransport === 'data-url' ? 'data-url' : 'public-url',
+    headersTemplate: text('headersTemplate', 8_000),
+    requestBodyTemplate: text('requestBodyTemplate'),
+    taskIdPath: text('taskIdPath', 300),
+    statusPath: text('statusPath', 300),
+    progressPath: text('progressPath', 300),
+    outputUrlPath: text('outputUrlPath', 300),
+    errorPath: text('errorPath', 300),
+    statusMap: text('statusMap', 4_000),
+  };
+  const secret = String(knownApiKey || '');
+  if (secret.length >= 8) {
+    config.headersTemplate = config.headersTemplate.split(secret).join('{{apiKey}}');
+    config.requestBodyTemplate = config.requestBodyTemplate.split(secret).join('{{apiKey}}');
+  }
+  return config;
+}
+
+/** 默认模型按类型分开：视频不沿用生图的 gpt-image-1，那家伙在视频接口上必然报错。 */
+function defaultModelForKind(kind: ProfileKind): string {
+  if (kind === 'text' || kind === 'video') return '';
+  return 'gpt-image-1';
+}
+
+function defaultNameForKind(kind: ProfileKind): string {
+  if (kind === 'text') return '语言模型';
+  if (kind === 'video') return '视频模型';
+  return '生图模型';
+}
+
 export function createProfile(name: string, kind: ProfileKind = 'image'): ModelProfile {
   return {
     id: createProfileId(),
-    name: name.trim() || (kind === 'text' ? '语言模型' : '生图模型'),
-    baseUrl: 'https://api.openai.com/v1',
+    name: name.trim() || defaultNameForKind(kind),
+    baseUrl: kind === 'video' ? '' : 'https://api.openai.com/v1',
     apiKey: '',
-    model: kind === 'text' ? '' : 'gpt-image-1',
-    defaultSize: '1024x1024',
+    model: defaultModelForKind(kind),
+    defaultSize: kind === 'video' ? '' : '1024x1024',
     models: [],
     enabledModels: [],
     kind,
     textFormat: 'auto',
     imageApiMode: 'images',
     responsesModel: 'gpt-5.5',
+    videoApiMode: kind === 'video' ? 'auto' : undefined,
+    videoCustomConfig: kind === 'video' ? defaultCustomVideoApiConfig() : undefined,
     enabled: true,
   };
 }
@@ -216,24 +307,32 @@ export function normalizeSettings(raw: Record<string, unknown>): StoredSettings 
   const profiles = raw.profiles
     .map((item) => {
       const entry = (item || {}) as Record<string, unknown>;
-      const kind: ProfileKind = entry.kind === 'text' ? 'text' : 'image';
-      const base = createProfile(String(entry.name || (kind === 'text' ? '语言模型' : '生图模型')), kind);
+      const kind = normalizeProfileKind(entry.kind);
+      const base = createProfile(String(entry.name || defaultNameForKind(kind)), kind);
       const models = Array.isArray(entry.models) ? entry.models.map((item) => String(item)) : [];
       const enabledModels = Array.isArray(entry.enabledModels) ? entry.enabledModels.map((item) => String(item)) : [];
+      const requestedModel = String(entry.model || '').trim();
+      const apiKey = String(entry.apiKey || '');
       return {
         ...base,
         id: String(entry.id || base.id),
         name: String(entry.name || base.name),
-        baseUrl: String(entry.baseUrl || base.baseUrl),
-        apiKey: String(entry.apiKey || ''),
-        defaultSize: String(entry.defaultSize || base.defaultSize),
+        baseUrl: String(kind === 'video' ? entry.baseUrl ?? '' : entry.baseUrl || base.baseUrl),
+        apiKey,
+        defaultSize: String(kind === 'video' ? entry.defaultSize ?? '' : entry.defaultSize || base.defaultSize),
         models,
         enabledModels,
-        model: resolveDefaultModel(String(entry.model || base.model), enabledModels),
+        model: kind === 'video'
+          // 视频配置：没填默认模型时自动取第一个已勾选模型。
+          // 用户只要「加了模型」，节点端就不会因为默认模型为空而判定「还没配好」。
+          ? (requestedModel || enabledModels[0] || '')
+          : resolveDefaultModel(String(entry.model || base.model), enabledModels),
         kind,
         textFormat: normalizeTextApiFormat(entry.textFormat),
         imageApiMode: normalizeImageApiMode(entry.imageApiMode),
         responsesModel: String(entry.responsesModel || base.responsesModel),
+        videoApiMode: kind === 'video' ? normalizeVideoApiMode(entry.videoApiMode) : undefined,
+        videoCustomConfig: kind === 'video' ? normalizeCustomVideoApiConfig(entry.videoCustomConfig, apiKey) : undefined,
         // 缺省视为启用：老配置没有这个字段，不能一升级就全部停用
         enabled: entry.enabled !== false,
       } satisfies ModelProfile;
@@ -309,6 +408,24 @@ export function resolveTextProfile(settings: StoredSettings, profileId?: string)
   return hit || textProfilesOf(settings)[0] || null;
 }
 
+/** 全部视频模型配置。视频是独立分组与计费，不跟生图混竞。 */
+export function videoProfilesOf(settings: StoredSettings): ModelProfile[] {
+  return settings.profiles.filter((profile) => (
+    profile.kind === 'video'
+    && profile.enabled !== false
+    && Boolean(profile.baseUrl.trim() && profile.apiKey && profile.model)
+  ));
+}
+
+/** 视频生成用的那一路：优先指定的，否则第一把可用的视频配置；没有配过返回 null。 */
+export function resolveVideoProfile(settings: StoredSettings, profileId?: string): ModelProfile | null {
+  const wanted = String(profileId || '').trim();
+  const hit = wanted ? settings.profiles.find((profile) => (
+    profile.id === wanted && profile.kind === 'video' && profile.enabled !== false
+  )) : undefined;
+  return hit || videoProfilesOf(settings)[0] || null;
+}
+
 export function findProfile(settings: StoredSettings, profileId: string | undefined): ModelProfile {
   const wanted = String(profileId || '').trim();
   if (wanted) {
@@ -351,7 +468,7 @@ export async function writeSettings(input: {
   for (const draft of input.profiles) {
     const requestedId = String(draft.id || '').trim();
     const id = requestedId && !requestedId.startsWith('new_') && byId.has(requestedId) ? requestedId : '';
-    const draftKind = draft.kind === 'text' ? 'text' : 'image';
+    const draftKind = normalizeProfileKind(draft.kind);
     const draftName = String(draft.name || '').trim();
     const draftBaseUrl = String(draft.baseUrl || '').trim();
     const identityMatches = !id && requestedId && !requestedId.startsWith('new_')
@@ -372,20 +489,39 @@ export async function writeSettings(input: {
     const enabledModels = Array.isArray(draft.enabledModels)
       ? Array.from(new Set(draft.enabledModels.map((item) => String(item).trim()).filter(Boolean)))
       : (previous?.enabledModels || []);
-    const model = resolveDefaultModel(String(draft.model || ''), enabledModels) || previous?.model || '';
+    const requestedModel = String(draft.model ?? previous?.model ?? '').trim();
+    const model = draftKind === 'video'
+      // 视频配置：未显式选择默认模型时，自动落到第一个已勾选模型。
+      // 这是「添加模型即可用」的关键一环——默认模型不再是一个隐藏的必填项。
+      ? (enabledModels.length > 0
+        ? (requestedModel && enabledModels.includes(requestedModel) ? requestedModel : enabledModels[0])
+        : requestedModel)
+      : resolveDefaultModel(requestedModel, enabledModels) || previous?.model || '';
+    const baseUrl = draftKind === 'video'
+      ? String(draft.baseUrl ?? previous?.baseUrl ?? '').trim()
+      : draftBaseUrl || previous?.baseUrl || 'https://api.openai.com/v1';
+    const defaultSize = draftKind === 'video'
+      ? String(draft.defaultSize ?? previous?.defaultSize ?? '').trim()
+      : String(draft.defaultSize || '').trim() || previous?.defaultSize || '1024x1024';
     profiles.push({
       id: actualId,
-      name: draftName || previous?.name || '生图模型',
-      baseUrl: draftBaseUrl || previous?.baseUrl || 'https://api.openai.com/v1',
+      name: draftName || previous?.name || defaultNameForKind(draftKind),
+      baseUrl,
       apiKey,
       model,
-      defaultSize: String(draft.defaultSize || '').trim() || previous?.defaultSize || '1024x1024',
+      defaultSize,
       models: Array.isArray(draft.models) ? draft.models.map((item) => String(item)) : (previous?.models || []),
       enabledModels,
-      kind: draft.kind === 'text' ? 'text' : 'image',
+      kind: draftKind,
       textFormat: normalizeTextApiFormat(draft.textFormat ?? previous?.textFormat),
       imageApiMode: normalizeImageApiMode(draft.imageApiMode ?? previous?.imageApiMode),
       responsesModel: String(draft.responsesModel || previous?.responsesModel || 'gpt-5.5').trim() || 'gpt-5.5',
+      videoApiMode: draftKind === 'video'
+        ? normalizeVideoApiMode(draft.videoApiMode ?? previous?.videoApiMode)
+        : undefined,
+      videoCustomConfig: draftKind === 'video'
+        ? normalizeCustomVideoApiConfig(draft.videoCustomConfig ?? previous?.videoCustomConfig, apiKey)
+        : undefined,
       // 缺省沿用旧值；全新配置才默认启用。
       enabled: typeof draft.enabled === 'boolean' ? draft.enabled : (previous?.enabled !== false),
     });
@@ -425,6 +561,10 @@ export function publicView(settings: StoredSettings) {
       textFormat: profile.textFormat,
       imageApiMode: profile.imageApiMode,
       responsesModel: profile.responsesModel,
+      videoApiMode: profile.videoApiMode,
+      videoCustomConfig: profile.videoCustomConfig
+        ? normalizeCustomVideoApiConfig(profile.videoCustomConfig, profile.apiKey)
+        : undefined,
       enabled: profile.enabled !== false,
       keyConfigured: Boolean(profile.apiKey),
     })),

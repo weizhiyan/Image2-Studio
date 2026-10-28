@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { CanvasNodeData } from '@/types';
-import { activeVersionOf, isReditVersion, newestVersionsFirst, normalizeVersions, reditCountOf, versionIndexOf, versionLabel } from '@/lib/versions';
+import { activePromptOf, activeVersionOf, isReditVersion, newestVersionsFirst, normalizeVersions, reditCountOf, versionIndexOf, versionLabel } from '@/lib/versions';
 
 function version(id: string, extra: Record<string, unknown> = {}) {
   return { id, imageUrl: `/api/files/${id}.png`, fileName: `${id}.png`, prompt: `p-${id}`, model: 'm', size: '1024x1024', createdAt: '2026-09-23T10:00:00Z', finishedAt: '2026-09-23T10:00:01Z', ...extra };
@@ -43,6 +43,18 @@ describe('结果节点版本链', () => {
   it('activeVersionId 指向已删除的版本时回落到最新一版', () => {
     const data: CanvasNodeData = { kind: 'image', label: 'r', activeVersionId: 'gone', versions: [version('v1'), version('v2')] };
     expect(activeVersionOf(data)?.id).toBe('v2');
+  });
+
+  it('复制提示词只取当前版本，当前版本为空时不回退到旧节点字段', () => {
+    const data: CanvasNodeData = {
+      kind: 'image',
+      label: 'r',
+      prompt: '节点旧提示词',
+      activeVersionId: 'v2',
+      versions: [version('v1'), version('v2', { prompt: '  ' })],
+    };
+    expect(activePromptOf(data)).toBe('');
+    expect(activePromptOf({ ...data, activeVersionId: 'v1' })).toBe('p-v1');
   });
 
   it('二次编辑来的版本带 baseVersionId', () => {

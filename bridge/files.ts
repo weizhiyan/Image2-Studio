@@ -9,13 +9,27 @@ const CONTENT_TYPES: Record<string, string> = {
   '.jpeg': 'image/jpeg',
   '.webp': 'image/webp',
   '.gif': 'image/gif',
+  '.mp4': 'video/mp4',
+  '.webm': 'video/webm',
+  '.mov': 'video/quicktime',
 };
+
+const VIDEO_EXTENSIONS = ['mp4', 'webm', 'mov'];
 
 export interface SavedFile { fileName: string; url: string; filePath: string }
 
 export async function saveBuffer(buffer: Buffer, extension: string): Promise<SavedFile> {
   const safeExt = imageExtensionOf(buffer, extension);
   const fileName = `img_${Date.now()}_${Math.random().toString(36).slice(2, 8)}.${safeExt}`;
+  const filePath = path.join(MEDIA_DIR, fileName);
+  await fs.writeFile(filePath, buffer);
+  return { fileName, url: `/api/files/${fileName}`, filePath };
+}
+
+/** 视频落盘：与图片分开命名（vid_ 前缀），扩展名按容器魔数判，不信中转站给的后缀。 */
+export async function saveVideoBuffer(buffer: Buffer, hint = ''): Promise<SavedFile> {
+  const safeExt = videoExtensionOf(buffer, hint);
+  const fileName = `vid_${Date.now()}_${Math.random().toString(36).slice(2, 8)}.${safeExt}`;
   const filePath = path.join(MEDIA_DIR, fileName);
   await fs.writeFile(filePath, buffer);
   return { fileName, url: `/api/files/${fileName}`, filePath };
@@ -56,6 +70,24 @@ export function imageExtensionOf(buffer: Buffer, hint = ''): string {
   if (buffer.subarray(0, 6).toString('ascii') === 'GIF87a' || buffer.subarray(0, 6).toString('ascii') === 'GIF89a') return 'gif';
   if (buffer.subarray(0, 4).toString('ascii') === 'RIFF' && buffer.subarray(8, 12).toString('ascii') === 'WEBP') return 'webp';
   return ['png', 'jpg', 'jpeg', 'webp', 'gif'].includes(normalized) ? (normalized === 'jpeg' ? 'jpg' : normalized) : 'png';
+}
+
+/**
+ * 视频容器识别：MP4/MOV 的 brand 盒（字节 4–8 是 'ftyp'），WebM/Matroska 的 EBML 魔数。
+ * 认不出来时回退到调用方给的后缀，再不行按 mp4 存——总比存成 .png 被浏览器当图片打开强。
+ */
+export function videoExtensionOf(buffer: Buffer, hint = ''): string {
+  const normalized = String(hint || '').replace(/[^a-z0-9]/gi, '').toLowerCase();
+  if (buffer.subarray(4, 8).toString('ascii') === 'ftyp') return 'mp4';
+  if (buffer.subarray(0, 4).equals(Buffer.from([0x1a, 0x45, 0xdf, 0xa3]))) return 'webm';
+  return VIDEO_EXTENSIONS.includes(normalized) ? normalized : 'mp4';
+}
+
+/** 是不是视频容器：下载回来的内容先过这一关，别把错误页 / HTML 存成 mp4。 */
+export function looksLikeVideo(buffer: Buffer): boolean {
+  if (buffer.length < 12) return false;
+  return buffer.subarray(4, 8).toString('ascii') === 'ftyp'
+    || buffer.subarray(0, 4).equals(Buffer.from([0x1a, 0x45, 0xdf, 0xa3]));
 }
 
 /** 文件名只允许安全字符：媒体目录里的文件名由服务端生成，这里防路径穿越。 */

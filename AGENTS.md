@@ -1,7 +1,7 @@
 # 绘板 Agent 协作规则
 
 绘板（Huiban）是一个**轻量画布生图工具**：画布里写提示词即生图，Codex 对话出图直接落画布。
-本文件的规定从灵枢（AgentShell）原封照搬，风格、节点、Token 体系与灵枢一致。
+绘板是独立项目，维护自己的 UI 规范、Token、组件与交互约定；项目内的规范文件和实现是唯一工程依据。
 
 ## 命令
 
@@ -18,24 +18,26 @@ MCP（stdio）调 `huiban_generate`，bridge 生成后经 SSE 把图推给订阅
 
 ## 设计规范（改任何样式前先读）
 
-风格来源是灵枢：`src/styles/tokens.css`、`src/styles/animations.css`、
-`src/components/canvas/ImageNodes.css`、`src/components/canvas/NodeChrome.tsx` 都是原封拷贝，
-**不要**在这里搞第二套设计语言。`src/lib/canvasViewport.ts`、
-`src/components/canvas/useCanvasViewControls.ts`、`src/components/canvas/CanvasControls.tsx`
-（`CanvasRail` + `CanvasDock`）同样是灵枢原封拷贝——改画布缩放/交互语义去改那三个文件，
-两个画布共用。`src/components/canvas/Nodes.css` 是灵枢节点页的历史拷贝，当前未 import，
-只留作图标与 tone 表的对照，别把它当活代码改。
+项目级 UI 与基础交互规范见 `UI_BASELINE.md`。开始任何新界面、重要界面改版或新增交互控件前必须先读，并使用 Q-UI baseline 的 kickoff、implementation、acceptance 工作流。只把标为“已确认”的规则当成硬约束；遇到会显著影响结果的“待确认项”，先与用户对齐，不自行补成项目规范。
+
+绘板自己的设计基线在 `UI_BASELINE.md`，Token 唯一来源是 `src/styles/tokens.css`；
+节点样式、动画、画布视角和控件均由本项目维护。沿用本项目现有组件与 Token，
+但不要因为某段实现过去曾参考外部产品，就把它视为不可修改或必须同步的外部组件。
+`src/lib/canvasViewport.ts`、`src/components/canvas/useCanvasViewControls.ts`、
+`src/components/canvas/CanvasControls.tsx`（`CanvasRail` + `CanvasDock`）是绘板画布内部实现，
+修改画布缩放与交互时在本项目内维护。`src/components/canvas/Nodes.css` 当前未 import，
+仅作历史文件保留，不视为活动样式来源。
 
 画布下拉弹窗统一用 `--surface-popover-glass-bg` / `--surface-popover-glass-blur`（半透明 + 模糊），
 别再各写一份 `color-mix`。
 
 ### 硬规则：设计 Token
 
-唯一来源是 `src/styles/tokens.css`（与灵枢同源）。`tests/tokens.guard.test.ts` 会机器校验，
+唯一来源是 `src/styles/tokens.css`。`tests/tokens.guard.test.ts` 会机器校验，
 绕过它等于 `npm test` 红。
 
 1. **组件 CSS 里不得出现字面量**：`font-size` / `border-radius` / 颜色（hex、rgb/rgba、hsl）/
-   动效时长与缓动，只能写 `var(--…)`。唯一豁免是 `1px` 描边宽度（与灵枢 ui.css 一致）。
+   动效时长与缓动，只能写 `var(--…)`。唯一豁免是 `1px` 描边宽度。
 2. **透明度分三层**，不许跨层：L0 原始色只在 tokens.css；L1 语义 Token 的 alpha 只能用
    `color-mix(in srgb, X n%, transparent)` 派生；L2 组件局部 Token（`--hb-*` / `--node-*`）
    只能从 L1 派生。组件规则体里只能 `var()`。
@@ -44,11 +46,12 @@ MCP（stdio）调 `huiban_generate`，bridge 生成后经 SSE 把图推给订阅
 
 ### 节点视觉
 
-画布节点的 DOM 结构与灵枢绘画页一致（`image-flow-node` / `image-node-{composer|image|reference}` /
+画布节点使用本项目约定的 DOM 结构（`image-flow-node` / `image-node-{composer|image|reference}` /
 `image-node-composer-shell` / `image-node-media` / `image-handle`…）。改节点先改类名对应的
 CSS，不要新造平行结构。节点尺寸经 `--image-node-width` 注入（JS 写入、CSS 只读）。
+新增节点必须遵循 `UI_BASELINE.md` 的节点规范：复用外壳、顶部类型标识、状态反馈、连接与画布生命周期中的新增/删除动效及撤销路径。文本节点通过右下角拉伸手柄拖拽调整宽高，预览内容区不移动节点；编辑框与操作控件不触发节点移动。
 
-## 画布外壳与节点动效（灵枢同款）
+## 画布外壳与节点动效
 
 - 视角持久化走 `useCanvasViewControls`：`flowViewport` 只进本地 state（高频），
   `persistCanvasViewport` 在 `onMoveEnd` 写 store；`resetToBestView` 是 `fitView({padding:0.22})`。
@@ -72,8 +75,7 @@ CSS，不要新造平行结构。节点尺寸经 `--image-node-width` 注入（J
   `ImageNodes.css` 里 `.is-entering .canvas-dock/.canvas-rail` 与 `.image-canvas-flow` 是**两条独立规则**，
   别把选择器合并——合并等于把 dock / rail 的入场 delay 并进画布规则，动画直接消失（踩过）。
 - `normalizeCanvasGraph` 在水合时跑：剔除非画布 kind、清一次性 `className`、剪掉指向已删节点的悬空连线。
-  它**不**做"空节点回收"，别照抄灵枢那个 `isStaleEmptyOutputNode`（灵枢里它检查的 `queued` 状态码
-  实际不会出现，是死代码；照搬会把双击新建的空节点当场删掉，踩过）。
+  它**不**做空节点回收：本项目的 `queued` 状态不会出现在空节点判断里，不得添加基于陈旧状态码的自动删除逻辑。
 
 ## 多路生图配置
 
@@ -101,7 +103,7 @@ CSS，不要新造平行结构。节点尺寸经 `--image-node-width` 注入（J
   `composerEditing` 写在 `node.data` 里，但每次渲染都由 `editingNodeId` 重新推出，刷新后自愈，不留陈旧态。
 - **退出输入态只由三件事触发**：换选到别的节点、多选（shift）、点空白（`onPaneClick`）。
   `onSelectionChange` 选中清单暂时为空时**不做判断**——React Flow 建新节点会先报一次 `[]`，
-  照抄灵枢那段守卫会把"双击菜单 → 新建节点"刚拿到的编辑态擦掉（踩过）。
+  这时清除编辑态会把"双击菜单 → 新建节点"刚拿到的编辑态擦掉。
 - **聚焦要跟帧重试**：React Flow 在节点测量完成前给 `.react-flow__node` 挂 `visibility: hidden`，
   那一帧 `focus()` 静默失败。新建节点时必须 rAF 重试到焦点真的落上（最多 8 帧）。
 - **引用分两种**：`CanvasReference.kind === 'image'` 画缩略图；`'text'`（或只有 text 没有 url）画 T 图标小方块，
@@ -122,25 +124,25 @@ CSS，不要新造平行结构。节点尺寸经 `--image-node-width` 注入（J
 空占位早就被浏览器回推 bridge 了，那条判断会让清理永远失效（踩过）。当前活动画布正是空占位时，
 先切到最近更新的有内容画布，别让用户对着空白页。
 
-## 顶栏与连线（灵枢照搬，几处按绘板布局调整）
+## 顶栏与连线（绘板交互约定）
 
 - **连线触发范围**：拖手柄松手时只要落在某个节点上就建边，**不要求对准圆形手柄**。
   `onConnectEnd` 里取 `event.target.closest('.react-flow__node')` 的 id 交给 `connectPending`；
   手柄对接成功的情况 `onConnect` 会先建边并清掉 `pendingConnectionRef`，走不到这段。
   `connectPending` 自带去重 + 自连守卫，同一对节点不会被接两次。
-- **画布下拉贴左边缘展开**（`canvas-page.css` 的 `.workflow-menu`：`left: 0; transform: none`）。
-  灵枢那里选择器在导航中部，用 `left: 50% + translateX(-50%)` 没问题；绘板它在最左侧，
-  沿用会把菜单推出屏幕外（用户报过）。另加 `max-width: calc(100vw - 24px)` 防窄窗口右侧溢出。
+- **画布下拉贴左边缘展开**（`canvas-page.css` 的 `.workflow-menu`：`left: 0; transform: none`），
+  并通过 `max-width: calc(100vw - 24px)` 防止窄窗口右侧溢出。
 - **顶栏透明**（`global.css` 的 `.hb-topbar`：`background: transparent; border-bottom: none`），
-  对齐灵枢 TopNav 新版——直接透出画布网点，不另起一块底色。
-- **节点浮层放不下就翻到卡片下方**（`CanvasPage` 的 `toolbarStyle` / `selectionToolbarStyle`）。
-  旧写法 `clamp(nodeTop - 52, 72, …)` 在节点顶到可视区上沿时会把工具栏按在安全线上、
-  正好压进卡片里（用户报"被挤下来"）。现在：`above >= 72` 浮上方，否则取 `卡片底部 + 12`，
-  再用 `min(…, wrapHeight - 56)` 保证不出底。两处浮层同一套规则，别只改一处。
+  直接透出画布网点，不另起一块底色。
+- **节点浮层放不下就完整翻到卡片下方**（`CanvasPage` 的 `toolbarStyle` / `selectionToolbarStyle`，
+  定位纯函数在 `src/lib/nodeOverlayPlacement.ts`）。旧写法 `clamp(nodeTop - 52, 72, …)`
+  在节点顶到可视区上沿时会把工具栏按在安全线上、正好压进卡片里（用户报"被挤下来"）。
+  现在：上方空间足够就贴上方，否则整体放到 `卡片底部 + 12`；不再把下方坐标 clamp 回顶部安全线。
+  横向仍居中并收在容器安全边距内。两处浮层共用同一套规则，别只改一处。
 
-- 画布选择器是灵枢 TopNav 的 `top-nav-workflow-*` / `workflow-menu-*` 结构（CSS 在 `canvas-page.css` 尾部，原封拷贝）：
+- 画布选择器使用本项目的 `top-nav-workflow-*` / `workflow-menu-*` 结构（CSS 在 `canvas-page.css` 尾部）：
   点名字重命名，箭头展开下拉做新建 / 切换 / 删除。**没有**删除、上传参考图、自动定位按钮——自动定位始终开启。
-- 连线是 `components/canvas/FlowEdge.tsx`（灵枢原封拷贝：渐变 beam + SMIL 流光）+ `CanvasPage.tsx` 里的
+- 连线由本项目的 `components/canvas/FlowEdge.tsx`（渐变 beam + SMIL 流光）和 `CanvasPage.tsx` 里的
   `CanvasEdge` 包装（`EDGE_INSET = 24`，用 `useInternalNode` 的实测宽度算节点边框，比偏移
   `props.sourceX` 稳——ReactFlow 对"伸出节点 40px 的 + 按钮 handle"测的位置有陈旧误差）。
   边的高亮分两档：与选中节点相连 `edge-related`（76%），边自身被选中 `selected`（72%）。

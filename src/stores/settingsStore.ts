@@ -75,3 +75,17 @@ export function activeProfileOf(settings: MediaSettings | null): ModelProfileVie
 export function profileReady(profile: ModelProfileView | null | undefined): boolean {
   return Boolean(profile?.keyConfigured && profile?.model);
 }
+
+/** 视频节点用的那一路配置：视频是独立分组，不跟生图抢 activeProfile。 */
+export function videoProfileOf(settings: MediaSettings | null): ModelProfileView | null {
+  if (!settings) return null;
+  const videos = settings.profiles.filter((profile) => (
+    profile.kind === 'video'
+    && profile.enabled !== false
+    && profile.keyConfigured
+    && Boolean(profile.baseUrl.trim())
+    // 默认模型可能还没回填（老配置 / 刚勾选）：只要有已勾选模型就算可用
+    && Boolean(profile.model || profile.enabledModels?.[0])
+  ));
+  return videos[0] || null;
+}

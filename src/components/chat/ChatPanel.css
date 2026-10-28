@@ -16,7 +16,7 @@
   height: 44px;
   padding: 0 var(--spacing-3);
   gap: var(--spacing-2);
-  border: 1px solid var(--control-border);
+  border: 1px solid var(--chat-fab-border);
   border-radius: var(--radius-full);
   background: var(--color-paper);
   color: var(--color-shadow);
@@ -54,7 +54,9 @@
 /* ── 抽屉外壳：右下角悬浮卡片（不是整侧抽屉）── */
 .hb-chat-panel {
   --hb-chat-width: 360px;
-  --hb-chat-panel-radius: var(--radius-xl);
+  --hb-chat-min-width: 320px;
+  --hb-chat-content-opacity: 1;
+  --hb-chat-panel-radius: var(--radius-lg);
   /* 收起时只剩右下角 44px 的可见区域，圆角必须比控件小，
      否则会把这块区域渲染成一个明显的圆形。 */
   --hb-chat-collapse-radius: var(--radius-2xs);
@@ -65,10 +67,12 @@
   display: flex;
   flex-direction: column;
   width: var(--hb-chat-width);
+  box-sizing: border-box;
+  min-width: 0;
   /* 最大高度不贴窗口上下沿：留 24px 呼吸位 */
   height: calc(100dvh - 24px);
   max-width: calc(100vw - 24px);
-  border: 0;
+  border: 1px solid var(--work-dialog-border);
   border-radius: var(--hb-chat-panel-radius);
   /* 与生成历史弹窗同一套玻璃：半透明底 + 背景模糊，替代原先的不透明面板色 */
   background: var(--surface-popover-glass-bg);
@@ -80,6 +84,40 @@
   transform-origin: right bottom;
   will-change: clip-path, border-radius, opacity, transform;
   animation: hb-chat-panel-enter var(--motion-slower) var(--ease-emphasized) both;
+}
+
+.hb-chat-panel.is-resizing {
+  animation: none;
+  transition: none;
+}
+
+.hb-chat-panel.is-resized {
+  animation: none;
+}
+
+.hb-chat-panel.is-content-hidden .hb-chat-header,
+.hb-chat-panel.is-content-hidden .hb-chat-panel-body {
+  opacity: var(--hb-chat-content-opacity, 0);
+  min-width: var(--hb-chat-min-width, 320px);
+  pointer-events: none;
+}
+
+.hb-chat-panel.is-content-hidden .hb-chat-panel-body {
+  animation: none;
+  will-change: auto;
+}
+
+.hb-chat-panel.is-resized .hb-chat-panel-body {
+  animation: none;
+}
+
+.hb-chat-panel.is-content-hidden .hb-chat-header {
+  border-bottom-color: transparent;
+}
+
+.hb-chat-panel.is-collapsed-drag {
+  transform: translateX(var(--hb-chat-collapse-x, 0px));
+  opacity: var(--hb-chat-shell-opacity, 0);
 }
 
 .hb-chat-panel.is-leaving {
@@ -150,9 +188,10 @@
   top: 0;
   bottom: 0;
   left: 0;
-  width: 6px;
+  width: 16px;
   z-index: 2;
   cursor: col-resize;
+  touch-action: none;
 }
 
 /* ── 头部 ── */
@@ -164,7 +203,11 @@
   gap: var(--spacing-2);
   min-height: 60px;
   padding: var(--spacing-3) var(--spacing-4);
-  border-bottom: 1px solid var(--divider-subtle);
+  border-bottom: 0;
+}
+
+.hb-chat-header > :not(.hb-chat-title-btn) {
+  margin-left: auto;
 }
 
 .hb-chat-title-btn {
@@ -173,8 +216,7 @@
   gap: 0;
   flex: 0 1 auto;
   min-width: 0;
-  /* 右侧要同时容纳 ID 按钮（约 58px）与关闭按钮（30px）+ 间距：比原来多留一档 */
-  max-width: calc(100% - 108px);
+  max-width: 280px;
   padding: var(--spacing-1) 0;
   border: 0;
   border-radius: var(--radius-sm);
@@ -190,7 +232,7 @@
 }
 
 .hb-chat-title-btn strong {
-  max-width: none;
+  max-width: 100%;
   min-width: 0;
   flex: 0 1 auto;
   font-size: var(--font-size-md);
@@ -236,7 +278,7 @@
   position: relative;
   display: flex;
   align-items: center;
-  gap: 2px;
+  gap: var(--spacing-2);
   min-width: 0;
   flex: 1;
 }
@@ -247,8 +289,8 @@
   min-width: 0;
   max-width: 100%;
   gap: var(--spacing-1);
-  height: 28px;
-  padding: 0 var(--spacing-2);
+  height: 32px;
+  padding: 0 var(--spacing-3);
   border: 0;
   border-radius: var(--radius-xs);
   background: transparent;
@@ -268,6 +310,10 @@
   width: 16px;
   height: 16px;
   flex: none;
+}
+
+.hb-chat-image-model-button span {
+  margin-left: var(--spacing-1);
 }
 
 .hb-chat-image-model-button:hover,
@@ -449,7 +495,10 @@
   top: calc(100% + var(--spacing-1));
   left: var(--spacing-2);
   z-index: 5;
-  width: 300px;
+  display: flex;
+  flex-direction: column;
+  width: 240px;
+  height: min(320px, calc(100dvh - var(--spacing-6)));
   max-width: calc(100% - var(--spacing-4));
   padding: var(--spacing-1);
   border: 1px solid var(--surface-popover-border);
@@ -479,8 +528,21 @@
 }
 
 .hb-chat-thread-list {
-  max-height: min(400px, calc(100dvh - 220px));
+  flex: 1;
+  min-height: 0;
   overflow-y: auto;
+}
+
+.hb-chat-thread-group + .hb-chat-thread-group {
+  margin-top: var(--spacing-2);
+}
+
+.hb-chat-thread-group-label {
+  padding: var(--spacing-2) var(--spacing-2) var(--spacing-1);
+  color: var(--color-text-tertiary);
+  font-size: var(--font-size-2xs);
+  font-weight: var(--font-weight-regular);
+  line-height: var(--line-height-tight);
 }
 
 .hb-chat-thread-row {
@@ -538,7 +600,15 @@
   align-items: center;
   gap: 2px;
   flex: 0 0 auto;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--motion-fast) var(--ease-out);
+}
+
+.hb-chat-thread-row:hover .hb-chat-thread-actions,
+.hb-chat-thread-row:focus-within .hb-chat-thread-actions {
   opacity: 1;
+  pointer-events: auto;
 }
 
 /* 重命名时整行让位给输入框，actions 隐藏。 */
@@ -736,7 +806,7 @@
   border-color: transparent;
   background: color-mix(in srgb, var(--color-paper) 6%, transparent);
   box-shadow: none;
-  backdrop-filter: blur(12px);
+  backdrop-filter: var(--surface-modal-backdrop-blur);
 }
 
 .hb-chat-user-bubble {
@@ -790,7 +860,7 @@
 .hb-chat-ask-response {
   display: grid;
   gap: var(--spacing-1);
-  width: min(100%, 360px);
+  width: min(100%, 240px);
   overflow: hidden;
   border-radius: var(--radius-sm);
   background: var(--color-ui-control-panel);
@@ -1060,6 +1130,20 @@
 .hb-chat-text-actions button:focus-visible {
   background: var(--color-ui-control-hover);
   color: var(--color-text-primary);
+}
+
+.hb-chat-text-actions .hb-chat-video-script-action {
+  width: auto;
+  gap: var(--spacing-1);
+  padding: 0 var(--spacing-2);
+  color: var(--color-text-tertiary);
+  font-size: var(--font-size-2xs);
+  white-space: nowrap;
+}
+
+.hb-chat-text-actions .hb-chat-video-script-action svg {
+  width: 14px;
+  height: 14px;
 }
 
 /* 对话文案可选中复制：页面根 .image-canvas-page 是 user-select:none（画布交互），
@@ -1424,11 +1508,6 @@
   transition: opacity var(--motion-fast) var(--ease-out);
 }
 
-.hb-chat-media-actions {
-  right: 50%;
-  transform: translateX(50%);
-}
-
 .hb-chat-media-cell:hover .hb-chat-media-actions,
 .hb-chat-media-actions:focus-within,
 .hb-chat-media-cell:focus-within {
@@ -1455,23 +1534,34 @@
 }
 
 /* ── 输入区 ── */
+.hb-chat-composer-wrap {
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+  gap: var(--spacing-2);
+  min-width: 0;
+  margin: 6px;
+}
+
 .hb-chat-composer {
   position: relative;
   display: flex;
   flex-direction: column;
   gap: var(--spacing-1);
-  min-height: 112px;
-  margin: var(--spacing-2);
+  min-height: 160px;
+  margin: 0;
   padding: var(--spacing-3);
-  border: 0;
-  border-radius: var(--radius-lg);
-  background: var(--work-dialog-control-bg);
+  border: 1px solid var(--work-dialog-border);
+  border-radius: var(--radius-md);
+  background: var(--chat-composer-glass-bg);
+  backdrop-filter: var(--surface-popover-glass-blur);
+  -webkit-backdrop-filter: var(--surface-popover-glass-blur);
   box-shadow: var(--chat-composer-shadow);
 }
 
 /* 聚焦输入时不再给整块输入容器增加外描边，保持和画布输入节点一致。 */
 .hb-chat-composer:focus-within {
-  border-color: transparent;
+  border-color: var(--work-dialog-border);
 }
 
 .hb-chat-chips {
@@ -1633,11 +1723,12 @@
 .hb-chat-input {
   display: block;
   flex: 1;
-  min-height: 64px;
+  min-width: 0;
+  min-height: 98px;
   max-height: 160px;
-  padding: var(--spacing-1) var(--spacing-2);
+  padding: 0;
   border: 0;
-  border-radius: var(--radius-sm);
+  border-radius: 0;
   background: transparent;
   color: var(--color-text-primary);
   font-family: var(--font-sans);
@@ -1648,9 +1739,97 @@
   white-space: pre-wrap;
   word-break: break-word;
   overflow-y: auto;
+  overflow-wrap: anywhere;
 }
 
-.hb-chat-input:empty::before {
+.hb-chat-input [data-chat-inline-token] {
+  vertical-align: middle;
+}
+
+.hb-chat-role-inline-token {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--spacing-1);
+  max-width: 140px;
+  margin: 0 var(--spacing-1) 0 0;
+  padding: var(--spacing-1) var(--spacing-1) var(--spacing-1) var(--spacing-1);
+  border-radius: var(--radius-full);
+  background: var(--color-ui-control-active);
+  vertical-align: middle;
+  user-select: none;
+}
+
+.hb-chat-role-inline-token img {
+  display: block;
+  width: var(--spacing-6);
+  height: var(--spacing-6);
+  flex: 0 0 auto;
+  box-sizing: border-box;
+  border: var(--chat-role-avatar-outline-width) solid var(--chat-role-avatar-outline);
+  border-radius: var(--radius-full);
+  object-fit: cover;
+}
+
+.hb-chat-role-inline-token-avatar {
+  display: inline-grid;
+  width: var(--spacing-6);
+  height: var(--spacing-6);
+  flex: 0 0 auto;
+  box-sizing: border-box;
+  place-items: center;
+  border: var(--chat-role-avatar-outline-width) solid var(--chat-role-avatar-outline);
+  border-radius: var(--radius-full);
+  background: var(--color-ui-control-panel);
+  color: var(--color-text-primary);
+  font-size: var(--font-size-sm);
+}
+
+.hb-chat-role-inline-token-avatar[hidden] {
+  display: none;
+}
+
+.hb-chat-role-inline-token-label {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--color-text-primary);
+  font-size: var(--font-size-xs);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hb-chat-role-inline-token-remove {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: var(--spacing-6);
+  height: var(--spacing-6);
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-full);
+  background: transparent;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  transition: background-color var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out);
+}
+
+.hb-chat-role-inline-token-remove svg {
+  width: var(--spacing-3);
+  height: var(--spacing-3);
+  pointer-events: none;
+}
+
+.hb-chat-role-inline-token-remove:hover {
+  background: var(--control-bg-hover);
+  color: var(--color-text-primary);
+}
+
+.hb-chat-role-inline-token-remove:focus-visible {
+  outline: 1px solid var(--control-border-focus);
+  outline-offset: 1px;
+}
+
+.hb-chat-input.is-empty::after {
   content: attr(data-placeholder);
   color: var(--color-text-tertiary);
   pointer-events: none;
@@ -1713,12 +1892,256 @@
 }
 
 .hb-chat-input-row {
+  position: relative;
   display: flex;
-  align-items: flex-end;
+  flex-direction: column;
+  align-items: stretch;
   gap: var(--spacing-2);
   min-height: 64px;
   min-width: min(100%, 140px);
   flex: 1;
+}
+
+.hb-chat-role-lane {
+  --hb-role-size: var(--spacing-8);
+  --hb-role-step: calc(var(--spacing-8) + var(--spacing-1));
+  --hb-role-overlap-step: calc(var(--spacing-4) + var(--spacing-1));
+  position: relative;
+  z-index: 20;
+  height: var(--hb-role-size);
+  flex-shrink: 0;
+  margin: 0 var(--spacing-3);
+}
+
+.hb-chat-role-avatar {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--hb-role-size, var(--spacing-8));
+  height: var(--hb-role-size, var(--spacing-8));
+  flex: 0 0 auto;
+  overflow: hidden;
+  box-sizing: border-box;
+  border: var(--chat-role-avatar-outline-width) solid var(--chat-role-avatar-outline);
+  border-radius: var(--radius-full);
+  background: var(--color-ui-control-panel);
+  color: var(--color-text-primary);
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-medium);
+  line-height: 1;
+  transition: transform var(--motion-slow) var(--ease-emphasized);
+}
+
+.hb-chat-role-avatar img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.hb-chat-role-picker {
+  --hb-role-count: 1;
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: calc(var(--hb-role-size) + (var(--hb-role-count) - 1) * var(--hb-role-overlap-step));
+  height: var(--hb-role-size);
+  max-width: 100%;
+}
+
+.hb-chat-role-picker:hover,
+.hb-chat-role-picker:has(:focus-visible),
+.hb-chat-role-lane.is-open .hb-chat-role-picker {
+  width: calc(var(--hb-role-size) + (var(--hb-role-count) - 1) * var(--hb-role-step));
+}
+
+.hb-chat-role-stack-button {
+  --hb-role-index: 0;
+  position: absolute;
+  top: 0;
+  right: 0;
+  z-index: calc(20 - var(--hb-role-index));
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--hb-role-size);
+  height: var(--hb-role-size);
+  box-sizing: border-box;
+  flex: 0 0 auto;
+  padding: 0;
+  border: 1px solid var(--control-border);
+  border-radius: var(--radius-full);
+  background: var(--color-bg-surface);
+  color: var(--color-text-secondary);
+  box-shadow: var(--shadow-sm);
+  cursor: pointer;
+  transform: translateX(calc((var(--hb-role-index) + 1 - var(--hb-role-count)) * var(--hb-role-overlap-step)));
+  transition:
+    transform var(--motion-slower) var(--ease-emphasized),
+    border-color var(--motion-fast) var(--ease-out),
+    background-color var(--motion-fast) var(--ease-out),
+    color var(--motion-fast) var(--ease-out);
+}
+
+.hb-chat-role-picker:hover .hb-chat-role-stack-button,
+.hb-chat-role-picker:has(:focus-visible) .hb-chat-role-stack-button,
+.hb-chat-role-lane.is-open .hb-chat-role-stack-button {
+  transform: translateX(calc((var(--hb-role-index) + 1 - var(--hb-role-count)) * var(--hb-role-step)));
+}
+
+.hb-chat-role-stack-button.is-active {
+  border-color: var(--control-border-focus);
+  background: var(--control-bg-selected);
+  color: var(--control-fg-selected);
+}
+
+.hb-chat-role-stack-button:hover,
+.hb-chat-role-stack-button:focus-visible {
+  z-index: 30;
+  border-color: var(--control-border-hover);
+  background: var(--color-ui-control-hover);
+  color: var(--color-text-primary);
+  outline: none;
+}
+
+.hb-chat-role-stack-button:focus-visible {
+  outline: 1px solid var(--control-border-focus);
+  outline-offset: var(--spacing-1);
+}
+
+.hb-chat-role-stack-button:hover .hb-chat-role-avatar,
+.hb-chat-role-stack-button:focus-visible .hb-chat-role-avatar {
+  transform: translateY(-2px) scale(1.06);
+}
+
+.hb-chat-role-check {
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--spacing-3);
+  height: var(--spacing-3);
+  border-radius: var(--radius-full);
+  background: var(--color-text-primary);
+  color: var(--color-bg-canvas);
+  pointer-events: none;
+  opacity: 0;
+  transform: scale(0.7);
+  transition: opacity var(--motion-fast) var(--ease-out), transform var(--motion-fast) var(--ease-out);
+}
+
+.hb-chat-role-check svg {
+  width: 100%;
+  height: 100%;
+}
+
+.hb-chat-role-stack-button.is-active .hb-chat-role-check {
+  opacity: 1;
+  transform: scale(1);
+}
+
+.hb-chat-role-more > svg {
+  width: var(--icon-glyph-sm);
+  height: var(--icon-glyph-sm);
+}
+
+.hb-chat-role-tooltip {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + var(--spacing-2));
+  z-index: 50;
+  display: flex;
+  flex-direction: column;
+  width: max-content;
+  max-width: 100%;
+  gap: var(--spacing-1);
+  padding: var(--spacing-2) var(--spacing-3);
+  border: 1px solid var(--surface-popover-border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-popover-glass-bg);
+  backdrop-filter: var(--surface-popover-glass-blur);
+  -webkit-backdrop-filter: var(--surface-popover-glass-blur);
+  box-shadow: var(--surface-popover-glass-shadow);
+  color: var(--color-text-primary);
+  text-align: left;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transform: translateY(var(--spacing-1));
+  transition: opacity var(--motion-tooltip) var(--ease-out), transform var(--motion-tooltip) var(--ease-out), visibility var(--motion-tooltip) var(--ease-out);
+}
+
+.hb-chat-role-tooltip strong {
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-medium);
+}
+
+.hb-chat-role-tooltip.is-visible {
+  opacity: 1;
+  visibility: visible;
+  transform: translateY(0);
+}
+
+.hb-chat-role-menu {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + var(--spacing-2));
+  z-index: 50;
+  width: min(240px, 100%);
+  max-height: min(280px, 45dvh);
+  padding: var(--spacing-1);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  border: 1px solid var(--surface-popover-border);
+  border-radius: var(--radius-md);
+  background: var(--surface-popover-glass-bg);
+  backdrop-filter: var(--surface-popover-glass-blur);
+  -webkit-backdrop-filter: var(--surface-popover-glass-blur);
+  box-shadow: var(--surface-popover-glass-shadow);
+}
+
+.hb-chat-role-menu-item {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-2);
+  width: 100%;
+  padding: var(--spacing-2);
+  border: 0;
+  border-radius: var(--radius-xs);
+  background: transparent;
+  color: var(--color-text-primary);
+  text-align: left;
+  cursor: pointer;
+}
+
+.hb-chat-role-menu-item > span:last-child {
+  display: grid;
+  min-width: 0;
+  gap: var(--spacing-1);
+  overflow-wrap: anywhere;
+}
+
+.hb-chat-role-menu-item strong {
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-medium);
+}
+
+.hb-chat-role-menu-item:hover {
+  background: var(--control-bg-hover);
+}
+
+.hb-chat-role-menu-item.is-active {
+  background: var(--control-bg-selected);
+  color: var(--control-fg-selected);
+}
+
+.hb-chat-role-menu-item:focus-visible {
+  outline: 1px solid var(--control-border-focus);
+  outline-offset: -1px;
 }
 
 .hb-chat-tool-entry {
@@ -1726,7 +2149,7 @@
   align-items: center;
   justify-content: flex-start;
   gap: var(--spacing-2);
-  padding: 0 var(--spacing-1);
+  padding: 0;
 }
 
 .hb-chat-tool-entry .hb-chat-send {
@@ -1988,11 +2411,26 @@
     transition: none;
     transform: none;
   }
+
+  .hb-chat-role-avatar,
+  .hb-chat-role-stack-button,
+  .hb-chat-role-check,
+  .hb-chat-role-tooltip {
+    transition: none;
+  }
 }
 
 @media (hover: none) {
   .hb-chat-media-actions {
     opacity: 1;
+  }
+
+  .hb-chat-role-picker {
+    width: calc(var(--hb-role-size) + (var(--hb-role-count) - 1) * var(--hb-role-step));
+  }
+
+  .hb-chat-role-stack-button {
+    transform: translateX(calc((var(--hb-role-index) + 1 - var(--hb-role-count)) * var(--hb-role-step)));
   }
 
   .hb-chat-msg-attachment-preview,
@@ -2018,18 +2456,22 @@
   .hb-chat-panel {
     right: var(--spacing-3);
     bottom: var(--spacing-3);
-    width: calc(100vw - var(--spacing-6));
+    width: var(--hb-chat-width);
     max-width: calc(100vw - var(--spacing-6));
     height: calc(100dvh - var(--spacing-6));
     min-height: min(420px, calc(100dvh - var(--spacing-6)));
   }
 
   .hb-chat-composer {
-    min-height: 112px;
+    min-height: 160px;
   }
 
   .hb-chat-input {
-    min-height: 52px;
+    min-height: 98px;
+  }
+
+  .hb-chat-role-name {
+    max-width: 72px;
   }
 
   .hb-chat-fab {
@@ -2038,6 +2480,7 @@
   }
 
   .hb-chat-thread-menu {
-    width: min(360px, calc(100vw - var(--spacing-6)));
+    width: min(240px, calc(100vw - var(--spacing-6)));
+    height: min(320px, calc(100dvh - var(--spacing-6)));
   }
 }

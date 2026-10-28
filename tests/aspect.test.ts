@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { composerWidthForRatio, detectPromptRatio, formatRatio, nodeAspectRatio, nodeBoxFor, nodeRatio, nodeWidthFor, nodeWidthForAspect, normalizeAspectRatio, parseSizeRatio, pickSize, ratioToNumber, requestedRatioFromPrompt } from '@/lib/aspect';
+import { composerWidthForRatio, detectPromptRatio, formatRatio, nodeAspectRatio, nodeBoxFor, nodeRatio, nodeWidthFor, nodeWidthForAspect, normalizeAspectRatio, parseSizeRatio, pickSize, ratioToNumber, requestedRatioFromPrompt, videoNodeBoxFor } from '@/lib/aspect';
 import type { CanvasNode, CanvasNodeData } from '@/types';
 
 function node(data: Partial<CanvasNode['data']>): CanvasNode {
@@ -159,6 +159,15 @@ describe('nodeWidthFor', () => {
     expect(nodeWidthFor(data({ kind: 'composer', cardWidth: 50 }))).toBe(280);
     expect(nodeWidthFor(data({ kind: 'composer', cardWidth: 9999 }))).toBe(600);
   });
+
+  it('视频成品与图片节点共用比例宽度档位，输入态保留原宽度', () => {
+    expect(nodeWidthFor(data({ kind: 'video', videoStatus: 'idle', cardWidth: 320 }))).toBe(320);
+    expect(videoNodeBoxFor(data({ kind: 'video', videoStatus: 'done', videoRatio: '16:9', cardWidth: 320 }))).toEqual({ width: 400, height: 225 });
+    expect(videoNodeBoxFor(data({ kind: 'video', videoStatus: 'done', videoRatio: '1:1', cardWidth: 320 }))).toEqual({ width: 320, height: 320 });
+    expect(videoNodeBoxFor(data({ kind: 'video', videoStatus: 'done', videoRatio: '9:16', cardWidth: 320 }))).toEqual({ width: 280, height: 498 });
+    expect(nodeWidthFor(data({ kind: 'video', videoStatus: 'done', videoRatio: '16:9', cardWidth: 320 }))).toBe(400);
+    expect(nodeBoxFor(data({ kind: 'video', videoStatus: 'done', videoRatio: '16:9', cardWidth: 320 }))).toEqual({ width: 400, height: 225 });
+  });
 });
 
 describe('nodeBoxFor', () => {
@@ -175,5 +184,12 @@ describe('nodeBoxFor', () => {
     expect(wide.width).toBe(400);
     expect(wide.height).toBeCloseTo(224, 6);
     expect(nodeBoxFor(data({ kind: 'composer' }))).toEqual({ width: 320, height: 320 });
+  });
+
+  it('Markdown 文本节点使用固定卡片尺寸，不按图片比例扩高', () => {
+    expect(nodeBoxFor(data({ kind: 'text', cardWidth: 320, nodeHeight: 240 }))).toEqual({ width: 320, height: 240 });
+    expect(nodeBoxFor(data({ kind: 'text', cardWidth: 500, nodeHeight: 480 }))).toEqual({ width: 500, height: 480 });
+    expect(nodeBoxFor(data({ kind: 'text', cardWidth: 320, nodeHeight: 100 }))).toEqual({ width: 320, height: 240 });
+    expect(nodeBoxFor(data({ kind: 'text', cardWidth: 320, nodeHeight: 900 }))).toEqual({ width: 320, height: 620 });
   });
 });

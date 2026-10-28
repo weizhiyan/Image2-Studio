@@ -120,7 +120,6 @@ export default function ClarificationModal({
                 onClick={() => setActiveIndex(index)}
               >
                 <span>{`问题 ${index + 1}`}</span>
-                {answered(question) ? <i aria-label="已回答" /> : null}
               </button>
             ))}
           </div>

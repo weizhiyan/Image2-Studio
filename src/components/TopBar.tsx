@@ -1,6 +1,10 @@
 import { useEffect, useRef, useState } from 'react';
 import type { CanvasDoc } from '@/types';
 import { ChevronIcon, EditIcon, TrashIcon } from '@/components/canvas/NodeChrome';
+import AgentConnectDialog from '@/components/AgentConnectDialog';
+import AgentConnectIcon from '@/components/AgentConnectIcon';
+import AppModeTabs from '@/components/AppModeTabs';
+import { getAgentStatus, type AgentStatus } from '@/lib/bridge';
 
 interface TopBarProps {
   canvases: CanvasDoc[];
@@ -34,6 +38,8 @@ export default function TopBar({
   const [menuEditingId, setMenuEditingId] = useState('');
   const [nameDraft, setNameDraft] = useState(active?.name || '');
   const [deleteTarget, setDeleteTarget] = useState<CanvasDoc | null>(null);
+  const [agentOpen, setAgentOpen] = useState(false);
+  const [agentStatus, setAgentStatus] = useState<AgentStatus>({ connected: false });
   const wrapRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -62,6 +68,24 @@ export default function TopBar({
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [deleteTarget]);
 
+  useEffect(() => {
+    let alive = true;
+    const refresh = async () => {
+      try {
+        const next = await getAgentStatus();
+        if (alive) setAgentStatus(next);
+      } catch {
+        if (alive) setAgentStatus({ connected: false });
+      }
+    };
+    void refresh();
+    const timer = window.setInterval(() => void refresh(), 8000);
+    return () => {
+      alive = false;
+      window.clearInterval(timer);
+    };
+  }, []);
+
   const commitName = () => {
     const trimmed = nameDraft.trim();
     const targetId = menuEditingId || active?.id || '';
@@ -74,6 +98,7 @@ export default function TopBar({
 
   return (
     <header className="hb-topbar">
+      <AppModeTabs mode="canvas" />
       <div className="top-nav-workflow-wrap" ref={wrapRef}>
         <div className="top-nav-workflow-control">
           {editing ? (
@@ -237,12 +262,33 @@ export default function TopBar({
       </span>
       <button
         type="button"
+        className={`agent-connect-btn${agentStatus.connected ? ' is-connected' : ''}`}
+        aria-label={agentStatus.connected ? 'Agent 已连接，查看连接说明' : '连接第三方 Agent'}
+        aria-haspopup="dialog"
+        aria-expanded={agentOpen}
+        onClick={() => {
+          setAgentOpen(true);
+          void getAgentStatus().then(setAgentStatus).catch(() => setAgentStatus({ connected: false }));
+        }}
+      >
+        <AgentConnectIcon />
+        <span className="agent-connect-btn-dot" aria-hidden="true" />
+      </button>
+      <button
+        type="button"
         className="image-canvas-btn"
         aria-pressed={settingsOpen}
         onClick={onToggleSettings}
       >
         模型设置
       </button>
+      <AgentConnectDialog
+        open={agentOpen}
+        status={agentStatus}
+        canvasId={active?.id}
+        canvasName={active?.name}
+        onClose={() => setAgentOpen(false)}
+      />
     </header>
   );
 }

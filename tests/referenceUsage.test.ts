@@ -14,6 +14,8 @@ describe('detectReferenceUsage 参考图用法预判', () => {
     expect(detectReferenceUsage('基于这张图给猫加一顶帽子')).toBe('edit');
     expect(detectReferenceUsage('去掉图片里的文字')).toBe('edit');
     expect(detectReferenceUsage('在这张图上加一团篝火')).toBe('edit');
+    expect(detectReferenceUsage('将这张图改为 16:9，右侧扩展留白')).toBe('edit');
+    expect(detectReferenceUsage('扩展画布，补全右侧的云海')).toBe('edit');
   });
 
   it('两种说法同时出现时以改图为准（edit 优先）', () => {

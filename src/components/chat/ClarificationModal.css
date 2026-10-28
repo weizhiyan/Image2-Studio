@@ -1,8 +1,8 @@
 .hb-clarification-overlay {
   position: relative;
-  width: calc(100% + var(--spacing-4));
-  margin-left: calc(var(--spacing-2) * -1);
-  padding: 0 var(--spacing-2) var(--spacing-2);
+  width: auto;
+  margin: 0 var(--spacing-2) var(--spacing-2);
+  padding: 0;
 }
 
 .hb-clarification-modal {
@@ -86,42 +86,52 @@
 
 .hb-clarification-tabs {
   display: flex;
-  gap: var(--spacing-1);
+  gap: var(--spacing-2);
   overflow-x: auto;
   margin: 0 var(--spacing-3) var(--spacing-2);
-  padding: var(--spacing-1);
-  border-radius: var(--radius-sm);
-  background: var(--color-ui-control-hover);
+  padding: 0 var(--spacing-1);
+  border-bottom: 1px solid var(--divider-subtle);
 }
 
 .hb-clarification-tabs button {
   position: relative;
   display: inline-flex;
+  flex: 1 0 64px;
   align-items: center;
   justify-content: center;
   gap: var(--spacing-1);
   min-width: 64px;
   height: var(--control-height-compact);
-  padding: 0 var(--spacing-2);
+  padding: 0 var(--spacing-1);
   border: 0;
-  border-radius: var(--radius-2xs);
+  border-radius: 0;
   background: transparent;
-  color: var(--color-text-secondary);
+  color: var(--color-text-tertiary);
   font-size: var(--font-size-xs);
   cursor: pointer;
 }
 
-.hb-clarification-tabs button:hover,
+.hb-clarification-tabs button:hover {
+  color: var(--color-text-secondary);
+}
+
 .hb-clarification-tabs button.is-active {
-  background: var(--color-ui-control-active);
   color: var(--color-text-primary);
 }
 
-.hb-clarification-tabs i {
-  width: 6px;
-  height: 6px;
+.hb-clarification-tabs button.is-active::after {
+  position: absolute;
+  right: 0;
+  bottom: -1px;
+  left: 0;
+  height: 2px;
   border-radius: var(--radius-full);
-  background: var(--color-accent-green);
+  background: var(--color-text-primary);
+  content: '';
+}
+
+.hb-clarification-tabs i {
+  display: none;
 }
 
 .hb-clarification-body {
@@ -328,8 +338,8 @@
 
 @media (max-width: 560px) {
   .hb-clarification-overlay {
-    width: 100%;
-    margin-left: 0;
+    width: auto;
+    margin: 0 var(--spacing-2) var(--spacing-2);
     padding-inline: 0;
   }
 

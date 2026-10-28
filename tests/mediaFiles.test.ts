@@ -19,6 +19,24 @@ describe('媒体引用收集（删节点按这个清单真删文件）', () => {
     }));
     expect(urls).toEqual(['/api/files/a.png', '/api/files/b.png']);
   });
+
+  it('视频节点的成品也进清理清单（视频文件更大，漏删更疼）', () => {
+    const urls = collectMediaUrls(nodeData({
+      kind: 'video',
+      videoUrl: '/api/files/vid_1.mp4',
+      videoFileName: 'vid_1.mp4',
+    }));
+    expect(urls).toEqual(['/api/files/vid_1.mp4']);
+  });
+
+  it('视频节点同时带图（首帧来源）时两个都收', () => {
+    const urls = collectMediaUrls(nodeData({
+      kind: 'video',
+      imageUrl: '/api/files/first.png',
+      videoUrl: '/api/files/vid_2.mp4',
+    }));
+    expect(urls).toEqual(['/api/files/first.png', '/api/files/vid_2.mp4']);
+  });
 });
 
 describe('粘贴副本媒体改写（副本与原件各占一个文件）', () => {

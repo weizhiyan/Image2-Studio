@@ -11,17 +11,35 @@ export interface ClipboardItemLike {
   getAsFile: () => ClipboardFileLike | null;
 }
 
+export function findClipboardImages(input: {
+  files?: ClipboardFileLike[] | null;
+  items?: ClipboardItemLike[] | null;
+}): ClipboardFileLike[] {
+  const fromFiles = Array.from(input.files || []).filter((item) => item.type.startsWith('image/'));
+  if (fromFiles.length > 0) return fromFiles;
+
+  return Array.from(input.items || [])
+    .filter((item) => item.kind === 'file' && item.type.startsWith('image/'))
+    .map((item) => item.getAsFile())
+    .filter((file): file is ClipboardFileLike => Boolean(file));
+}
+
 export function findClipboardImage(input: {
   files?: ClipboardFileLike[] | null;
   items?: ClipboardItemLike[] | null;
 }): ClipboardFileLike | null {
-  const fromFiles = Array.from(input.files || []).find((item) => item.type.startsWith('image/'));
-  if (fromFiles) return fromFiles;
-  // 某些环境（WebKit / 应用内浏览器）paste 事件的 files 是空的，文件只挂在 items 上
-  for (const item of Array.from(input.items || [])) {
-    if (item.kind !== 'file' || !item.type.startsWith('image/')) continue;
-    const file = item.getAsFile();
-    if (file) return file;
-  }
-  return null;
+  return findClipboardImages(input)[0] || null;
+}
+
+export function extractClipboardImageUrl(values: Array<{ type: string; text: string }>): string {
+  const html = values.find((item) => item.type === 'text/html')?.text || '';
+  const htmlSource = /<img\b[^>]*\bsrc=["']([^"']+)["']/i.exec(html)?.[1]?.trim() || '';
+  if (/^(https?:\/\/|data:image\/)/i.test(htmlSource)) return htmlSource;
+
+  const uriList = values.find((item) => item.type === 'text/uri-list')?.text || '';
+  const uri = uriList.split(/\r?\n/).map((line) => line.trim()).find((line) => /^(https?:\/\/|data:image\/)/i.test(line));
+  if (uri) return uri;
+
+  const plainText = values.find((item) => item.type === 'text/plain')?.text.trim() || '';
+  return /^(https?:\/\/|data:image\/)/i.test(plainText) ? plainText : '';
 }

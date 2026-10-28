@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type RefObject, type SetStateAction } from 'react';
 import {
   ReactFlow,
+  ViewportPortal,
   Background,
   BackgroundVariant,
   applyEdgeChanges,
@@ -24,6 +25,9 @@ import '@xyflow/react/dist/style.css';
 import '@/components/canvas/ImageNodes.css';
 import FlowImageNode from '@/components/canvas/FlowImageNode';
 import FlowEdge from '@/components/canvas/FlowEdge';
+import CanvasGroupNode from '@/components/canvas/CanvasGroupNode';
+import CanvasTextNode from '@/components/canvas/CanvasTextNode';
+import AssetLibraryPanel from '@/components/canvas/AssetLibraryPanel';
 import TopBar from '@/components/TopBar';
 import SettingsPanel from '@/components/SettingsPanel';
 import AddMenu from '@/components/AddMenu';
@@ -31,8 +35,21 @@ import NodeConnectionMenu from '@/components/canvas/NodeConnectionMenu';
 import { CanvasDock, CanvasRail } from '@/components/canvas/CanvasControls';
 import { useCanvasViewControls } from '@/components/canvas/useCanvasViewControls';
 import { DEFAULT_CANVAS_VIEWPORT, isNodeBoxVisible } from '@/lib/canvasViewport';
-import { useCanvasStore } from '@/stores/canvasStore';
-import { activeProfileOf, useSettingsStore } from '@/stores/settingsStore';
+import { applyFinalDraggedPositions } from '@/lib/canvasDrag';
+import { placeNodeToolbar } from '@/lib/nodeOverlayPlacement';
+import {
+  absoluteNodePosition,
+  CANVAS_GROUP_HEADER_HEIGHT,
+  CANVAS_GROUP_PADDING,
+  canvasTidyGraph,
+  collectCanvasGroupMembers,
+  createCanvasGroupGraph,
+  detachCanvasNode,
+  dissolveCanvasGroup,
+  normalizeCanvasGroups,
+  useCanvasStore,
+} from '@/stores/canvasStore';
+import { activeProfileOf, useSettingsStore, videoProfileOf } from '@/stores/settingsStore';
 import { imageModelOptionsOf } from '@/lib/imageModelOptions';
 import { pickTextProfile, resolveDirect, shouldEnhancePrompt } from '@/lib/enhance';
 import { createId } from '@/lib/id';
@@ -40,12 +57,16 @@ import { tidyLayout, type TidyAvoidRect } from '@/lib/tidyLayout';
 import { areCanvasReferencesEqual, buildReferenceNumberingInstruction } from '@/lib/references';
 import { applyMediaRemap, collectMediaUrls, orphanCopiedUrls } from '@/lib/mediaFiles';
 import { normalizeReferenceDataUrl } from '@/lib/imageData';
+import { extractClipboardImageUrl, findClipboardImages } from '@/lib/clipboardImage';
 import {
   appendUniqueCanvasConnection,
+  canConnectCanvasNodeKinds,
   connectionForNewNode,
   menuClientPoint,
   type CanvasPendingConnection,
 } from '@/lib/canvasConnections';
+import { classifyVideoImageReference } from '@/lib/videoReferences';
+import { fillVideoSchemaDefaults, videoUploadParamForMode } from '@/lib/videoSchemaDefaults';
 
 /**
  * composer 的上游引用统一入口：按源节点画布位置（左→右、上→下）稳定排序。
@@ -69,11 +90,13 @@ function buildOrderedReferences(targetId: string, nodes: FlowNode[], edges: Edge
     .map((edge) => nodes.find((candidate) => candidate.id === edge.source))
     .map((source) => ({ source, reference: buildCanvasReference(source) }))
     .filter((pair): pair is { source: FlowNode; reference: CanvasReference } => Boolean(pair.reference))
-    .sort((left, right) => (
-      orderOf(left) - orderOf(right)
-      || (left.source.position?.x ?? 0) - (right.source.position?.x ?? 0)
-      || (left.source.position?.y ?? 0) - (right.source.position?.y ?? 0)
-    ))
+    .sort((left, right) => {
+      const leftPosition = absoluteNodePosition(nodes as CanvasNode[], left.source as CanvasNode);
+      const rightPosition = absoluteNodePosition(nodes as CanvasNode[], right.source as CanvasNode);
+      return orderOf(left) - orderOf(right)
+        || leftPosition.x - rightPosition.x
+        || leftPosition.y - rightPosition.y;
+    })
     .map((pair) => pair.reference);
 }
 import {
@@ -94,21 +117,25 @@ import {
   ratioToNumber,
   AUTO_RATIO,
 } from '@/lib/aspect';
-import { activeVersionOf, normalizeVersions, versionIndexOf, versionLabel } from '@/lib/versions';
+import { activePromptOf, activeVersionOf, normalizeVersions, versionIndexOf, versionLabel } from '@/lib/versions';
 import { mergeChatRunMedia } from '@/lib/chatRunMedia';
-import { answerChatRun, deleteCanvasDoc, deleteImageIfUnused, enhancePromptApi, fetchImageAsReference, generate, getCanvases, getChatThreads, getHistory, putCanvasDoc, saveImageDataUrl, startChatRun, stopChatRun, subscribeCanvasLocate, subscribeCanvasUpdated, subscribeChatRunEvents, subscribePushedImages, type ChatRunEvent } from '@/lib/bridge';
-import { emitEvent, onEvent, NODE_ANIMATION_EVENTS, NODE_EVENTS, type NodeAnimationDoneDetail, type NodeConnectDetail, type NodeFocusDetail, type NodePreviewDetail, type NodePromptDetail, type NodeReditCancelDetail, type NodeReditDetail, type NodeReferenceRemoveDetail, type NodeRunDetail, type NodeUploadDetail, type NodeVersionsExpandDetail, type NodeVersionSetMainDetail, type NodeVersionsFitDetail, type NodeReferenceReorderDetail } from '@/lib/events';
+import { answerChatRun, createAsset, deleteCanvasDoc, deleteImageIfUnused, dismissVideoTask, dismissVideoTasksByNode, enhancePromptApi, enhanceVideoPromptApi, fetchImageAsReference, fetchVideoModelSchema, generate, getCanvases, getChatThreads, getHistory, putCanvasDoc, recoverVideoDownload, saveImageDataUrl, startChatRun, stopChatRun, subscribeCanvasLocate, subscribeCanvasUpdated, subscribeChatRunEvents, subscribePushedImages, subscribePushedVideos, getVideoTaskByNode, submitVideoTask, type ChatRunEvent } from '@/lib/bridge';
+import { initialOutpaintFrame, OUTPAINT_DEFAULT_ZOOM } from '@/lib/outpaint';
+import { buildVideoPrompt, extractVideoScript } from '@/lib/videoPrompt';
+import { CANVAS_GROUP_EVENTS, emitEvent, onEvent, NODE_ANIMATION_EVENTS, NODE_EVENTS, type CanvasGroupActionDetail, type CanvasGroupColorDetail, type CanvasGroupRenameDetail, type NodeAnimationDoneDetail, type NodeConnectDetail, type NodeFocusDetail, type NodePreviewDetail, type NodePromptDetail, type NodeReditCancelDetail, type NodeReditDetail, type NodeReferenceRemoveDetail, type NodeRunDetail, type NodeTextContentDetail, type NodeTextOptimizeDetail, type NodeTextOptimizeResultDetail, type NodeUploadDetail, type NodeVersionsExpandDetail, type NodeVersionSetMainDetail, type NodeVersionsFitDetail, type NodeReferenceReorderDetail, type NodeVideoOptimizeDetail, type NodeVideoRecoverDetail, type NodeVideoRunDetail, type NodeVideoCancelDetail, type NodeVideoReditDetail } from '@/lib/events';
 import NodeGenerationToolbar from '@/components/canvas/NodeGenerationToolbar';
+import NodeVideoToolbar, { type VideoModelOption } from '@/components/canvas/NodeVideoToolbar';
 import NodeSelectionToolbar from '@/components/canvas/NodeSelectionToolbar';
 import ImagePreviewLightbox, { type ImagePreviewItem } from '@/components/canvas/ImagePreviewLightbox';
 import ImageAnnotator from '@/components/canvas/ImageAnnotator';
+import OutpaintEditor, { type OutpaintResult } from '@/components/canvas/OutpaintEditor';
 import HistoryPanel from '@/components/canvas/HistoryPanel';
 import ChatPanel from '@/components/chat/ChatPanel';
 import { draftKeyOf, useChatStore } from '@/stores/chatStore';
-import type { CanvasDoc, CanvasNode, CanvasNodeData, CanvasNodeVersion, CanvasReference, ChatAskResponseSummary, ChatImageRef, ChatMessage, ChatMessageContext, ChatModelSelection, HistoryItem } from '@/types';
+import type { CanvasDoc, CanvasEdge, CanvasNode, CanvasNodeData, CanvasNodeVersion, CanvasReference, ChatAskResponseSummary, ChatImageRef, ChatMessage, ChatMessageContext, ChatModelSelection, ChatRoleSnapshot, HistoryItem, VideoModelSchema, VideoRatio, VideoReferenceMode, VideoResolution } from '@/types';
 import './canvas-page.css';
 
-type FlowNode = Node<CanvasNodeData, 'flow-image'>;
+type FlowNode = Node<CanvasNodeData, 'flow-image' | 'canvas-group' | 'canvas-text'>;
 
 /** 生成主链路的结果：对话面板靠它把出图 / 失败 / 上下文续接情况写回消息。 */
 interface ComposerRunResult {
@@ -118,6 +145,13 @@ interface ComposerRunResult {
   versionIds?: string[];
   /** 本轮实际续接上的上下文：对话消息徽标用。 */
   context?: ChatMessageContext;
+}
+
+interface ComposerRunOptions {
+  previousVersionId?: string;
+  referenceDataUrlOverride?: string;
+  referenceUsage?: 'style' | 'edit';
+  sizeOverride?: string;
 }
 
 /** 在全画布范围内按版本 id 找版本：对话的上下文链要能指到任何节点上的某一版。 */
@@ -137,6 +171,14 @@ interface CanvasMenuState {
   clientX: number;
   clientY: number;
   connection: CanvasPendingConnection | null;
+}
+
+interface SelectedNodeOverlayMetrics {
+  id: string;
+  width: number;
+  height: number;
+  topSafe: number;
+  containerWidth: number;
 }
 
 interface MenuUploadContext {
@@ -205,7 +247,10 @@ function buildCanvasReference(node: FlowNode | undefined): CanvasReference | nul
       height: Number(node.data.height || 0) || undefined,
     };
   }
-  const text = String(node.data.prompt || '').trim();
+  const text = String(node.data.kind === 'text' ? node.data.textContent || '' : node.data.prompt || '').trim();
+  if (node.data.kind === 'text' && text) {
+    return { id: node.id, url: '', title: String(node.data.label || '文本引用'), kind: 'text', text };
+  }
   if (node.data.kind === 'composer' && text) {
     return { id: node.id, url: '', title: String(node.data.label || '文本引用'), kind: 'text', text };
   }
@@ -222,24 +267,28 @@ function getGenerationReferenceTexts(
   for (const edge of edges) {
     if (edge.target !== targetNodeId) continue;
     const source = nodes.find((node) => node.id === edge.source);
-    if (!source || source.data.kind !== 'composer') continue;
+    if (!source || (source.data.kind !== 'composer' && source.data.kind !== 'text')) continue;
     if (String(source.data.imageUrl || source.data.referenceDataUrl || '').trim()) continue;
-    const text = String(source.data.prompt || '').trim();
+    const text = String(source.data.kind === 'text' ? source.data.textContent || '' : source.data.prompt || '').trim();
     if (text && !texts.includes(text)) texts.push(text);
   }
   return texts;
 }
 
-/** 是否画布节点：只保留这三类，其余一律在水合时清掉。 */
+/** 是否画布节点：只保留这四类，其余一律在水合时清掉。
+ *  video 必须在这张白名单里，否则视频节点一刷新就被当脏数据删掉。 */
 function isCanvasNode(node: FlowNode): boolean {
-  return node.data.kind === 'composer' || node.data.kind === 'image' || node.data.kind === 'reference';
+  return node.data.kind === 'composer' || node.data.kind === 'image' || node.data.kind === 'reference' || node.data.kind === 'video' || node.data.kind === 'text' || node.data.kind === 'group';
 }
 
 /** 客户端运行态标记不落盘：下次打开不该带着 entering / exiting / fresh 这类一次性 class。 */
 function stripNodeRuntimeFlags(nodes: FlowNode[]): FlowNode[] {
   return nodes.map((node) => {
-    if (!node.className && node.selected === undefined && node.dragging === undefined) return node;
+    if (!node.className && node.selected === undefined && node.dragging === undefined && node.data.videoPromptOptimizing !== true) return node;
     const { className: _className, selected: _selected, dragging: _dragging, ...persistent } = node;
+    if (persistent.data.videoPromptOptimizing === true) {
+      persistent.data = { ...persistent.data, videoPromptOptimizing: undefined };
+    }
     return persistent;
   });
 }
@@ -249,6 +298,7 @@ function stripNodeRuntimeFlags(nodes: FlowNode[]): FlowNode[] {
     历史数据里这些值可能停在 composer 期、上传时的自然尺寸或旧 cardWidth（卡片后来重算过），
     不收敛的话连线端点、命中区、fitView 全按一个比卡片大的盒子算。 */
 function normalizeNodeBox(node: FlowNode): FlowNode {
+  if (node.data.kind === 'group' || node.data.kind === 'text') return node;
   const box = imageNodeFlowBox(node.data);
   const width = nodeWidthFor(node.data);
   if (box) {
@@ -266,18 +316,61 @@ function normalizeNodeBox(node: FlowNode): FlowNode {
 
 /** 水合时收敛画布：剔除非画布节点、清一次性 class、剪掉指向已删节点的悬空连线。 */
 function normalizeCanvasGraph(nodes: FlowNode[], edges: Edge[]) {
-  const cleanedNodes = stripNodeRuntimeFlags(nodes.filter(isCanvasNode)).map(normalizeNodeBox);
-  const nodeIds = new Set(cleanedNodes.map((node) => node.id));
-  const cleanedEdges = edges.filter((edge) => nodeIds.has(String(edge.source)) && nodeIds.has(String(edge.target)));
+  const boxedNodes = stripNodeRuntimeFlags(nodes.filter(isCanvasNode)).map(normalizeNodeBox);
+  const normalized = normalizeCanvasGroups(boxedNodes as CanvasNode[], edges as CanvasEdge[]);
+  const cleanedNodes = normalized.nodes as FlowNode[];
+  const cleanedEdges = normalized.edges as Edge[];
   const changed = cleanedNodes.length !== nodes.length
     || cleanedEdges.length !== edges.length
-    || cleanedNodes.some((node, index) => node !== nodes[index]);
+    || cleanedNodes.some((node, index) => node !== nodes[index])
+    || cleanedEdges.some((edge, index) => edge !== edges[index]);
   return { nodes: cleanedNodes, edges: cleanedEdges, changed };
 }
 
 /**
+ * 拖拽落定后的位置归属：成员中心仍在组内容区内则保留跟随；拖到内容区外则脱离。
+ * 顶层节点拖入某个组的内容区内则加入该组，并转换成相对坐标。
+ */
+function assignDraggedGroupMembership(nodes: FlowNode[], draggedIds: Set<string>): FlowNode[] {
+  const groups = nodes.filter((node) => node.data.kind === 'group');
+
+  const sizeOf = (node: FlowNode) => ({
+    width: Number(node.measured?.width || node.width || nodeWidthFor(node.data)),
+    height: Number(node.measured?.height || node.height || nodeBoxFor(node.data).height),
+  });
+
+  return nodes.map((node) => {
+    if (node.data.kind === 'group' || !draggedIds.has(node.id)) return node;
+    const size = sizeOf(node);
+    const absolute = absoluteNodePosition(nodes as CanvasNode[], node as CanvasNode);
+    const center = {
+      x: absolute.x + size.width / 2,
+      y: absolute.y + size.height / 2,
+    };
+    const target = groups.find((group) => (
+      center.x >= group.position.x + CANVAS_GROUP_PADDING
+      && center.x <= group.position.x + Number(group.width || 0) - CANVAS_GROUP_PADDING
+      && center.y >= group.position.y + CANVAS_GROUP_HEADER_HEIGHT + CANVAS_GROUP_PADDING
+      && center.y <= group.position.y + Number(group.height || 0) - CANVAS_GROUP_PADDING
+    ));
+
+    if (!target) return detachCanvasNode(nodes as CanvasNode[], node as CanvasNode) as FlowNode;
+    const { extent: _extent, ...nodeWithoutExtent } = node;
+    return {
+      ...nodeWithoutExtent,
+      position: {
+        x: absolute.x - target.position.x,
+        y: absolute.y - target.position.y,
+      },
+      parentId: target.id,
+      expandParent: false,
+    };
+  });
+}
+
+/**
  * 入场编排的水波：按当前视角的 16px 点阵从中心荡开一圈，配合 is-entering 的
- * CSS 时间线（画布 660ms → dock/rail 1080ms）把"页面活了"的第一印象补上。
+ * CSS 时间线（画布 480ms → dock/rail 840ms）把"页面活了"的第一印象补上。
  */
 function CanvasEntryWave({
   hostRef,
@@ -311,7 +404,7 @@ function CanvasEntryWave({
     const centerY = height / 2;
     const initialViewport = initialViewportRef.current;
     const gridGap = 16 * initialViewport.zoom;
-    const minimumRingHalfWidth = 48;
+    const minimumRingHalfWidth = 72;
     const maximumRingHalfWidth = 320;
     const maxRadius = Math.hypot(centerX, centerY) + maximumRingHalfWidth;
     const duration = 2400;
@@ -387,6 +480,14 @@ function HistoryIcon() {
       <path d="M3.5 12a8.5 8.5 0 1 0 2.6-6.1" />
       <path d="M3.5 4v3.5H7" />
       <path d="M12 8v4l2.8 1.8" />
+    </svg>
+  );
+}
+
+function AssetIcon() {
+  return (
+    <svg viewBox="0 0 32 32" fill="none" stroke="currentColor" strokeWidth="2.1" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M15.9998 4.90009C16.2482 4.89991 16.4893 4.98382 16.684 5.13816C16.8786 5.29249 17.0153 5.50817 17.0718 5.75009V5.75209L17.0738 5.75809L17.0818 5.79209L17.1178 5.93609C17.3215 6.71826 17.5638 7.48987 17.8438 8.24809C18.3718 9.67209 19.0998 11.1821 19.9578 12.0421C20.8178 12.9021 22.3278 13.6281 23.7518 14.1561C24.51 14.436 25.2816 14.6783 26.0638 14.8821L26.2078 14.9181L26.2418 14.9261H26.2478C26.4899 14.9825 26.7058 15.1192 26.8604 15.3138C27.0151 15.5085 27.0994 15.7497 27.0996 15.9983C27.0998 16.2469 27.016 16.4883 26.8617 16.6832C26.7074 16.8782 26.4918 17.0152 26.2498 17.0721H26.2478L26.2418 17.0741L26.2058 17.0821L26.0658 17.1181C25.2836 17.3218 24.512 17.5641 23.7538 17.8441C22.3278 18.3721 20.8178 19.1001 19.9578 19.9601C19.0978 20.8201 18.3718 22.3281 17.8438 23.7521C17.5638 24.5103 17.3215 25.2819 17.1178 26.0641L17.0818 26.2081L17.0738 26.2421V26.2481C17.0173 26.4902 16.8807 26.7061 16.686 26.8608C16.4914 27.0154 16.2502 27.0997 16.0015 27.0999C15.7529 27.1002 15.5116 27.0163 15.3166 26.8621C15.1217 26.7078 14.9846 26.4921 14.9278 26.2501V26.2481L14.9258 26.2421L14.9178 26.2061L14.8818 26.0661C14.678 25.2839 14.4357 24.5123 14.1558 23.7541C13.6278 22.3281 12.8998 20.8181 12.0418 19.9581C11.1818 19.0981 9.67176 18.3721 8.24776 17.8441C7.48954 17.5641 6.71793 17.3218 5.93576 17.1181L5.79176 17.0801L5.75976 17.0741H5.75176C5.50964 17.0177 5.29372 16.881 5.13907 16.6864C4.98442 16.4917 4.90013 16.2505 4.8999 16.0019C4.89967 15.7533 4.98351 15.5119 5.13779 15.3169C5.29208 15.122 5.50775 14.985 5.74976 14.9281H5.75176L5.75776 14.9261L5.79176 14.9181L5.93576 14.8821C6.71793 14.6784 7.48954 14.4361 8.24776 14.1561C9.67176 13.6281 11.1818 12.9001 12.0418 12.0421C12.9018 11.1821 13.6278 9.67209 14.1558 8.24809C14.4358 7.48987 14.6781 6.71826 14.8818 5.93609L14.9178 5.79209L14.9258 5.75809V5.75209C14.9822 5.50964 15.1191 5.29346 15.3141 5.13875C15.5092 4.98404 15.7508 4.89992 15.9998 4.90009Z" />
     </svg>
   );
 }
@@ -500,6 +601,8 @@ function CanvasWorkspace() {
   const [historyItems, setHistoryItems] = useState<HistoryItem[]>([]);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyError, setHistoryError] = useState('');
+  const [assetLibraryOpen, setAssetLibraryOpen] = useState(false);
+  const [assetLibraryAnchor, setAssetLibraryAnchor] = useState<{ x: number; y: number } | null>(null);
   /** 历史列表的 ref 镜像：开灯箱时判断要不要兜底拉一次，不必把它加进依赖 */
   const historyItemsRef = useRef<HistoryItem[]>([]);
   const [fileDragging, setFileDragging] = useState(false);
@@ -516,10 +619,12 @@ function CanvasWorkspace() {
   const selectionIntentRef = useRef<{ nodeId: string; expiresAt: number } | null>(null);
   const [previewItem, setPreviewItem] = useState<ImagePreviewItem | null>(null);
   const [annotateNodeId, setAnnotateNodeId] = useState('');
+  const [outpaintNodeId, setOutpaintNodeId] = useState('');
+  const outpaintViewportRef = useRef<Viewport | null>(null);
   const [toast, setToast] = useState('');
   const nodesRef = useRef<FlowNode[]>([]);
   const edgesRef = useRef<Edge[]>([]);
-  const runComposerRef = useRef<((nodeId: string, prompt: string, options?: { previousVersionId?: string }) => Promise<ComposerRunResult>) | null>(null);
+  const runComposerRef = useRef<((nodeId: string, prompt: string, options?: ComposerRunOptions) => Promise<ComposerRunResult>) | null>(null);
   const dragDepthRef = useRef(0);
   const pendingConnectionRef = useRef<CanvasPendingConnection | null>(null);
   /** 端点拖拽是否已成功改接：onReconnect 置真，onReconnectEnd 据此区分「改接」与「拖空断开」 */
@@ -546,19 +651,32 @@ function CanvasWorkspace() {
   const suppressPersistRef = useRef(false);
   const nodeInteractionRef = useRef(false);
   const remoteUpdatePendingRef = useRef(false);
+  /**
+   * 本地整文档正在上桥（600ms 防抖窗口 + 请求在途）。
+   * 这段时间里收到的 canvas-updated 多数是本地的旧快照回环；合并会把刚删掉的节点复活，
+   * 所以窗口内直接忽略远端水合，等本地这次写入落地后的广播再对齐。
+   */
+  const localWritePendingRef = useRef(false);
+  /** 每次安排整文档上桥都推进；较早的请求完成后不能摘掉较新写入的保护。 */
+  const remoteSyncRevisionRef = useRef(0);
+  /** 上桥串行化：后发生的解散 / 删除必须最后落盘，不能被较早的在途请求反超。 */
+  const remoteSyncQueueRef = useRef<Promise<void>>(Promise.resolve());
   const interactionReleaseTimerRef = useRef(0);
   const nodePositionProtectionRef = useRef(new Map<string, { x: number; y: number }>());
   const interactionRevisionRef = useRef(0);
   const editUndoRef = useRef<EditUndoEntry[]>([]);
   const nodeDragUndoRef = useRef<{ nodes: FlowNode[]; edges: Edge[] } | null>(null);
   const nodeDeletionRef = useRef(false);
-  /** 节点粘贴的时间戳：Ctrl+V 粘完节点后，浏览器紧接着补发的 paste 事件
-   *  （图片粘贴那条路）看到它是热乎的就整轮跳过——否则一次按键会同时粘出节点和参考图 */
-  const nodePasteGuardRef = useRef(0);
+  /** 等待浏览器 paste 事件，以便图片剪贴板优先于内部节点复制缓存。 */
+  const nodePasteIntentRef = useRef(0);
 
-  const nodeTypes = useMemo<NodeTypes>(() => ({ 'flow-image': FlowImageNode }), []);
+  const nodeTypes = useMemo<NodeTypes>(() => ({
+    'flow-image': FlowImageNode,
+    'canvas-group': CanvasGroupNode,
+    'canvas-text': CanvasTextNode,
+  }), []);
 
-  /* ── 入场编排（灵枢同款）：根节点挂 is-entering，CSS 按 660ms 起逐层展开 ── */
+  /* ── 入场编排（灵枢同款）：根节点挂 is-entering，CSS 按 480ms 起逐层展开 ── */
   const [entering, setEntering] = useState(false);
   const completeEntry = useCallback(() => setEntering(false), []);
   const entryTimerRef = useRef(0);
@@ -612,10 +730,33 @@ function CanvasWorkspace() {
 
   /* 打开历史抽屉时现拉：关着不请求，每次打开都是最新 */
   const openHistory = useCallback((anchor: { x: number; y: number }) => {
+    setAssetLibraryOpen(false);
     setHistoryAnchor(anchor);
     setHistoryOpen(true);
     loadHistory();
   }, [loadHistory]);
+
+  const openAssetLibrary = useCallback((anchor: { x: number; y: number }) => {
+    setHistoryOpen(false);
+    setHistoryClosing(false);
+    setAssetLibraryAnchor(anchor);
+    setAssetLibraryOpen(true);
+  }, []);
+
+  const saveHistoryAsset = useCallback(async (item: HistoryItem) => {
+    try {
+      await createAsset({
+        fileName: item.fileName,
+        prompt: item.prompt,
+        model: item.model,
+        size: item.size,
+        sourceKey: `${item.canvasId}:${item.nodeId || ''}:${item.versionId || ''}:${item.fileName}`,
+      });
+      showToast('已收藏到资产库');
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : '收藏失败');
+    }
+  }, [showToast]);
 
   useEffect(() => {
     historyItemsRef.current = historyItems;
@@ -623,6 +764,7 @@ function CanvasWorkspace() {
 
   /** 历史条目 → 灯箱条目：灯箱左右切图时按同一套字段还原信息栏 */
   const previewItemOfHistory = useCallback((item: HistoryItem): ImagePreviewItem => ({
+    mediaType: item.mediaType || 'image',
     url: item.url,
     title: item.prompt || item.canvasName,
     details: {
@@ -631,8 +773,12 @@ function CanvasWorkspace() {
       revisedPrompt: item.revisedPrompt,
       model: item.model,
       size: item.size,
-      startedAt: item.createdAt,
-      createdAt: item.createdAt,
+      startedAt: item.startedAt || item.createdAt,
+      createdAt: item.finishedAt || item.createdAt,
+      videoSeconds: item.videoSeconds,
+      videoResolution: item.videoResolution,
+      videoRatio: item.videoRatio,
+      videoAudio: item.videoAudio,
       fileName: item.fileName,
     },
   }), []);
@@ -723,13 +869,31 @@ function CanvasWorkspace() {
     editUndoRef.current.push({ kind: 'graph', ...snapshot, label });
   }, []);
 
+  /** 编组、解散、粘贴这类整图操作一次写进 refs、React Flow state 与 store，避免中途出现空组。 */
+  const commitCanvasGraph = useCallback((
+    nextNodes: FlowNode[],
+    nextEdges: Edge[],
+    nextSelectedId = '',
+  ) => {
+    nodesRef.current = nextNodes;
+    setNodes(nextNodes);
+    setEdgesBoth(nextEdges);
+    setSelectedId(nextSelectedId);
+    suppressPersistRef.current = true;
+    localWritePendingRef.current = true;
+    setGraph(stripNodeRuntimeFlags(nextNodes) as CanvasNode[], nextEdges as CanvasEdge[]);
+  }, [setEdgesBoth, setGraph, setSelectedId]);
+
   const focusNode = useCallback((nodeId: string) => {
     const node = nodesRef.current.find((candidate) => candidate.id === nodeId);
     if (!node) return;
-    const { width, height } = nodeBoxFor(node.data);
+    const box = node.data.kind === 'group'
+      ? { width: Number(node.width || 0), height: Number(node.height || 0) }
+      : nodeBoxFor(node.data);
+    const position = absoluteNodePosition(nodesRef.current as CanvasNode[], node as CanvasNode);
     const viewportZoom = rf.getViewport?.().zoom || 1;
     window.requestAnimationFrame(() => {
-      void rf.setCenter(node.position.x + width / 2, node.position.y + height / 2, {
+      void rf.setCenter(position.x + box.width / 2, position.y + box.height / 2, {
         zoom: Math.min(1, Math.max(0.82, viewportZoom)),
         duration: 420,
       });
@@ -748,7 +912,11 @@ function CanvasWorkspace() {
     if (options.onlyIfOffscreen !== false) {
       const pane = document.querySelector('.react-flow') as HTMLElement | null;
       const viewport = rf.getViewport?.();
-      if (pane && viewport && isNodeBoxVisible(node, nodeBoxFor(node.data), viewport, {
+      const box = node.data.kind === 'group'
+        ? { width: Number(node.width || 0), height: Number(node.height || 0) }
+        : nodeBoxFor(node.data);
+      const position = absoluteNodePosition(nodesRef.current as CanvasNode[], node as CanvasNode);
+      if (pane && viewport && isNodeBoxVisible({ ...node, position }, box, viewport, {
         width: pane.clientWidth,
         height: pane.clientHeight,
       })) return;
@@ -789,6 +957,64 @@ function CanvasWorkspace() {
     updateNode(id, patch);
   }, [updateNode]);
 
+  const createGroupFromSelection = useCallback(() => {
+    const selected = nodesRef.current.filter(
+      (node) => node.selected || node.id === selectedIdRef.current,
+    );
+    if (selected.length < 2) return;
+    if (selected.some((node) => node.data.kind === 'group' || Boolean(node.parentId))) {
+      showToast('编组和组内成员不能再次编组');
+      return;
+    }
+    const groupCount = nodesRef.current.filter((node) => node.data.kind === 'group').length;
+    pushGraphUndo('编组');
+    const result = createCanvasGroupGraph(
+      nodesRef.current as CanvasNode[],
+      edgesRef.current as CanvasEdge[],
+      selected.map((node) => node.id),
+      { label: `编组 ${groupCount + 1}` },
+    );
+    const nextNodes = (result.nodes as FlowNode[]).map((node) => ({
+      ...node,
+      selected: node.id === result.groupId,
+      zIndex: node.id === result.groupId ? 1 : 100,
+    }));
+    commitCanvasGraph(nextNodes, result.edges as Edge[], result.groupId);
+    setEditingNodeId('');
+    showToast(`已将 ${selected.length} 个节点编组`);
+  }, [commitCanvasGraph, pushGraphUndo, setEditingNodeId, showToast]);
+
+  useEffect(() => onEvent<CanvasGroupRenameDetail>(CANVAS_GROUP_EVENTS.rename, ({ nodeId, label }) => {
+    const node = nodesRef.current.find((candidate) => candidate.id === nodeId);
+    const nextLabel = String(label || '').trim();
+    if (!node || node.data.kind !== 'group' || !nextLabel || nextLabel === node.data.label) return;
+    pushGraphUndo('重命名编组');
+    patchNode(nodeId, { label: nextLabel });
+    showToast('已重命名编组');
+  }), [patchNode, pushGraphUndo, showToast]);
+
+  useEffect(() => onEvent<CanvasGroupColorDetail>(CANVAS_GROUP_EVENTS.color, ({ nodeId, color }) => {
+    const node = nodesRef.current.find((candidate) => candidate.id === nodeId);
+    if (!node || node.data.kind !== 'group' || node.data.groupColor === color) return;
+    pushGraphUndo('修改编组颜色');
+    patchNode(nodeId, { groupColor: color });
+  }), [patchNode, pushGraphUndo]);
+
+  useEffect(() => onEvent<CanvasGroupActionDetail>(CANVAS_GROUP_EVENTS.dissolve, ({ nodeId }) => {
+    const group = nodesRef.current.find((candidate) => candidate.id === nodeId);
+    if (!group || group.data.kind !== 'group') return;
+    pushGraphUndo('解散编组');
+    const result = dissolveCanvasGroup(
+      nodesRef.current as CanvasNode[],
+      edgesRef.current as CanvasEdge[],
+      nodeId,
+    );
+    const nextNodes = (result.nodes as FlowNode[]).map((node) => ({ ...node, selected: false }));
+    commitCanvasGraph(nextNodes, result.edges as Edge[]);
+    setEditingNodeId('');
+    showToast('已解散编组，成员保留在原位');
+  }), [commitCanvasGraph, pushGraphUndo, setEditingNodeId, showToast]);
+
   /**
    * 连线变化后把上游引用同步进 composer 的 data：缩略图展示与持久化都读它。
    * 图片引用与纯文本引用（连到还没出图的生成节点）都在这里算，落盘形状与展示一致。
@@ -796,7 +1022,8 @@ function CanvasWorkspace() {
   const syncComposerReferences = useCallback((nextEdges: Edge[]) => {
     const nextNodes = nodesRef.current;
     nextNodes.forEach((node) => {
-      if (node.data.kind !== 'composer') return;
+      // 视频节点同样吃这套引用：连上来的图片就是首帧 / 参考图，chips 与编号和图片节点一致
+      if (node.data.kind !== 'composer' && node.data.kind !== 'video') return;
       const references = buildOrderedReferences(node.id, nextNodes, nextEdges);
       const patch: Partial<CanvasNodeData> = {};
       if (!areCanvasReferencesEqual(node.data.references, references)) {
@@ -822,12 +1049,23 @@ function CanvasWorkspace() {
     const removedIds = new Set(
       changes.filter((change) => change.type === 'remove').map((change) => String(change.id)),
     );
+    const removedGroupIds = [...removedIds].filter((id) => (
+      nodesRef.current.find((node) => node.id === id)?.data.kind === 'group'
+    ));
+    const removedGroupMemberCount = new Set(removedGroupIds.flatMap((groupId) => (
+      collectCanvasGroupMembers(nodesRef.current as CanvasNode[], groupId).map((node) => node.id)
+    ))).size;
     if (removedIds.size > 0) {
       pushGraphUndo('删除节点');
       nodeDeletionRef.current = true;
       window.setTimeout(() => {
         nodeDeletionRef.current = false;
       }, 80);
+      // 视频节点被删：把 bridge 里的任务记录一起清掉，别让轮询器/刷新恢复再把它带回来
+      for (const id of removedIds) {
+        const removed = nodesRef.current.find((node) => node.id === id);
+        if (removed?.data.kind === 'video') void dismissVideoTasksByNode(id);
+      }
     }
     const next = applyNodeChanges(changes, nodesRef.current);
     nodesRef.current = next;
@@ -847,7 +1085,9 @@ function CanvasWorkspace() {
     );
     setEdgesBoth(nextEdges);
     syncComposerReferences(nextEdges);
-    showToast('已删除节点');
+    showToast(removedGroupIds.length > 0
+      ? `已删除${removedGroupIds.length > 1 ? ` ${removedGroupIds.length} 个编组` : '编组'}及 ${removedGroupMemberCount} 个成员`
+      : '已删除节点');
   }, [pushGraphUndo, selectedId, setEdgesBoth, setSelectedId, showToast, syncComposerReferences]);
 
   useEffect(() => {
@@ -866,16 +1106,24 @@ function CanvasWorkspace() {
       if (event.key !== 'Delete' && event.key !== 'Backspace') return;
       const target = event.target as HTMLElement | null;
       if (target?.closest('input, textarea, [contenteditable="true"], .hb-chat-panel')) return;
-      if (annotateNodeId) return;
+      if (annotateNodeId || outpaintNodeId) return;
       const selectedNodes = nodesRef.current.filter((node) => node.selected || node.id === selectedId);
       if (selectedNodes.length === 0) return;
       event.preventDefault();
       event.stopPropagation();
-      void rf.deleteElements({ nodes: selectedNodes });
+      const removeIds = new Set(selectedNodes.map((node) => node.id));
+      selectedNodes.forEach((node) => {
+        if (node.data.kind !== 'group') return;
+        collectCanvasGroupMembers(nodesRef.current as CanvasNode[], node.id)
+          .forEach((member) => removeIds.add(member.id));
+      });
+      void rf.deleteElements({
+        nodes: nodesRef.current.filter((node) => removeIds.has(node.id)),
+      });
     };
     window.addEventListener('keydown', onKeyDown, true);
     return () => window.removeEventListener('keydown', onKeyDown, true);
-  }, [annotateNodeId, rf, selectedId]);
+  }, [annotateNodeId, outpaintNodeId, rf, selectedId]);
 
   /* ── 自动定位 ── */
   const onEdgesChange = useCallback((changes: EdgeChange[]) => {
@@ -892,13 +1140,19 @@ function CanvasWorkspace() {
   }, [pushGraphUndo, setEdgesBoth, syncComposerReferences]);
 
   const appendConnection = useCallback((connection: Connection) => {
+    const sourceNode = nodesRef.current.find((node) => node.id === connection.source);
+    const targetNode = nodesRef.current.find((node) => node.id === connection.target);
+    if (!sourceNode || !targetNode || !canConnectCanvasNodeKinds(sourceNode.data.kind, targetNode.data.kind)) {
+      showToast('无法连接这两种节点');
+      return false;
+    }
     const next = appendUniqueCanvasConnection(edgesRef.current, connection, createId('edge'));
     if (next === edgesRef.current) return false;
     pushGraphUndo('连接节点');
     setEdgesBoth(next);
     syncComposerReferences(next);
     return true;
-  }, [pushGraphUndo, setEdgesBoth, syncComposerReferences]);
+  }, [pushGraphUndo, setEdgesBoth, showToast, syncComposerReferences]);
 
   const onConnect = useCallback((connection: Connection) => {
     appendConnection(connection);
@@ -916,7 +1170,7 @@ function CanvasWorkspace() {
     const rawX = clientPoint && rect ? clientPoint.x - rect.left : (rect ? rect.width / 2 : 420);
     const rawY = clientPoint && rect ? clientPoint.y - rect.top : (rect ? rect.height / 2 : 220);
     const maxX = rect ? Math.max(16, rect.width - 192 - 8 - 16) : rawX;
-    const maxY = rect ? Math.max(16, rect.height - 132 - 8 - 16) : rawY;
+    const maxY = rect ? Math.max(16, rect.height - 180 - 8 - 16) : rawY;
     const x = Math.max(8, Math.min(rawX, maxX));
     const y = Math.max(8, Math.min(rawY, maxY));
     const menuPoint = menuClientPoint(rect || null, { x, y });
@@ -967,6 +1221,313 @@ function CanvasWorkspace() {
     setEditingNodeId(id);
     return id;
   }, [appendNode, insertPosition]);
+
+  /** 新建视频节点：复用图片那套 composer 外壳（type: 'flow-image'），
+   *  差别只在 kind 与默认参数（5 秒 / 480p / 16:9 / 无声）。
+   *  参数全部住在工具栏上，卡片里不放手柄——与图片节点的分工保持一致。 */
+  const addVideoNode = useCallback((clientPoint?: { x: number; y: number }, initialPrompt = '') => {
+    const position = insertPosition(clientPoint);
+    const id = createId('video');
+    const videoProfile = videoProfileOf(useSettingsStore.getState().settings);
+    appendNode({
+      id,
+      type: 'flow-image',
+      position,
+      width: 320,
+      // 自带选中：onSelectionChange 才会把 editingNodeId 认下来，不然新建瞬间就被清空
+      selected: true,
+      data: {
+        kind: 'video',
+        label: '视频生成',
+        prompt: initialPrompt,
+        composerEditing: true,
+        videoStatus: 'idle',
+        videoSeconds: 5,
+        videoResolution: '480p',
+        videoRatio: '16:9',
+        videoAudio: false,
+        videoProgress: 0,
+        videoModel: videoProfile?.model || videoProfile?.enabledModels?.[0],
+        videoProfileId: videoProfile?.id,
+        cardWidth: 320,
+      },
+    } as FlowNode);
+    setSelectedId(id);
+    setEditingNodeId(id);
+    return id;
+  }, [appendNode, insertPosition]);
+
+  const addTextNode = useCallback((clientPoint?: { x: number; y: number }) => {
+    const position = insertPosition(clientPoint);
+    const id = createId('text');
+    appendNode({
+      id,
+      type: 'canvas-text',
+      position,
+      width: 320,
+      height: 240,
+      selected: true,
+      data: {
+        kind: 'text',
+        label: '文本',
+        textContent: '',
+        cardWidth: 320,
+        nodeHeight: 240,
+      },
+    } as FlowNode);
+    setSelectedId(id);
+    return id;
+  }, [appendNode, insertPosition, setSelectedId]);
+
+  const useAssetPrompt = useCallback((prompt: string) => {
+    const id = addComposerNode();
+    patchNode(id, { prompt });
+    setAssetLibraryOpen(false);
+    showToast('已用收藏提示词新建生成节点');
+  }, [addComposerNode, patchNode, showToast]);
+
+  const applyChatVideoScript = useCallback((prompt: string, references: ChatImageRef[] = []) => {
+    const script = extractVideoScript(prompt);
+    if (!script) return;
+    const sourceNodes = new Map<string, FlowNode>();
+    references.forEach((reference) => {
+      if (reference.canvasId !== activeId) return;
+      const source = nodesRef.current.find((node) => node.id === reference.nodeId);
+      if (source && (source.data.kind === 'image' || source.data.kind === 'reference')
+        && String(source.data.imageUrl || source.data.referenceDataUrl || '').trim()) {
+        sourceNodes.set(source.id, source);
+      }
+    });
+    const firstSource = sourceNodes.values().next().value as FlowNode | undefined;
+    const firstSourcePosition = firstSource
+      ? absoluteNodePosition(nodesRef.current as CanvasNode[], firstSource as CanvasNode)
+      : undefined;
+    const insertPoint = firstSource
+      ? rf.flowToScreenPosition({
+        x: firstSourcePosition!.x + nodeBoxFor(firstSource.data).width + 96,
+        y: firstSourcePosition!.y + 24,
+      })
+      : undefined;
+    const beforeNodes = nodesRef.current;
+    const beforeEdges = edgesRef.current;
+    const videoNodeId = addVideoNode(insertPoint, script);
+    let nextEdges = edgesRef.current;
+    sourceNodes.forEach((source) => {
+      nextEdges = appendUniqueCanvasConnection(
+        nextEdges,
+        connectionForNewNode(source.id, 'source', videoNodeId),
+        createId('edge'),
+      );
+    });
+    pushGraphUndo('应用视频脚本', beforeNodes, beforeEdges);
+    if (nextEdges !== edgesRef.current) {
+      setEdgesBoth(nextEdges);
+      syncComposerReferences(nextEdges);
+    }
+    showToast(sourceNodes.size > 0
+      ? `已创建视频节点并连接 ${sourceNodes.size} 张图片`
+      : '已创建视频节点，请连接图片后生成');
+  }, [activeId, addVideoNode, pushGraphUndo, rf, setEdgesBoth, showToast, syncComposerReferences]);
+
+  /**
+   * 视频模型参数 schema 缓存：key = `${profileId}::${model}`。
+   * 放在 ref 里，runVideoNode 的 useCallback 不必因为 schema 到达而重建；
+   * 同一份数据再放 state，是为了工具栏能随 schema 到位重新渲染。
+   */
+  const videoSchemasRef = useRef<Record<string, VideoModelSchema>>({});
+  const [videoSchemas, setVideoSchemas] = useState<Record<string, VideoModelSchema>>({});
+
+  /** 视频节点提交：本机图不过图床就发不出去（中转站拉不到 /api/files），
+   *  所以这里只交「已经在上游连过来的公网地址 / 本机文件名」，上传在 bridge 做。 */
+  /**
+   * 视频节点提交。参数以**节点上存的为准**（工具栏写进去的），组件只带 prompt 过来——
+   * 与图片的 runComposer 分工一致：节点保持纯展示，页面是唯一真源。
+   *
+   * 当前工作流是图生视频：composer 的 references 机制原样复用。上游连过来的图片节点会同步成
+   * `data.references`，这里把其中的图片引用转成本机文件名交给 bridge 过图床。
+   * 没有可用图片时在本地明确报错，不把缺图请求误发成文生视频。
+   */
+  const runVideoNode = useCallback(async (nodeId: string, prompt: string) => {
+    const existing = nodesRef.current.find((node) => node.id === nodeId);
+    if (!existing) return;
+    // 防重复提交：running 时再次触发不会产生第二个上游任务
+    if (existing.data.videoStatus === 'running') return;
+    // 「提交结果未知」的占位 taskId 为空，按 id 删不掉；重建前先按节点清掉，
+    // 否则新提交若在 reserve 之前失败，刷新后旧占位又会把节点锁回 unknown。
+    if (existing.data.videoSubmissionUnknown === true) {
+      await dismissVideoTasksByNode(nodeId);
+    }
+    const currentSettings = useSettingsStore.getState().settings;
+    const storedProfileId = String(existing.data.videoProfileId || '');
+    const selectedProfile = currentSettings?.profiles.find((profile) => (
+      profile.id === storedProfileId
+      && profile.kind === 'video'
+      && profile.enabled !== false
+      && profile.keyConfigured
+      && Boolean(profile.baseUrl.trim() && profile.model)
+    ));
+    const videoProfile = selectedProfile || videoProfileOf(currentSettings);
+    if (!videoProfile || videoProfile.enabled === false || !videoProfile.keyConfigured) {
+      patchNode(nodeId, { videoStatus: 'error', videoError: '尚未配置视频模型：请在「生图设置」里添加一路视频模型并填写 Key' });
+      return;
+    }
+    const seconds = Number(existing.data.videoSeconds || 5);
+    const resolution = (existing.data.videoResolution || '480p') as VideoResolution;
+    const ratio = (existing.data.videoRatio || '16:9') as VideoRatio;
+    const referenceMode = (existing.data.videoReferenceMode || 'first_frame') as VideoReferenceMode;
+    const generateAudio = existing.data.videoAudio === true;
+    const requestedModel = String(existing.data.videoModel || '');
+    const profileModels = videoProfile.enabledModels.length > 0
+      ? videoProfile.enabledModels
+      : [videoProfile.model].filter(Boolean);
+    const model = profileModels.includes(requestedModel)
+      ? requestedModel
+      : String(videoProfile.model || profileModels[0] || '');
+    const profileId = videoProfile.id;
+    const referenceTexts = getGenerationReferenceTexts(nodeId, nodesRef.current, edgesRef.current);
+    // 引用里的图片（kind === 'image' 且有 url）才当首帧；纯文本引用对视频没用
+    const imageRefs = (existing.data.references || []).filter((item) => item.kind !== 'text' && String(item.url || '').trim());
+    // media-v1 的模型自己声明参数：只有 upload 参数标了必填才强制连图。
+    // 其余模型（wan2.6 / seedance 等）都支持文生视频，空着也应该能跑。
+    const schemaKey = `${profileId}::${model}`;
+    let schema = videoSchemasRef.current[schemaKey];
+    // 节点刚建就被提交（或从对话/快捷键触发）时 schema 还没拉过：
+    // 先生成后拉会让 media-v1 发一套通用默认参数（duration:"5"/resolution:"480p"），
+    // 对 wan2.6 这类只认特定档位的模型必然参数错误。这里同步补一次。
+    if (!schema && (videoProfile.videoApiMode === 'media-v1' || !videoProfile.videoApiMode || videoProfile.videoApiMode === 'auto')) {
+      try {
+        schema = await fetchVideoModelSchema(profileId, model);
+        videoSchemasRef.current = { ...videoSchemasRef.current, [schemaKey]: schema };
+        setVideoSchemas(videoSchemasRef.current);
+      } catch {
+        // 非 media 协议本来就没有 schema：继续走通用字段
+      }
+    }
+    const storedParams = (existing.data.videoParams || {}) as Record<string, unknown>;
+    const resolvedParams = schema
+      ? fillVideoSchemaDefaults(schema, storedParams, { model, seconds, resolution, ratio })
+      : storedParams;
+    const modeSpec = schema?.params.find((spec) => /^(mode|generation_mode)$/i.test(spec.name));
+    const selectedMode = String(resolvedParams[modeSpec?.name || 'mode'] || '').toLowerCase();
+    const imageParam = schema ? videoUploadParamForMode(schema, selectedMode) : undefined;
+    const durationSpec = schema?.params.find((spec) => /^(duration|seconds|video_seconds)$/i.test(spec.name));
+    const rawSchemaSeconds = String(durationSpec ? resolvedParams[durationSpec.name] ?? '' : seconds);
+    const schemaSeconds = Number(rawSchemaSeconds) || Number(rawSchemaSeconds.match(/\d+(?:\.\d+)?/)?.[0]);
+    const effectiveSeconds = Number.isFinite(schemaSeconds) && schemaSeconds > 0 ? schemaSeconds : seconds;
+    const resolutionSpec = schema?.params.find((spec) => /^resolution$/i.test(spec.name));
+    const effectiveResolution = String(resolutionSpec ? resolvedParams[resolutionSpec.name] || resolution : resolution) as VideoResolution;
+    const ratioSpec = schema?.params.find((spec) => /^(aspect_ratio|ratio)$/i.test(spec.name));
+    const effectiveRatioValue = String(ratioSpec ? resolvedParams[ratioSpec.name] || ratio : ratio);
+    const effectiveRatio = /^(adaptive|auto)$/i.test(effectiveRatioValue) ? ratio : effectiveRatioValue as VideoRatio;
+    if (imageRefs.length === 0 && imageParam?.required === true) {
+      patchNode(nodeId, {
+        videoStatus: 'error',
+        videoError: `该模型的「${imageParam.label}」是必填项，请先把一张图片节点连接到视频节点`,
+      });
+      return;
+    }
+    const effectivePrompt = buildVideoPrompt(prompt, referenceTexts, referenceMode, imageRefs.length > 0, imageRefs.length);
+    const imageFileNames: string[] = [];
+    const imageUrls: string[] = [];
+    for (const reference of imageRefs) {
+      const input = classifyVideoImageReference(String(reference.url || ''));
+      if (input.kind === 'remote') {
+        imageUrls.push(input.value);
+      } else if (input.kind === 'local-file') {
+        imageFileNames.push(input.value);
+      } else if (input.kind === 'data-url') {
+        try {
+          const saved = await saveImageDataUrl(input.value);
+          if (!saved.fileName) throw new Error('本地 Bridge 未返回图片文件名');
+          imageFileNames.push(saved.fileName);
+        } catch (error) {
+          patchNode(nodeId, {
+            videoStatus: 'error',
+            videoError: error instanceof Error ? `参考图片暂存失败：${error.message}` : '参考图片暂存失败，请检查本地 Bridge 连接',
+          });
+          return;
+        }
+      } else {
+        patchNode(nodeId, {
+          videoStatus: 'error',
+          videoError: '连接的图片地址无法用于视频生成，请重新上传图片或连接一张画布图片',
+        });
+        return;
+      }
+    }
+    if (imageRefs.length > 0 && imageFileNames.length === 0 && imageUrls.length === 0) {
+      patchNode(nodeId, { videoStatus: 'error', videoError: '没有可发送的视频参考图片，请重新连接图片节点' });
+      return;
+    }
+    // 按 schema 收集用户选的参数：upload 走 imageParamName（图片由 bridge 过图床后落位），
+    // textarea 是提示词，已由节点输入框负责，两者都不进 params。
+    const extraParams: Record<string, unknown> = {};
+    for (const spec of schema?.params || []) {
+      if (spec.type === 'upload' || spec.type === 'textarea') continue;
+      const value = resolvedParams[spec.name];
+      if (value !== undefined && value !== null && value !== '') {
+        extraParams[spec.name] = value;
+        continue;
+      }
+      // 必填项没选过时取第一档默认值：否则 schema 驱动的模型会因缺参数被上游拒绝
+      if (spec.required && spec.options?.[0]?.value !== undefined) {
+        extraParams[spec.name] = spec.options[0].value;
+      }
+    }
+    const imageParamName = (schema ? videoUploadParamForMode(schema, selectedMode) : imageParam)?.name || '';
+    patchNode(nodeId, {
+      videoStatus: 'running',
+      videoProgress: 0,
+      videoError: '',
+      videoSubmissionUnknown: false,
+      videoDownloadRecoverable: false,
+      videoDownloadRecovering: false,
+      // 新任务开始前清掉上一版的任务/成品字段：否则刷新时 findVideoTaskByNode 会把旧视频复活，
+      // 或者把上一轮的 taskId 当成这一轮的（SSE 事件会串）。
+      videoTaskId: '',
+      videoUrl: '',
+      videoFileName: '',
+      videoSeconds: effectiveSeconds,
+      videoResolution: effectiveResolution,
+      videoRatio: effectiveRatio,
+      videoAudio: generateAudio,
+      videoReferenceMode: referenceMode,
+      videoModel: model,
+      videoProfileId: profileId,
+      videoImageParamName: imageParamName || undefined,
+      prompt: effectivePrompt,
+      videoImageUrls: [
+        ...imageUrls,
+        ...imageFileNames.map((name) => `/api/files/${encodeURIComponent(name)}`),
+      ],
+      createdAt: new Date().toISOString(),
+    });
+    const outcome = await submitVideoTask({
+      nodeId,
+      canvasId: activeId,
+      prompt: effectivePrompt,
+      profileId,
+      model,
+      seconds: effectiveSeconds,
+      resolution: effectiveResolution,
+      ratio: effectiveRatio,
+      generateAudio,
+      referenceMode,
+      params: extraParams,
+      imageParamName: imageParamName || undefined,
+      imageFileNames,
+      imageUrls,
+    });
+    if (!outcome.ok) {
+      patchNode(nodeId, {
+        videoStatus: 'error',
+        videoError: outcome.error || '视频任务提交失败',
+        videoSubmissionUnknown: outcome.submissionUnknown === true,
+      });
+      return;
+    }
+    patchNode(nodeId, { videoTaskId: outcome.taskId || '', videoSubmissionUnknown: false });
+  }, [activeId, patchNode]);
 
   /** 清掉画布上的旧选中：结果节点此刻处于选中态，不先摘掉就会被 React Flow 报成“多选”。 */
   const clearNodeSelection = useCallback(() => {
@@ -1065,6 +1626,62 @@ function CanvasWorkspace() {
     if (!prepareRedit(nodeId)) return;
     focusNode(nodeId);
   }, [prepareRedit, focusNode]);
+
+  const startOutpaint = useCallback((nodeId: string) => {
+    const source = nodesRef.current.find((item) => item.id === nodeId);
+    if (!source || (source.data.kind !== 'image' && source.data.kind !== 'reference')) return;
+    const imageUrl = String(
+      activeVersionOf(source.data)?.imageUrl || source.data.imageUrl || source.data.referenceDataUrl || '',
+    ).trim();
+    if (!imageUrl) return;
+    const box = nodeBoxFor(source.data);
+    outpaintViewportRef.current = rf.getViewport();
+    setAddMenu(null);
+    setNodeConnectionMenu(null);
+    setHistoryOpen(false);
+    setHistoryClosing(false);
+    setSelectedId(nodeId);
+    setOutpaintNodeId(nodeId);
+    window.requestAnimationFrame(() => {
+      const initialFrame = initialOutpaintFrame(box);
+      const host = canvasHostRef.current;
+      const canvasWidth = host?.clientWidth || window.innerWidth;
+      const canvasHeight = host?.clientHeight || window.innerHeight;
+      const sourcePosition = absoluteNodePosition(nodesRef.current as CanvasNode[], source as CanvasNode);
+      const frameCenterX = sourcePosition.x + initialFrame.width / 2;
+      const frameCenterY = sourcePosition.y + initialFrame.height / 2;
+      viewControls.updateCanvasViewport({
+        x: canvasWidth / 2 - frameCenterX * OUTPAINT_DEFAULT_ZOOM,
+        y: canvasHeight / 2 - frameCenterY * OUTPAINT_DEFAULT_ZOOM,
+        zoom: OUTPAINT_DEFAULT_ZOOM,
+      }, 220);
+    });
+  }, [rf, setSelectedId, viewControls.updateCanvasViewport]);
+
+  const closeOutpaint = useCallback(() => {
+    setOutpaintNodeId('');
+    const previousViewport = outpaintViewportRef.current;
+    outpaintViewportRef.current = null;
+    if (previousViewport) viewControls.updateCanvasViewport(previousViewport, 220);
+  }, [viewControls.updateCanvasViewport]);
+
+  const submitOutpaint = useCallback(async (result: OutpaintResult) => {
+    const nodeId = outpaintNodeId;
+    const run = runComposerRef.current;
+    if (!run) throw new Error('生成服务尚未就绪，请稍后重试');
+    if (!nodeId || !prepareRedit(nodeId)) throw new Error('扩图基准图已失效，请重新选择图片');
+    patchNode(nodeId, {
+      ...(result.model ? { model: result.model } : {}),
+      ...(result.profileId ? { profileId: result.profileId } : {}),
+    });
+    setOutpaintNodeId('');
+    outpaintViewportRef.current = null;
+    void run(nodeId, result.prompt, {
+      referenceDataUrlOverride: result.dataUrl,
+      referenceUsage: 'edit',
+      sizeOverride: result.size,
+    });
+  }, [outpaintNodeId, patchNode, prepareRedit]);
 
   /** 重新生成沿用当前结果节点和版本链，不额外创建节点或连接线。 */
   const regenerateFromImage = useCallback((nodeId: string) => {
@@ -1165,14 +1782,23 @@ function CanvasWorkspace() {
       showToast('只支持图片文件');
       return null;
     }
-    const dataUrl = await fileToDataUrl(file);
-    const size = await imageNaturalSize(dataUrl);
+    let dataUrl: string;
+    let size: { width: number; height: number };
+    try {
+      dataUrl = await fileToDataUrl(file);
+      size = await imageNaturalSize(dataUrl);
+      if (!size.width || !size.height) throw new Error('图片无法读取，请检查文件是否损坏或格式是否受支持');
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : '图片读取失败');
+      return null;
+    }
     // 先落 bridge 媒体目录：节点只存 /api/files 轻量引用，localStorage 不再被大图撑爆
     let imageUrl = '';
     try {
       imageUrl = (await saveImageDataUrl(dataUrl)).url;
-    } catch {
-      showToast('本机 Bridge 未连接，图片暂时只保存在当前浏览器');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '图片保存失败';
+      showToast(`${message}，图片暂时只保存在当前浏览器`);
     }
     const id = createId('reference');
     appendNode({
@@ -1411,7 +2037,7 @@ function CanvasWorkspace() {
   const startChatRunFlow = useCallback(async (
     prompt: string,
     refs: ChatImageRef[],
-    replay: { base?: ChatImageRef | null; previousVersionId?: string; previousCanvasId?: string; modelSelection?: ChatModelSelection } = {},
+    replay: { base?: ChatImageRef | null; previousVersionId?: string; previousCanvasId?: string; modelSelection?: ChatModelSelection; agentRole?: ChatRoleSnapshot } = {},
   ) => {
     if (chatRunStartingRef.current || useChatStore.getState().activeRun) return;
     // 对话面板可能长时间未关闭：发送前刷新 Bridge 配置，避免旧线程继续携带已删除或停用的模型 id。
@@ -1463,6 +2089,7 @@ function CanvasWorkspace() {
       role: 'user',
       content: prompt,
       modelSelection,
+      ...(replay.agentRole ? { agentRole: replay.agentRole } : {}),
       attachments: effectiveRefs.map((ref) => ({
         canvasId: ref.canvasId || targetCanvasId,
         nodeId: ref.nodeId,
@@ -1494,6 +2121,7 @@ function CanvasWorkspace() {
         previousCanvasId: previous?.canvasId || undefined,
         assistantMessageId: messageId,
         modelSelection,
+        agentRole: replay.agentRole,
       });
       store.setActiveRun({ runId, threadId, messageId });
       chatRunCleanupRef.current?.();
@@ -1541,8 +2169,8 @@ function CanvasWorkspace() {
       ? store.threads.find((item) => item.id === activeRun.threadId)
       : undefined;
     const pending = thread?.messages
-      .flatMap((message) => message.clarifications || [])
-      .find((item) => item.callId === callId && item.status === 'awaiting_input');
+      .find((message) => message.id === activeRun?.messageId)
+      ?.clarifications?.find((item) => item.callId === callId && item.status === 'awaiting_input');
     const currentAssistantId = activeRun?.messageId || '';
     const response: ChatAskResponseSummary | null = answers && pending ? {
       title: '补充几个信息',
@@ -1576,6 +2204,16 @@ function CanvasWorkspace() {
       store.appendMessage(thread.id, assistantMessage);
       if (currentAssistantId) store.patchMessage(thread.id, currentAssistantId, { status: 'done' });
       store.setActiveRun({ ...activeRun, messageId: assistantMessage.id });
+    } else if (accepted && !answers && activeRun && thread && currentAssistantId) {
+      store.patchMessage(thread.id, currentAssistantId, {
+        status: 'stopped',
+        clarifications: (thread.messages.find((message) => message.id === currentAssistantId)?.clarifications || []).map((item) => (
+          item.callId === callId ? { ...item, status: 'cancelled' as const } : item
+        )),
+      });
+      store.setActiveRun(null);
+      chatRunCleanupRef.current?.();
+      chatRunCleanupRef.current = null;
     }
     return accepted;
   }, [showToast]);
@@ -1600,6 +2238,7 @@ function CanvasWorkspace() {
           previousVersionId: baseVersionId || undefined,
           previousCanvasId: base?.canvasId,
           modelSelection: message.modelSelection,
+          agentRole: message.agentRole,
         });
         return;
       }
@@ -1712,7 +2351,7 @@ function CanvasWorkspace() {
   }, [applyChatRunEvent]);
 
   /* ── 生成主链路 ── */
-  const runComposer = useCallback(async (nodeId: string, promptRaw: string, options: { previousVersionId?: string } = {}): Promise<ComposerRunResult> => {
+  const runComposer = useCallback(async (nodeId: string, promptRaw: string, options: ComposerRunOptions = {}): Promise<ComposerRunResult> => {
     const prompt = promptRaw.trim();
     const composer = nodesRef.current.find((node) => node.id === nodeId);
     /**
@@ -1778,7 +2417,7 @@ function CanvasWorkspace() {
       if (!baseDataUrl) {
         return fail(`基准图读取失败，没法在这张图上二次编辑：${baseReadError}`);
       }
-      referenceDataUrls.push(baseDataUrl);
+      referenceDataUrls.push(options.referenceDataUrlOverride || baseDataUrl);
       hasEditingBase = true;
     }
     // 必须走 buildOrderedReferences：data.references 只在连线变化时重算，手动拖 chip 换序后
@@ -1817,7 +2456,7 @@ function CanvasWorkspace() {
       ? resolveAutoRatio({ prompt, references: orderedReferences })
       : ratioToNumber(presetRaw);
     const ratio = promptRatio > 0 ? promptRatio : (presetRatio > 0 ? presetRatio : parseSizeRatio(profile.defaultSize));
-    const size = pickSizeForResolution(ratio, String(composer.data.resolution || '1K'));
+    const size = options.sizeOverride || pickSizeForResolution(ratio, String(composer.data.resolution || '1K'));
     const imageCount = clampImageCount(composer.data.imageCount);
     const createdAt = new Date().toISOString();
 
@@ -1859,7 +2498,7 @@ function CanvasWorkspace() {
     // 整理失败不阻断生成，但原因要留在卡片上（同一排红灯，生成中降一档不刺眼），
     // 用户才知道这一版为什么是原文直出
     let enhanceNote = '';
-    let referenceUsage: 'style' | 'edit' | undefined;
+    let referenceUsage: 'style' | 'edit' | undefined = options.referenceUsage || (hasEditingBase ? 'edit' : undefined);
     if (enhancePrompt) {
       const selectedTextProfile = pickTextProfile(settings);
       const fallbackTextProfiles = (settings?.profiles || [])
@@ -1878,10 +2517,12 @@ function CanvasWorkspace() {
               size,
               referenceDataUrls,
               profileId: textProfile.id,
+              // 二次编辑已经钉住了基准图，不能让提示词模型把它降级成风格参考。
+              usage: options.referenceUsage || (hasEditingBase ? 'edit' : undefined),
             });
             usedPrompt = result.prompt;
             enhancedPrompt = result.prompt;
-            referenceUsage = result.usage;
+            referenceUsage = options.referenceUsage || (hasEditingBase ? 'edit' : result.usage);
             break;
           } catch (error) {
             lastEnhanceError = error instanceof Error ? error.message : '未知错误';
@@ -1905,7 +2546,7 @@ function CanvasWorkspace() {
       ? findVersionOnCanvas(nodesRef.current, options.previousVersionId)
       : undefined;
     const chainBase = chatPrevious || baseVersion;
-    const previousResponseId = chainBase?.responseId
+    const previousResponseId = !options.referenceDataUrlOverride && chainBase?.responseId
       && apiMode === 'responses'
       && chainBase.responseProfileId === generationProfile.id
       && chainBase.responseModel === generationProfile.responsesModel
@@ -2017,12 +2658,321 @@ function CanvasWorkspace() {
 
   /* ── 事件桥 ── */
   useEffect(() => onEvent<NodePromptDetail>(NODE_EVENTS.prompt, ({ nodeId, prompt }) => {
-    patchNode(nodeId, { prompt });
-  }), [updateNode]);
+    const target = nodesRef.current.find((node) => node.id === nodeId);
+    patchNode(nodeId, target?.data.kind === 'video'
+      ? { prompt, videoPromptError: '', videoPromptOriginal: undefined, videoPromptOptimized: false }
+      : { prompt, videoPromptError: '' });
+  }), [patchNode]);
+
+  useEffect(() => onEvent<NodeTextContentDetail>(NODE_EVENTS.textContent, ({ nodeId, text }) => {
+    const target = nodesRef.current.find((node) => node.id === nodeId);
+    if (!target || target.data.kind !== 'text') return;
+    patchNode(nodeId, { textContent: text });
+    syncComposerReferences(edgesRef.current);
+  }), [patchNode, syncComposerReferences]);
+
+  useEffect(() => onEvent<NodeTextOptimizeDetail>(NODE_EVENTS.textOptimize, ({ nodeId, text }) => {
+    const target = nodesRef.current.find((node) => node.id === nodeId);
+    if (!target || target.data.kind !== 'text' || !text.trim()) return;
+    const textProfile = pickTextProfile(useSettingsStore.getState().settings);
+    if (!textProfile) {
+      const message = '请先在模型设置中配置可用的语言模型，再润色文本';
+      showToast(message);
+      emitEvent<NodeTextOptimizeResultDetail>(NODE_EVENTS.textOptimizeResult, { nodeId, error: message });
+      return;
+    }
+    void enhancePromptApi({ prompt: text, profileId: textProfile.id })
+      .then(({ prompt: optimized }) => {
+        patchNode(nodeId, { textContent: optimized });
+        syncComposerReferences(edgesRef.current);
+        emitEvent<NodeTextOptimizeResultDetail>(NODE_EVENTS.textOptimizeResult, { nodeId, text: optimized });
+        showToast(optimized === text ? '文本无需调整' : '文本润色完成');
+      })
+      .catch((reason: unknown) => {
+        const message = reason instanceof Error ? reason.message : '文本润色失败';
+        showToast(message);
+        emitEvent<NodeTextOptimizeResultDetail>(NODE_EVENTS.textOptimizeResult, { nodeId, error: message });
+      });
+  }), [patchNode, showToast, syncComposerReferences]);
 
   useEffect(() => onEvent<NodeRunDetail>(NODE_EVENTS.run, ({ nodeId, prompt }) => {
     void runComposer(nodeId, prompt);
   }), [runComposer]);
+
+  /* ── 视频节点 ──
+     提交 / 取消 / 重生成都从组件抛事件过来；参数已在工具栏里写进节点，这里只带 prompt。
+     结果不在这条路上回——视频是长任务，bridge 轮询到成品后经 SSE 推 video 事件补刀。 */
+  useEffect(() => onEvent<NodeVideoOptimizeDetail>(NODE_EVENTS.videoOptimize, ({ nodeId, prompt, action }) => {
+    const target = nodesRef.current.find((node) => node.id === nodeId);
+    if (!target || target.data.kind !== 'video' || target.data.videoStatus === 'running') return;
+    if (action === 'undo') {
+      const original = target.data.videoPromptOriginal;
+      if (typeof original !== 'string') return;
+      patchNode(nodeId, {
+        prompt: original,
+        videoPromptOriginal: undefined,
+        videoPromptOptimized: false,
+        videoPromptError: '',
+      });
+      showToast('已撤销视频脚本优化');
+      return;
+    }
+    const settingsNow = useSettingsStore.getState().settings;
+    const textProfile = pickTextProfile(settingsNow);
+    if (!textProfile) {
+      patchNode(nodeId, { videoPromptError: '请先在模型设置中配置可用的语言模型，再优化视频脚本' });
+      return;
+    }
+    patchNode(nodeId, { videoPromptOptimizing: true, videoPromptError: '' });
+    void enhanceVideoPromptApi({
+      prompt,
+      ratio: String(target.data.videoRatio || '16:9') as VideoRatio,
+      seconds: Number(target.data.videoSeconds || 5),
+      resolution: String(target.data.videoResolution || '480p') as VideoResolution,
+      referenceMode: String(target.data.videoReferenceMode || 'first_frame') as VideoReferenceMode,
+      profileId: textProfile.id,
+    }).then(({ prompt: optimized }) => {
+      const changed = optimized !== prompt;
+      patchNode(nodeId, {
+        prompt: optimized,
+        videoPromptOriginal: changed ? prompt : undefined,
+        videoPromptOptimized: changed,
+        videoPromptOptimizing: false,
+        videoPromptError: '',
+      });
+      showToast(changed ? '视频脚本优化完成' : '脚本无需调整');
+    }).catch((error: unknown) => {
+      patchNode(nodeId, {
+        videoPromptOptimizing: false,
+        videoPromptError: error instanceof Error ? error.message : '视频脚本优化失败',
+      });
+    });
+  }), [patchNode, showToast]);
+
+  useEffect(() => onEvent<NodeVideoRunDetail>(NODE_EVENTS.videoRun, ({ nodeId, prompt }) => {
+    void runVideoNode(nodeId, prompt);
+  }), [runVideoNode]);
+
+  useEffect(() => onEvent<NodeVideoCancelDetail>(NODE_EVENTS.videoCancel, ({ nodeId }) => {
+    // 只摘本地关注：上游任务照样在中转站跑（取消要另外调它家的接口，
+    // 而且文档说没有统一的取消承诺），节点退回可重填状态，别让用户对着一个永远不动的进度条
+    const target = nodesRef.current.find((node) => node.id === nodeId);
+    const taskId = String(target?.data.videoTaskId || '');
+    if (taskId) void dismissVideoTask(taskId);
+    patchNode(nodeId, { videoStatus: 'idle', videoProgress: 0, videoTaskId: '', videoError: '', videoSubmissionUnknown: false, videoDownloadRecoverable: false, videoDownloadRecovering: false });
+  }), [patchNode]);
+
+  useEffect(() => onEvent<NodeVideoRecoverDetail>(NODE_EVENTS.videoRecover, ({ nodeId }) => {
+    const target = nodesRef.current.find((node) => node.id === nodeId);
+    if (target?.data.videoDownloadRecoverable !== true || target.data.videoDownloadRecovering === true) return;
+    patchNode(nodeId, {
+      videoStatus: 'running',
+      videoProgress: 100,
+      videoError: '',
+      videoDownloadRecovering: true,
+    });
+    void recoverVideoDownload(nodeId).catch((error: unknown) => {
+      const latest = nodesRef.current.find((node) => node.id === nodeId);
+      if (!latest || latest.data.videoDownloadRecovering !== true) return;
+      patchNode(nodeId, {
+        videoStatus: 'error',
+        videoError: error instanceof Error ? error.message : '视频文件接收失败',
+        videoDownloadRecoverable: true,
+        videoDownloadRecovering: false,
+      });
+    });
+  }), [patchNode]);
+
+  useEffect(() => onEvent<NodeVideoReditDetail>(NODE_EVENTS.videoRedit, ({ nodeId }) => {
+    // 「再生成一版」：提示词与四个参数全保留，只把节点退回输入态
+    setSelectedId(nodeId);
+    setEditingNodeId(nodeId);
+    patchNode(nodeId, { videoStatus: 'idle', videoUrl: '', videoFileName: '', videoProgress: 0, videoError: '', videoSubmissionUnknown: false, videoDownloadRecoverable: false, videoDownloadRecovering: false });
+  }), [patchNode, setEditingNodeId, setSelectedId]);
+
+  // 视频任务事件：受理 / 进度 / 完成 / 失败四种 phase，按 nodeId 找到节点就地补状态
+  useEffect(() => {
+    if (!activeId) return undefined;
+    return subscribePushedVideos(activeId, (event) => {
+      const target = event.nodeId ? nodesRef.current.find((node) => node.id === event.nodeId) : undefined;
+      if (!target) return;
+      const currentTaskId = String(target.data.videoTaskId || '');
+      const eventTaskId = String(event.taskId || '');
+      // 任务串号防护：节点已经绑定别的任务时，旧任务的迟到事件不能改它
+      if (eventTaskId && currentTaskId && eventTaskId !== currentTaskId) return;
+      const finished = target.data.videoStatus === 'done' && Boolean(String(target.data.videoUrl || '').trim());
+      // 终态之后只接受同一任务的失败（上游可能补一条 failed），迟到的 submitted/progress 一律忽略
+      if (finished && (event.phase === 'submitted' || event.phase === 'progress')) return;
+      if (event.phase === 'done') {
+        // 完成但没拿到地址：当作失败处理，别让节点卡在「已完成但没有视频」
+        if (!String(event.url || '').trim()) {
+          patchNode(event.nodeId, {
+            videoStatus: 'error',
+            videoTaskId: event.taskId,
+            videoError: '视频任务已完成，但没有拿到可播放的文件地址，请到服务商后台核查',
+            videoProgress: 0,
+            videoSubmissionUnknown: false,
+            videoDownloadRecoverable: false,
+            videoDownloadRecovering: false,
+            finishedAt: event.finishedAt || new Date().toISOString(),
+          });
+          return;
+        }
+        patchNode(event.nodeId, {
+          videoStatus: 'done',
+          videoProgress: 100,
+          videoUrl: event.url || '',
+          videoFileName: event.fileName || '',
+          videoError: '',
+          videoTaskId: event.taskId,
+          videoSubmissionUnknown: false,
+          videoDownloadRecoverable: false,
+          videoDownloadRecovering: false,
+          finishedAt: event.finishedAt || new Date().toISOString(),
+        });
+        markFreshResultNode(event.nodeId);
+        return;
+      }
+      if (event.phase === 'failed') {
+        patchNode(event.nodeId, {
+          videoStatus: 'error',
+          videoTaskId: event.taskId,
+          videoError: event.error || '视频生成失败',
+          videoProgress: 0,
+          videoSubmissionUnknown: event.submissionUnknown === true,
+          videoDownloadRecoverable: false,
+          videoDownloadRecovering: false,
+          finishedAt: event.finishedAt || new Date().toISOString(),
+        });
+        void getVideoTaskByNode(event.nodeId).then((record) => {
+          const latest = nodesRef.current.find((node) => node.id === event.nodeId);
+          if (!record?.outputUrl || !latest || (eventTaskId && latest.data.videoTaskId !== eventTaskId)) return;
+          patchNode(event.nodeId, { videoDownloadRecoverable: true });
+        }).catch(() => undefined);
+        return;
+      }
+      if (event.phase === 'download-failed') {
+        patchNode(event.nodeId, {
+          videoStatus: 'error',
+          videoTaskId: event.taskId,
+          videoError: `视频已生成，但接收文件失败：${event.error || '下载失败'}`,
+          videoProgress: 100,
+          videoSubmissionUnknown: false,
+          videoDownloadRecoverable: event.recoverable === true,
+          videoDownloadRecovering: false,
+          finishedAt: new Date().toISOString(),
+        });
+        return;
+      }
+      if (event.phase === 'submitted') {
+        patchNode(event.nodeId, { videoStatus: 'running', videoProgress: 0 });
+        return;
+      }
+      patchNode(event.nodeId, {
+        videoStatus: 'running',
+        videoProgress: Number(event.progress || 0),
+      });
+    });
+  }, [activeId, markFreshResultNode, patchNode]);
+
+  // 刷新恢复：bridge 里还在跑的任务，把节点重新挂成运行态（不然用户以为点了没反应）
+  useEffect(() => {
+    if (!activeId) return undefined;
+    const pending = nodesRef.current.filter((node) => (
+      node.data.kind === 'video'
+      && (
+        node.data.videoStatus === 'running'
+        // 只有「提交结果未知」才需要复核；普通 error 节点保留它自己的错误原因，
+        // 不能被「记录已丢失」覆盖（真实踩过：余额不足/超时的提示被冲掉）
+        || node.data.videoSubmissionUnknown === true
+        || Boolean(node.data.videoTaskId)
+        || (node.data.videoStatus === 'done' && Boolean(node.data.videoError))
+      )
+    ));
+    if (pending.length === 0) return undefined;
+    let alive = true;
+    void Promise.all(pending.map(async (node) => {
+      const record = await getVideoTaskByNode(node.id);
+      if (!alive) return;
+      if (!record) {
+        if (node.data.videoStatus === 'done') return;
+        // 已经有明确错误原因的节点：保持原样，别用「记录丢失」盖掉上游给的真实原因
+        if (node.data.videoStatus === 'error' && node.data.videoSubmissionUnknown !== true) return;
+        patchNode(node.id, {
+          videoStatus: 'error',
+          videoError: '没有找到这次生成的记录（可能提交时连接中断或 bridge 重启过），请重新生成',
+          videoProgress: 0,
+          videoSubmissionUnknown: false,
+        });
+        return;
+      }
+      // 节点已经开始新一轮（createdAt 更新）但 bridge 最新记录还是上一轮：
+      // 不回填旧成品/旧状态，否则刚点生成就「复活」上一条视频。
+      const nodeStartedAt = Date.parse(String(node.data.createdAt || ''));
+      const recordAt = Date.parse(record.createdAt || '');
+      if (
+        Number.isFinite(nodeStartedAt)
+        && Number.isFinite(recordAt)
+        && recordAt < nodeStartedAt
+        && record.submissionUnknown !== true
+      ) {
+        return;
+      }
+      if (record.status === 'completed' && record.url) {
+        patchNode(node.id, {
+          videoStatus: 'done',
+          videoProgress: 100,
+          videoTaskId: record.taskId,
+          videoUrl: record.url,
+          videoFileName: record.fileName || '',
+          videoError: '',
+          videoSubmissionUnknown: false,
+          finishedAt: record.finishedAt || new Date().toISOString(),
+        });
+        return;
+      }
+      if (record.status === 'failed') {
+        patchNode(node.id, {
+          videoStatus: 'error',
+          videoTaskId: record.taskId,
+          videoError: record.error || '视频生成失败',
+          videoSubmissionUnknown: false,
+          videoDownloadRecoverable: Boolean(record.outputUrl),
+          videoDownloadRecovering: false,
+          finishedAt: record.finishedAt || new Date().toISOString(),
+        });
+        return;
+      }
+      if (record.outputUrl && !record.url) {
+        patchNode(node.id, {
+          videoStatus: 'error',
+          videoTaskId: record.taskId,
+          videoError: `视频已生成，但接收文件失败：${record.error || '可重试接收'}`,
+          videoProgress: 100,
+          videoSubmissionUnknown: false,
+          videoDownloadRecoverable: true,
+          videoDownloadRecovering: false,
+        });
+        return;
+      }
+      if (record.submissionUnknown) {
+        patchNode(node.id, {
+          videoStatus: 'error',
+          videoError: record.error || '提交结果未知，请先核查服务商任务记录，避免重复提交',
+          videoSubmissionUnknown: true,
+        });
+        return;
+      }
+      patchNode(node.id, {
+        videoStatus: 'running',
+        videoProgress: record.progress || 0,
+        videoTaskId: record.taskId,
+        videoError: '',
+        videoSubmissionUnknown: false,
+      });
+    }));
+    return () => { alive = false; };
+  }, [activeId, patchNode]);
 
   // 参考图 chips 拖拽换序：组件侧乐观重排完把 order 抛过来，这里落库。
   // buildOrderedReferences 认识这份顺序， chips 编号与发送给模型的图片数组都会跟着变
@@ -2122,23 +3072,31 @@ function CanvasWorkspace() {
   useEffect(() => onEvent<NodePreviewDetail>(NODE_EVENTS.preview, ({ nodeId, version }) => {
     const node = nodesRef.current.find((item) => item.id === nodeId);
     if (!node) return;
-    const url = String(version?.imageUrl || node.data.imageUrl || node.data.referenceDataUrl || '').trim();
+    const isVideo = node.data.kind === 'video';
+    const url = String(isVideo
+      ? node.data.videoUrl || ''
+      : version?.imageUrl || node.data.imageUrl || node.data.referenceDataUrl || '').trim();
     if (!url) return;
     // 宫格里双击某一版：信息按那一版走，灯箱才知道这是第几版的提示词
     ensureHistoryForPreview();
     setPreviewItem({
+      mediaType: isVideo ? 'video' : 'image',
       url,
-      title: String(version?.prompt || node.data.prompt || node.data.label || '图片预览'),
+      title: String(version?.prompt || node.data.prompt || node.data.label || (isVideo ? '视频预览' : '图片预览')),
       details: {
         prompt: String(version?.prompt || node.data.prompt || ''),
         enhancedPrompt: String(version?.enhancedPrompt || node.data.enhancedPrompt || ''),
         enhanceFailed: node.data.enhanceFailed === true,
         revisedPrompt: String(version?.revisedPrompt || node.data.revisedPrompt || ''),
-        model: String(version?.model || node.data.model || ''),
-        size: String(version?.size || node.data.size || ''),
+        model: String(version?.model || (isVideo ? node.data.videoModel : node.data.model) || ''),
+        size: String(version?.size || (isVideo ? node.data.videoResolution : node.data.size) || ''),
         startedAt: String(version?.createdAt || node.data.createdAt || ''),
         createdAt: String(version?.finishedAt || node.data.finishedAt || ''),
-        fileName: String(version?.fileName || node.data.fileName || ''),
+        fileName: String(version?.fileName || (isVideo ? node.data.videoFileName : node.data.fileName) || ''),
+        videoSeconds: isVideo ? Number(node.data.videoSeconds || 0) : undefined,
+        videoResolution: isVideo ? String(node.data.videoResolution || '') : undefined,
+        videoRatio: isVideo ? String(node.data.videoRatio || '') : undefined,
+        videoAudio: isVideo ? node.data.videoAudio === true : undefined,
       },
     });
   }), []);
@@ -2319,6 +3277,8 @@ function CanvasWorkspace() {
   useEffect(() => {
     if (!activeId) return undefined;
     return subscribeCanvasUpdated(activeId, (event) => {
+      // 本地删除/编辑还没上桥时忽略远端水合：否则旧快照会把刚删掉的节点带回来
+      if (localWritePendingRef.current) return;
       if (nodeInteractionRef.current || nodePositionProtectionRef.current.size > 0) {
         remoteUpdatePendingRef.current = true;
         return;
@@ -2326,6 +3286,7 @@ function CanvasWorkspace() {
       void (async () => {
         const local = useCanvasStore.getState().canvases.find((doc) => doc.id === activeId);
         if (Date.parse(event.updatedAt) <= Date.parse(local?.updatedAt || '')) return;
+        const localUpdatedAt = local?.updatedAt || '';
         try {
           const remote = await getCanvases();
           if (nodeInteractionRef.current) {
@@ -2333,6 +3294,14 @@ function CanvasWorkspace() {
             return;
           }
           const previous = useCanvasStore.getState().canvases.find((doc) => doc.id === activeId);
+          // 拉取期间本地图又变了：这份远端快照可能早于本地操作，不能水合回来。
+          if (
+            localWritePendingRef.current
+            || (previous?.updatedAt || '') !== localUpdatedAt
+          ) {
+            remoteUpdatePendingRef.current = true;
+            return;
+          }
           useCanvasStore.getState().mergeCanvases(remote);
           const merged = useCanvasStore.getState().canvases.find((doc) => doc.id === activeId);
           if (merged && merged !== previous && !nodeInteractionRef.current) {
@@ -2363,8 +3332,17 @@ function CanvasWorkspace() {
         return;
       }
       const previous = useCanvasStore.getState().canvases.find((doc) => doc.id === canvasId);
+      const localUpdatedAt = previous?.updatedAt || '';
       void getCanvases().then((remote) => {
         if (revision !== interactionRevisionRef.current || (!force && nodeInteractionRef.current)) {
+          remoteUpdatePendingRef.current = true;
+          return;
+        }
+        const current = useCanvasStore.getState().canvases.find((doc) => doc.id === canvasId);
+        if (
+          localWritePendingRef.current
+          || (current?.updatedAt || '') !== localUpdatedAt
+        ) {
           remoteUpdatePendingRef.current = true;
           return;
         }
@@ -2460,11 +3438,24 @@ function CanvasWorkspace() {
     // 页面上有文本选中时不抢：那是复制文字，不是复制节点
     if (window.getSelection()?.toString()) return;
     const picked = nodesRef.current.filter((node) => node.selected);
-    const source = picked.length > 0
+    const initiallyPicked = picked.length > 0
       ? picked
       : (selectedId ? nodesRef.current.filter((node) => node.id === selectedId) : []);
-    if (source.length === 0) return;
-    const ids = new Set(source.map((node) => node.id));
+    if (initiallyPicked.length === 0) return;
+    const ids = new Set(initiallyPicked.map((node) => node.id));
+    initiallyPicked.forEach((node) => {
+      if (node.data.kind !== 'group') return;
+      collectCanvasGroupMembers(nodesRef.current as CanvasNode[], node.id)
+        .forEach((member) => ids.add(member.id));
+    });
+    // 只选中组内成员时复制为独立顶层节点；复制组时成员保留相对坐标。
+    const source = nodesRef.current
+      .filter((node) => ids.has(node.id))
+      .map((node) => {
+        if (!node.parentId || ids.has(node.parentId)) return node;
+        return detachCanvasNode(nodesRef.current as CanvasNode[], node as CanvasNode) as FlowNode;
+      });
+    const groupCount = source.filter((node) => node.data.kind === 'group').length;
     nodeClipboard = {
       canvasId: activeId,
       nodes: JSON.parse(JSON.stringify(source)) as FlowNode[],
@@ -2473,17 +3464,16 @@ function CanvasWorkspace() {
         .map((edge) => ({ id: edge.id, source: String(edge.source), target: String(edge.target) })),
       pastes: 0,
     };
-    showToast(source.length === 1
-      ? '已复制节点，Ctrl+V 粘贴（可切换到其他画布）'
-      : `已复制 ${source.length} 个节点，Ctrl+V 粘贴（可切换到其他画布）`);
+    showToast(groupCount > 0
+      ? `已复制编组及 ${source.length - groupCount} 个成员，Ctrl+V 粘贴`
+      : (source.length === 1
+        ? '已复制节点，Ctrl+V 粘贴（可切换到其他画布）'
+        : `已复制 ${source.length} 个节点，Ctrl+V 粘贴（可切换到其他画布）`));
   }, [activeId, selectedId, showToast]);
 
   const pasteNodes = useCallback(async () => {
     const clip = nodeClipboard;
     if (!clip || clip.nodes.length === 0) return;
-    // 确认真要粘节点了才置 guard：剪贴板是空的时候不能拦浏览器紧接着补发的
-    // paste 事件——那一下往往是用户粘图片，被误拦就等于「画布不能粘贴图片」
-    nodePasteGuardRef.current = performance.now();
     clip.pastes += 1;
     // 落点：同画布复制 = 原位错开一截（原地复制的手感）；跨画布 = 整组中心对到当前视口中心
     let dx = 48;
@@ -2491,14 +3481,15 @@ function CanvasWorkspace() {
     if (clip.canvasId !== activeId) {
       const center = insertPosition();
       const box = clip.nodes.reduce((acc, node) => {
-        const size = nodeBoxFor(node.data);
+        const position = absoluteNodePosition(clip.nodes as CanvasNode[], node as CanvasNode);
+        const size = node.data.kind === 'group' ? null : nodeBoxFor(node.data);
         const width = size ? size.width : Number(node.width || 0);
         const height = size ? size.height : Number(node.height || 0);
         return {
-          minX: Math.min(acc.minX, node.position.x),
-          minY: Math.min(acc.minY, node.position.y),
-          maxX: Math.max(acc.maxX, node.position.x + width),
-          maxY: Math.max(acc.maxY, node.position.y + height),
+          minX: Math.min(acc.minX, position.x),
+          minY: Math.min(acc.minY, position.y),
+          maxX: Math.max(acc.maxX, position.x + width),
+          maxY: Math.max(acc.maxY, position.y + height),
         };
       }, { minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity });
       dx = center.x - (box.minX + box.maxX) / 2;
@@ -2526,14 +3517,30 @@ function CanvasWorkspace() {
           return mapped || String(item);
         });
       }
-      return {
+      const parentId = node.parentId && idMap.has(node.parentId)
+        ? idMap.get(node.parentId)
+        : undefined;
+      const absolute = absoluteNodePosition(clip.nodes as CanvasNode[], node as CanvasNode);
+      const clone: FlowNode = {
         ...node,
         id: idMap.get(node.id) as string,
-        position: { x: node.position.x + dx, y: node.position.y + dy },
+        position: parentId
+          ? { ...node.position }
+          : { x: absolute.x + dx, y: absolute.y + dy },
         data,
         selected: index === 0,
         className: '',
       };
+      if (parentId) {
+        clone.parentId = parentId;
+        delete clone.extent;
+        clone.expandParent = false;
+      } else {
+        delete clone.parentId;
+        delete clone.extent;
+        delete clone.expandParent;
+      }
+      return clone;
     });
     // 媒体副本：/api/files 引用逐个在 bridge 侧复制一份再改写过去，副本与原件各占一个文件。
     // 从前共享同一路径，删任一副本都会把另一个节点的图弄没（用户实测）
@@ -2554,17 +3561,35 @@ function CanvasWorkspace() {
       }
     }));
     clones.forEach((node) => applyMediaRemap(node.data, remap));
-    // persist 抑制位可能还挂着上一轮拖拽 / 选择的 true，先摘掉再写（整理布局同款教训）
-    suppressPersistRef.current = false;
-    clones.forEach((node) => appendNode(node));
     const nextEdges: Edge[] = clip.edges.map((edge) => ({
       id: createId('edge'),
       source: idMap.get(edge.source) || edge.source,
       target: idMap.get(edge.target) || edge.target,
     }));
-    if (nextEdges.length > 0) setEdgesBoth([...edgesRef.current, ...nextEdges]);
-    // 边没跟过来的（只复制了部分节点）：上游引用要归零，别把旧 id 的引用带去新画布
-    syncComposerReferences(edgesRef.current);
+    const mergedEdges = [...edgesRef.current, ...nextEdges];
+    // 部分复制时上游边不会跟来：把现存 composer / video 的引用与编号一次性算好。
+    const nextNodes = [...nodesRef.current, ...clones].map((node) => {
+      if (node.data.kind !== 'composer' && node.data.kind !== 'video') return node;
+      const references = buildOrderedReferences(node.id, [...nodesRef.current, ...clones], mergedEdges);
+      const currentOrder = (Array.isArray(node.data.referenceOrder) ? node.data.referenceOrder : []).map(String);
+      const ids = references.map((reference) => String(reference.id || reference.url || ''));
+      const nextOrder = [
+        ...currentOrder.filter((id) => ids.includes(id)),
+        ...ids.filter((id) => !currentOrder.includes(id)),
+      ];
+      const referencesChanged = !areCanvasReferencesEqual(node.data.references, references);
+      const orderChanged = nextOrder.length !== currentOrder.length
+        || nextOrder.some((id, index) => id !== currentOrder[index]);
+      if (!referencesChanged && !orderChanged) return node;
+      return {
+        ...node,
+        data: {
+          ...node.data,
+          references,
+          referenceOrder: nextOrder,
+        },
+      };
+    });
     // 进撤回栈：Ctrl+Z 整组撤掉；复制出来的媒体文件记在这，撤回时只清没人再引的
     editUndoRef.current.push({
       kind: 'paste',
@@ -2572,8 +3597,9 @@ function CanvasWorkspace() {
       edgeIds: nextEdges.map((edge) => edge.id),
       copiedUrls: [...remap.values()],
     });
+    commitCanvasGraph(nextNodes, mergedEdges, clones[0]?.id || '');
     showToast(clones.length === 1 ? '已粘贴节点' : `已粘贴 ${clones.length} 个节点`);
-  }, [activeId, appendNode, insertPosition, setEdgesBoth, showToast, syncComposerReferences]);
+  }, [activeId, commitCanvasGraph, insertPosition, showToast]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -2589,9 +3615,15 @@ function CanvasWorkspace() {
         copySelectedNodes();
         return;
       }
-      // guard 时间戳在 pasteNodes 里置（确认剪贴板有节点才置）：这里无条件置过，
-      // 空剪贴板时会把浏览器紧接着补发的图片 paste 事件整轮拦掉
-      void pasteNodes();
+      if (!nodeClipboard) return;
+      const intent = performance.now();
+      nodePasteIntentRef.current = intent;
+      // 等浏览器先派发 paste：若系统剪贴板实际是图片，就导入图片而不是旧的节点缓存。
+      window.setTimeout(() => {
+        if (nodePasteIntentRef.current !== intent) return;
+        nodePasteIntentRef.current = 0;
+        void pasteNodes();
+      }, 80);
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
@@ -2610,50 +3642,58 @@ function CanvasWorkspace() {
           && !String(node.data.imageUrl || '').trim(),
       );
       if (!composer) return undefined;
+      const composerPosition = absoluteNodePosition(nodesRef.current as CanvasNode[], composer as CanvasNode);
       const screen = rf.flowToScreenPosition({
-        x: composer.position.x - Number(composer.data.cardWidth || DEFAULT_COMPOSER_NODE_WIDTH) - 96,
-        y: composer.position.y + 24,
+        x: composerPosition.x - Number(composer.data.cardWidth || DEFAULT_COMPOSER_NODE_WIDTH) - 96,
+        y: composerPosition.y + 24,
       });
       return { x: screen.x, y: screen.y };
     };
     const onPaste = (event: ClipboardEvent) => {
-      // 刚用 Ctrl+V 粘过节点（时间戳热乎着）：同一轮补发的 paste 事件直接跳过，
-      // 不然节点粘贴和图片粘贴会为一次按键各出一份结果
-      if (performance.now() - nodePasteGuardRef.current < 800) return;
-      const files = event.clipboardData?.files ? Array.from(event.clipboardData.files).filter((item) => item.type.startsWith('image/')) : [];
-      for (const item of Array.from(event.clipboardData?.items || [])) {
-        if (item.kind !== 'file' || !item.type.startsWith('image/')) continue;
-        const itemFile = item.getAsFile();
-        if (itemFile && !files.some((file) => file === itemFile)) files.push(itemFile);
-      }
+      const target = event.target as HTMLElement | null;
+      if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)) return;
+      const files = findClipboardImages({
+        files: event.clipboardData?.files ? Array.from(event.clipboardData.files) : [],
+        items: Array.from(event.clipboardData?.items || []),
+      }) as File[];
       if (files.length > 0) {
+        event.preventDefault();
+        nodePasteIntentRef.current = 0;
         void Promise.all(files.map((item, index) => addReferenceFile(item as unknown as File, (() => {
           const point = pastePoint();
           return point ? { x: point.x + index * 28, y: point.y + index * 28 } : undefined;
         })())));
         return;
       }
-      const items = event.clipboardData?.items;
-      // 网页拷贝的图像（text/html 里的 <img>）或图片链接：getAsString 是异步的
-      let handled = false;
-      for (const item of Array.from(items || [])) {
-        if (item.kind !== 'string') continue;
-        if (item.type !== 'text/html' && item.type !== 'text/uri-list' && item.type !== 'text/plain') continue;
-        handled = true;
-        item.getAsString((text) => {
-          const imgSrc = /<img[^>]+src=["']([^"']+)["']/i.exec(text || '');
-          void addReferenceFromUrl(imgSrc ? imgSrc[1] : text || '', pastePoint());
+      const textItems = Array.from(event.clipboardData?.items || []).filter((item) => (
+        item.kind === 'string'
+        && (item.type === 'text/html' || item.type === 'text/uri-list' || item.type === 'text/plain')
+      ));
+      if (textItems.length > 0) {
+        const shouldPasteNodes = Boolean(nodePasteIntentRef.current && nodeClipboard);
+        nodePasteIntentRef.current = 0;
+        event.preventDefault();
+        void Promise.all(textItems.map((item) => new Promise<{ type: string; text: string }>((resolve) => {
+          item.getAsString((text) => resolve({ type: item.type, text }));
+        }))).then((values) => {
+          const imageUrl = extractClipboardImageUrl(values);
+          if (imageUrl) void addReferenceFromUrl(imageUrl, pastePoint());
+          else if (shouldPasteNodes) void pasteNodes();
+          else showToast('画布上只支持粘贴图片：截图、图片文件、拷贝的图像或图片链接');
         });
+        return;
       }
-      if (handled) return;
-      // 输入态里的粘贴归浏览器（打字 / 弹窗表单 / 标注文字浮层），画布不接也不该吭声
-      const target = event.target as HTMLElement | null;
-      if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)) return;
+      if (nodePasteIntentRef.current && nodeClipboard) {
+        event.preventDefault();
+        nodePasteIntentRef.current = 0;
+        void pasteNodes();
+        return;
+      }
       showToast('画布上只支持粘贴图片：截图、图片文件、拷贝的图像或图片链接');
     };
     window.addEventListener('paste', onPaste);
     return () => window.removeEventListener('paste', onPaste);
-  }, [addReferenceFile, addReferenceFromUrl, selectedId, rf, showToast]);
+  }, [addReferenceFile, addReferenceFromUrl, pasteNodes, selectedId, rf, showToast]);
 
   /* ── Esc 关闭添加菜单 ── */
   useEffect(() => {
@@ -2837,7 +3877,20 @@ function CanvasWorkspace() {
     window.clearTimeout(remoteSyncRef.current);
     const doc = useCanvasStore.getState().activeCanvas();
     if (!doc || doc.id !== activeDocId) return undefined;
-    remoteSyncRef.current = window.setTimeout(() => void putCanvasDoc(doc), 600);
+    const syncRevision = ++remoteSyncRevisionRef.current;
+    localWritePendingRef.current = true;
+    remoteSyncRef.current = window.setTimeout(() => {
+      const queued = remoteSyncQueueRef.current.then(
+        () => putCanvasDoc(doc),
+        () => putCanvasDoc(doc),
+      );
+      remoteSyncQueueRef.current = queued.catch(() => undefined);
+      void queued.finally(() => {
+        if (syncRevision === remoteSyncRevisionRef.current) {
+          localWritePendingRef.current = false;
+        }
+      });
+    }, 600);
     return () => window.clearTimeout(remoteSyncRef.current);
   }, [activeDocId, activeDocUpdatedAt]);
 
@@ -2877,13 +3930,15 @@ function CanvasWorkspace() {
 
   // 节点 class / style 注入：fresh / entering / exiting 三组 class + 入场错相延迟
   const flowNodes = useMemo<FlowNode[]>(() => nodes.map((node) => {
-    const composerReferences = node.data.kind === 'composer'
+    const isGroup = node.data.kind === 'group';
+    const isGeneratorNode = node.data.kind === 'composer' || node.data.kind === 'video';
+    const composerReferences = isGeneratorNode
       ? buildOrderedReferences(node.id, nodes, edges)
       : [];
     const composerEditing = editingNodeId === node.id;
     const referencesChanged = !areCanvasReferencesEqual(node.data.references, composerReferences);
     const editingChanged = Boolean(node.data.composerEditing) !== composerEditing;
-    const nextData = referencesChanged || editingChanged
+    const nextData = isGeneratorNode && (referencesChanged || editingChanged)
       ? { ...node.data, references: composerReferences, composerEditing }
       : node.data;
     const entering = enteringNodeIds.includes(node.id);
@@ -2891,6 +3946,7 @@ function CanvasWorkspace() {
       node.id === freshResultNodeId ? 'is-fresh-result' : '',
       entering ? 'is-entering' : '',
       exitingNodeIds.includes(node.id) ? 'is-exiting' : '',
+      node.id === outpaintNodeId ? 'is-outpainting' : '',
     ].filter(Boolean).join(' ');
     // 批量入场时按 index 错相展开（经 CSS 自定义属性传给内层卡片）
     const enterDelay = entering
@@ -2899,16 +3955,16 @@ function CanvasWorkspace() {
     const nextStyle = enterDelay
       ? { ...node.style, '--image-node-enter-delay': enterDelay } as CSSProperties
       : node.style;
-    // React Flow 盒子宽度钉到卡片实测宽（图片按 aspect 档位、composer 按 cardWidth）：
-    // node.width 可能停在 composer 期 / 自然尺寸 / 旧 cardWidth，盒子比卡片大时连线端点
-    // 就飘出卡片。高度只 pin 图片节点——composer 外壳是内容高度，得让 React Flow 贴着量。
-    const imageBox = imageNodeFlowBox(node.data);
-    const nextWidth = nodeWidthFor(node.data);
-    const nextHeight = imageBox ? imageBox.height : node.height;
+    // React Flow 盒子尺寸跟随卡片（图片按比例、文本节点按手动宽高、composer 按 cardWidth），
+    // 避免盒子与外壳尺寸不一致时连线端点偏离卡片。生成节点高度仍由内容自然测量。
+    const imageBox = isGroup ? null : imageNodeFlowBox(node.data);
+    const textBox = node.data.kind === 'text' ? nodeBoxFor(node.data) : null;
+    const nextWidth = isGroup ? node.width : nodeWidthFor(node.data);
+    const nextHeight = isGroup ? node.height : (imageBox?.height ?? textBox?.height ?? node.height);
     if (node.className === nextClassName && node.style === nextStyle && nextData === node.data
-      && node.width === nextWidth && node.height === nextHeight) return node;
-    return { ...node, data: nextData, className: nextClassName, style: nextStyle, width: nextWidth, height: nextHeight };
-  }), [nodes, edges, editingNodeId, enteringNodeIds, exitingNodeIds, freshResultNodeId]);
+      && node.width === nextWidth && node.height === nextHeight && node.dragHandle === undefined) return node;
+    return { ...node, data: nextData, className: nextClassName, style: nextStyle, width: nextWidth, height: nextHeight, dragHandle: undefined };
+  }), [nodes, edges, editingNodeId, enteringNodeIds, exitingNodeIds, freshResultNodeId, outpaintNodeId]);
 
   // 与灵枢同款：默认态不挂 edge-related；只有与选中节点相连才走高亮档
   /** 剪断一条连线：删边 + 同步 composer 引用 + 提示，与拖端点到空白断开同一套收尾 */
@@ -2938,12 +3994,16 @@ function CanvasWorkspace() {
   const tidyNodes = useCallback(() => {
     const current = nodesRef.current;
     if (current.length === 0) return;
+    const tidyGraph = canvasTidyGraph(current as CanvasNode[], edgesRef.current as CanvasEdge[]);
     const result = tidyLayout(
-      current.map((node) => {
-        const box = nodeBoxFor(node.data);
-        return { id: node.id, x: node.position.x, y: node.position.y, width: box.width, height: box.height };
+      tidyGraph.nodes.map((node) => {
+        const position = absoluteNodePosition(current as CanvasNode[], node);
+        const box = node.data.kind === 'group'
+          ? { width: Number(node.width || 0), height: Number(node.height || 0) }
+          : nodeBoxFor(node.data);
+        return { id: node.id, x: position.x, y: position.y, width: box.width, height: box.height };
       }),
-      edgesRef.current.map((edge) => ({ source: String(edge.source), target: String(edge.target) })),
+      tidyGraph.edges.map((edge) => ({ source: String(edge.source), target: String(edge.target) })),
       // 屏幕固定的功能条 / dock 是禁入区：整理完不许让卡片压住图标（用户实测）
       { avoid: canvasAvoidRects(rf) },
     );
@@ -3000,7 +4060,7 @@ function CanvasWorkspace() {
       if (!(event.ctrlKey || event.metaKey) || event.key.toLowerCase() !== 'z') return;
       const target = event.target as HTMLElement | null;
       if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)) return;
-      if (annotateNodeId) return;
+      if (annotateNodeId || outpaintNodeId) return;
       const stack = editUndoRef.current;
       if (stack.length === 0) return;
       event.preventDefault();
@@ -3032,9 +4092,9 @@ function CanvasWorkspace() {
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [annotateNodeId, setEditingNodeId, setSelectedId, showToast, syncComposerReferences, undoPasteEntry]);
+  }, [annotateNodeId, outpaintNodeId, setEditingNodeId, setSelectedId, showToast, syncComposerReferences, undoPasteEntry]);
 
-  /* ── 生成节点手动拉伸：拖右下角手柄同时改宽高，落定后写库 ── */
+  /* ── 生成与文本节点手动拉伸：拖右下角手柄同时改宽高，落定后写库 ── */
   useEffect(() => {
     const onResizeStart = (event: Event) => {
       const detail = (event as CustomEvent<{
@@ -3044,7 +4104,7 @@ function CanvasWorkspace() {
       const startX = Number(detail.clientX);
       const startY = Number(detail.clientY);
       const node = nodesRef.current.find((entry) => entry.id === nodeId);
-      if (!node || node.data.kind !== 'composer' || !Number.isFinite(startX) || !Number.isFinite(startY)) return;
+      if (!node || (node.data.kind !== 'composer' && node.data.kind !== 'text') || !Number.isFinite(startX) || !Number.isFinite(startY)) return;
       event.preventDefault();
 
       const zoom = Math.max(0.1, viewControls.flowViewport.zoom || 1);
@@ -3052,7 +4112,10 @@ function CanvasWorkspace() {
         .find((element) => element.dataset.id === nodeId);
       const shell = nodeElement?.querySelector<HTMLElement>('.image-node-composer-shell');
       const measuredHeight = shell ? shell.getBoundingClientRect().height / zoom : MIN_COMPOSER_NODE_HEIGHT;
-      const startWidth = Number(node.data.cardWidth || 0) > 0 ? Number(node.data.cardWidth) : DEFAULT_COMPOSER_NODE_WIDTH;
+      const startWidth = Math.min(
+        MAX_COMPOSER_NODE_WIDTH,
+        Math.max(MIN_COMPOSER_NODE_WIDTH, Number(node.data.cardWidth) || DEFAULT_COMPOSER_NODE_WIDTH),
+      );
       const startHeight = Math.min(
         MAX_COMPOSER_NODE_HEIGHT,
         Math.max(MIN_COMPOSER_NODE_HEIGHT, Number(node.data.nodeHeight) || measuredHeight),
@@ -3137,48 +4200,116 @@ function CanvasWorkspace() {
     imageModelOptionsOf(settings?.profiles)
   ), [settings]);
 
-  const selectedComposer = useMemo(() => {
+  /** 选中的生成节点（composer 或 video）：工具栏浮在它上方。两者共用一套定位算法。 */
+  const selectedGenerator = useMemo(() => {
     const node = nodes.find((item) => item.id === selectedId);
-    if (!node || node.data.kind !== 'composer') return null;
+    if (!node) return null;
+    if (node.data.kind !== 'composer' && node.data.kind !== 'video') return null;
     if (String(node.data.imageUrl || node.data.referenceDataUrl || '').trim()) return null;
+    if (node.data.kind === 'video' && node.data.videoStatus === 'done') return null;
     return node;
   }, [nodes, selectedId]);
 
+  /** 视频节点专用：供工具栏的模型下拉用（多路视频配置里勾选的模型）。 */
+  const toolbarVideoModelOptions = useMemo<VideoModelOption[]>(() => {
+    const videos = (settings?.profiles || []).filter((profile) => (
+      profile.kind === 'video'
+      && profile.enabled !== false
+      && profile.keyConfigured
+      && Boolean(profile.baseUrl.trim() && profile.model)
+    ));
+    const options: VideoModelOption[] = [];
+    for (const profile of videos) {
+      const models = profile.enabledModels.length > 0 ? profile.enabledModels : (profile.model ? [profile.model] : []);
+      for (const model of models) {
+        options.push({ key: `${profile.id}:${model}`, model, profileId: profile.id, profileName: profile.name });
+      }
+    }
+    return options;
+  }, [settings]);
+
+  const selectedVideoProfile = useMemo(() => {
+    if (selectedGenerator?.data.kind !== 'video') return null;
+    const wanted = String(selectedGenerator.data.videoProfileId || '');
+    return settings?.profiles.find((profile) => (
+      profile.id === wanted
+      && profile.kind === 'video'
+      && profile.enabled !== false
+      && profile.keyConfigured
+      && Boolean(profile.baseUrl.trim() && profile.model)
+    )) || videoProfileOf(settings);
+  }, [selectedGenerator, settings]);
+
+  /** 当前选中的视频模型名：与 runVideoNode 里的解析口径保持一致。 */
+  const selectedVideoModel = useMemo(() => {
+    if (selectedGenerator?.data.kind !== 'video' || !selectedVideoProfile) return '';
+    const wanted = String(selectedGenerator.data.videoModel || '');
+    const models = selectedVideoProfile.enabledModels.length > 0
+      ? selectedVideoProfile.enabledModels
+      : [selectedVideoProfile.model].filter(Boolean);
+    return models.includes(wanted) ? wanted : String(selectedVideoProfile.model || models[0] || '');
+  }, [selectedGenerator, selectedVideoProfile]);
+
+  const selectedVideoSchemaKey = selectedVideoProfile && selectedVideoModel
+    ? `${selectedVideoProfile.id}::${selectedVideoModel}`
+    : '';
+  const [videoSchemaLoading, setVideoSchemaLoading] = useState(false);
+  const [videoSchemaError, setVideoSchemaError] = useState('');
+  const videoSchema = selectedVideoSchemaKey ? videoSchemas[selectedVideoSchemaKey] : undefined;
 
   /**
-   * 工具栏浮在选中节点上方居中。上方放不下（节点顶到可视区上沿）时**翻到卡片下方**，
-   * 而不是 clamp 到安全线把自己挤进卡片里——那是"悬浮工具栏被挤下来"的根因。
+   * 选中视频节点时按模型拉参数定义，界面据此动态渲染表单。
+   * 只有 media-v1（媒体协议）提供 schema；其他协议继续走旧的固定三件套面板。
+   * 「自动识别」档也试一次——失败时静默回落到旧面板，不打扰 GrsAI / OpenAI 用户。
    */
-  const toolbarStyle = useMemo<CSSProperties | undefined>(() => {
-    if (!selectedComposer) return undefined;
-    const zoom = Number(viewport.zoom) || 1;
-    const offsetX = Number(viewport.x) || 0;
-    const offsetY = Number(viewport.y) || 0;
-    const width = composerWidthForRatio(ratioToNumber(String(selectedComposer.data.ratio || '')) || 1) * zoom;
-    const centerX = selectedComposer.position.x * zoom + offsetX + width / 2;
-    const nodeTop = selectedComposer.position.y * zoom + offsetY;
-    const box = nodeBoxFor(selectedComposer.data);
-    const nodeBottom = nodeTop + box.height * zoom;
-    const wrap = document.querySelector('.hb-canvas-wrap');
-    const wrapWidth = wrap?.clientWidth || window.innerWidth;
-    const wrapHeight = wrap?.clientHeight || window.innerHeight;
-    const topSafe = 72;
-    const above = nodeTop - 52;
-    const below = nodeBottom + 12;
-    const top = above >= topSafe
-      ? above
-      : Math.min(below, Math.max(topSafe, wrapHeight - 56));
-    return {
-      left: Math.min(Math.max(centerX, 180), Math.max(180, wrapWidth - 180)),
-      top,
-    };
-  }, [selectedComposer, viewport]);
+  useEffect(() => {
+    if (!selectedVideoProfile || !selectedVideoModel || !selectedVideoSchemaKey) return undefined;
+    if (videoSchemasRef.current[selectedVideoSchemaKey]) return undefined;
+    const mode = selectedVideoProfile.videoApiMode || 'auto';
+    if (mode !== 'media-v1' && mode !== 'auto') return undefined;
+    let cancelled = false;
+    setVideoSchemaLoading(true);
+    setVideoSchemaError('');
+    void fetchVideoModelSchema(selectedVideoProfile.id, selectedVideoModel)
+      .then((schema) => {
+        if (cancelled) return;
+        videoSchemasRef.current = { ...videoSchemasRef.current, [selectedVideoSchemaKey]: schema };
+        setVideoSchemas(videoSchemasRef.current);
+        // 补齐没选过的参数：开关默认关，其余取第一档，避免提交时缺必填项。
+        const nodeId = selectedGenerator?.id;
+        if (!nodeId) return;
+        const node = nodesRef.current.find((item) => item.id === nodeId);
+        if (!node) return;
+        const current = (node.data.videoParams || {}) as Record<string, unknown>;
+        const next = fillVideoSchemaDefaults(schema, current, {
+          model: selectedVideoModel,
+          seconds: Number(node.data.videoSeconds || 5),
+          resolution: String(node.data.videoResolution || '480p'),
+          ratio: String(node.data.videoRatio || '16:9'),
+        });
+        const changed = Object.keys(next).some((name) => next[name] !== current[name]);
+        if (changed) patchNode(nodeId, { videoParams: next });
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        // 自动识别档失败说明这路不是媒体协议：静默回落，别在参数面板里报红。
+        if (mode === 'media-v1') {
+          setVideoSchemaError(error instanceof Error ? error.message : '读取模型参数失败');
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setVideoSchemaLoading(false);
+      });
+    return () => { cancelled = true; };
+  }, [patchNode, selectedGenerator?.id, selectedVideoModel, selectedVideoProfile, selectedVideoSchemaKey]);
 
-  // 选中图片节点时浮在其上方的工具栏：节点像素位置 × 视口缩放，再按可视区收边（灵枢同款）
+  // 选中图片 / 视频成品节点时浮在其上方的工具栏：节点像素位置 × 视口缩放，再按可视区收边（灵枢同款）
   const selectedImageNode = useMemo(() => {
     const node = nodes.find((item) => item.id === selectedId);
     if (!node) return null;
     if (String(node.data.imageUrl || node.data.referenceDataUrl || '').trim()) return node;
+    // 视频完成态：成品播放下同样浮出工具栏（重新生成 / 下载走它）
+    if (node.data.kind === 'video' && node.data.videoStatus === 'done' && String(node.data.videoUrl || '').trim()) return node;
     return null;
   }, [nodes, selectedId]);
 
@@ -3191,26 +4322,170 @@ function CanvasWorkspace() {
     return String(active?.imageUrl || node.data.imageUrl || node.data.referenceDataUrl || '');
   }, [annotateNodeId, nodes]);
 
-  const selectionToolbarStyle = useMemo<CSSProperties | undefined>(() => {
-    if (!selectedImageNode) return undefined;
-    const zoom = Number(viewport.zoom) || 1;
-    const box = nodeBoxFor(selectedImageNode.data);
-    const nodeCenterX = selectedImageNode.position.x * zoom + Number(viewport.x || 0) + box.width * zoom / 2;
-    const nodeTop = selectedImageNode.position.y * zoom + Number(viewport.y || 0);
-    const nodeBottom = nodeTop + box.height * zoom;
-    const wrap = document.querySelector('.hb-canvas-wrap');
-    const width = (wrap?.clientWidth || window.innerWidth);
-    const height = (wrap?.clientHeight || window.innerHeight);
-    const toolbarWidth = 128;
-    const topSafe = 72;
-    const above = nodeTop - 52;
-    // 与生成工具栏同规则：上方不够就翻到卡片下方
-    const top = above >= topSafe ? above : Math.min(nodeBottom + 12, Math.max(topSafe, height - 56));
-    return {
-      left: Math.min(Math.max(nodeCenterX, toolbarWidth / 2 + 12), Math.max(toolbarWidth / 2 + 12, width - toolbarWidth / 2 - 12)),
-      top,
+  const overlaySelectedNode = selectedGenerator || selectedImageNode;
+  const overlaySelectedId = overlaySelectedNode?.id || '';
+  const [overlayMetrics, setOverlayMetrics] = useState<SelectedNodeOverlayMetrics | null>(null);
+
+  /**
+   * composer 的估算高度对视频卡片会明显偏小，工具栏因此容易压进内容区。
+   * 这里直接量真实节点，把尺寸缓存成画布坐标；拖动 / 缩放时再用当前视口换算，
+   * 不会因为逐帧量 DOM 而让工具栏慢半拍。
+   */
+  useLayoutEffect(() => {
+    if (!overlaySelectedId) {
+      setOverlayMetrics((current) => (current === null ? current : null));
+      return undefined;
+    }
+    const host = canvasHostRef.current;
+    if (!host) return undefined;
+    let frame = 0;
+    let disposed = false;
+    let resizeObserver: ResizeObserver | null = null;
+    let observedNode: HTMLElement | null = null;
+    let observedTopbar: HTMLElement | null = null;
+
+    const measure = () => {
+      if (disposed) return;
+      const nodeElement = Array.from(host.querySelectorAll<HTMLElement>('.react-flow__node'))
+        .find((element) => element.dataset.id === overlaySelectedId);
+      if (!nodeElement) return;
+      const zoom = Math.max(0.01, Number(viewControls.flowViewport.zoom) || 1);
+      const hostRect = host.getBoundingClientRect();
+      const nodeRect = nodeElement.getBoundingClientRect();
+      const topbarRect = host.querySelector<HTMLElement>('.hb-topbar')?.getBoundingClientRect();
+      const next: SelectedNodeOverlayMetrics = {
+        id: overlaySelectedId,
+        width: nodeElement.offsetWidth || nodeRect.width / zoom,
+        height: nodeElement.offsetHeight || nodeRect.height / zoom,
+        topSafe: topbarRect ? Math.max(0, topbarRect.bottom - hostRect.top + 8) : 72,
+        containerWidth: host.clientWidth || window.innerWidth,
+      };
+      setOverlayMetrics((current) => (
+        current
+        && current.id === next.id
+        && Math.abs(current.width - next.width) < 0.5
+        && Math.abs(current.height - next.height) < 0.5
+        && Math.abs(current.topSafe - next.topSafe) < 0.5
+        && Math.abs(current.containerWidth - next.containerWidth) < 0.5
+          ? current
+          : next
+      ));
     };
-  }, [selectedImageNode, viewport]);
+
+    measure();
+    frame = window.requestAnimationFrame(measure);
+    observedNode = Array.from(host.querySelectorAll<HTMLElement>('.react-flow__node'))
+      .find((element) => element.dataset.id === overlaySelectedId) || null;
+    observedTopbar = host.querySelector<HTMLElement>('.hb-topbar');
+    if (typeof ResizeObserver !== 'undefined') {
+      resizeObserver = new ResizeObserver(measure);
+      if (observedNode) resizeObserver.observe(observedNode);
+      if (observedTopbar) resizeObserver.observe(observedTopbar);
+      resizeObserver.observe(host);
+    }
+    window.addEventListener('resize', measure);
+    return () => {
+      disposed = true;
+      window.cancelAnimationFrame(frame);
+      resizeObserver?.disconnect();
+      window.removeEventListener('resize', measure);
+    };
+  }, [
+    overlaySelectedId,
+    overlaySelectedNode?.data.kind,
+    overlaySelectedNode?.data.imageUrl,
+    overlaySelectedNode?.data.videoUrl,
+    overlaySelectedNode?.data.videoStatus,
+    overlaySelectedNode?.data.cardWidth,
+    overlaySelectedNode?.data.nodeHeight,
+    overlaySelectedNode?.data.nodeHeightManual,
+    overlaySelectedNode?.data.ratio,
+    overlaySelectedNode?.data.videoRatio,
+    viewControls.flowViewport.zoom,
+  ]);
+
+  const overlayNodeBounds = useMemo(() => {
+    if (!overlaySelectedNode) return null;
+    const zoom = Number(viewport.zoom) || 1;
+    const fallbackBox = nodeBoxFor(overlaySelectedNode.data);
+    const metrics = overlayMetrics?.id === overlaySelectedNode.id ? overlayMetrics : null;
+    const position = absoluteNodePosition(nodesRef.current as CanvasNode[], overlaySelectedNode as CanvasNode);
+    return {
+      left: position.x * zoom + Number(viewport.x || 0),
+      top: position.y * zoom + Number(viewport.y || 0),
+      width: (metrics?.width || fallbackBox.width) * zoom,
+      height: (metrics?.height || fallbackBox.height) * zoom,
+      topSafe: metrics?.topSafe ?? 72,
+      containerWidth: metrics?.containerWidth || canvasHostRef.current?.clientWidth || window.innerWidth,
+    };
+  }, [overlaySelectedNode, overlayMetrics, viewport]);
+
+  const toolbarPlacement = useMemo(() => {
+    if (!overlaySelectedNode || !overlayNodeBounds) return null;
+    const toolbarWidth = selectedGenerator
+      ? (selectedGenerator.data.kind === 'video' ? 528 : 360)
+      : (overlaySelectedNode.data.kind === 'image' ? 360 : (overlaySelectedNode.data.kind === 'video' ? 96 : 174));
+    return placeNodeToolbar(overlayNodeBounds, {
+      containerWidth: overlayNodeBounds.containerWidth,
+      topSafe: overlayNodeBounds.topSafe,
+      toolbarWidth,
+    });
+  }, [overlaySelectedNode, overlayNodeBounds, selectedGenerator]);
+
+  const toolbarStyle = useMemo<CSSProperties | undefined>(() => (
+    selectedGenerator && toolbarPlacement
+      ? { left: toolbarPlacement.left, top: toolbarPlacement.top }
+      : undefined
+  ), [selectedGenerator, toolbarPlacement]);
+
+  const selectionToolbarStyle = useMemo<CSSProperties | undefined>(() => {
+    if (!selectedImageNode || !toolbarPlacement) return undefined;
+    return { left: toolbarPlacement.left, top: toolbarPlacement.top };
+  }, [selectedImageNode, toolbarPlacement]);
+
+  const groupSelection = useMemo(() => (
+    nodes.filter((node) => node.selected || node.id === selectedId)
+  ), [nodes, selectedId]);
+  const canCreateGroup = groupSelection.length >= 2
+    && groupSelection.every((node) => node.data.kind !== 'group' && !node.parentId);
+  const groupCreateToolbarPlacement = useMemo(() => {
+    if (groupSelection.length < 2) return null;
+    const zoom = Number(viewport.zoom) || 1;
+    const rects = groupSelection.map((node) => {
+      const position = absoluteNodePosition(nodesRef.current as CanvasNode[], node as CanvasNode);
+      const fallback = nodeBoxFor(node.data);
+      return {
+        left: position.x * zoom + Number(viewport.x || 0),
+        top: position.y * zoom + Number(viewport.y || 0),
+        width: (Number(node.measured?.width || node.width) || fallback.width) * zoom,
+        height: (Number(node.measured?.height || node.height) || fallback.height) * zoom,
+      };
+    });
+    const left = Math.min(...rects.map((rect) => rect.left));
+    const top = Math.min(...rects.map((rect) => rect.top));
+    const right = Math.max(...rects.map((rect) => rect.left + rect.width));
+    const bottom = Math.max(...rects.map((rect) => rect.top + rect.height));
+    return placeNodeToolbar(
+      { left, top, width: right - left, height: bottom - top },
+      {
+        containerWidth: canvasHostRef.current?.clientWidth || window.innerWidth,
+        topSafe: 72,
+        toolbarWidth: 48,
+        toolbarHeight: 48,
+        gap: 12,
+      },
+    );
+  }, [groupSelection, viewport]);
+
+  const flowInteractionProps = outpaintNodeId
+    ? {
+      ...viewControls.interactionProps,
+      selectionOnDrag: false,
+      panOnDrag: false,
+      panOnScroll: false,
+      zoomOnPinch: false,
+    }
+    : viewControls.interactionProps;
 
   return (
     <div
@@ -3220,6 +4495,28 @@ function CanvasWorkspace() {
       <div
         ref={canvasHostRef}
         className={`hb-canvas-wrap image-canvas-flow ${viewControls.panTool ? 'canvas-pan-tool' : ''}`}
+        onDoubleClickCapture={(event) => {
+          if (outpaintNodeId) return;
+          const target = event.target as HTMLElement | null;
+          if (!target?.closest('.react-flow__pane')) return;
+          if (target.closest([
+            '.react-flow__node',
+            '.react-flow__edge',
+            '.react-flow__controls',
+            '.image-add-menu',
+            '.image-node-toolbar',
+            '.image-node-resize-handle',
+            'button',
+            'input',
+            'textarea',
+            'select',
+            'a',
+          ].join(','))) return;
+          event.preventDefault();
+          event.stopPropagation();
+          pendingConnectionRef.current = null;
+          openAddMenu({ x: event.clientX, y: event.clientY }, null);
+        }}
       >
         {/* 导航是画布里的浮层：贴最顶部、无背景，空白处点击穿透到画布 */}
         <TopBar
@@ -3248,6 +4545,9 @@ function CanvasWorkspace() {
           edges={flowEdges}
           nodeTypes={nodeTypes}
           edgeTypes={edgeTypes}
+          nodesDraggable={!outpaintNodeId}
+          nodesConnectable={!outpaintNodeId}
+          elementsSelectable={!outpaintNodeId}
           onNodesChange={onNodesChange}
           onEdgesChange={onEdgesChange}
           onConnect={onConnect}
@@ -3283,7 +4583,12 @@ function CanvasWorkspace() {
             setSelectedId(node.id);
             deferRemoteDuringNodeInteraction();
             setEditingNodeId(
-              node.data.kind === 'composer' && !String(node.data.imageUrl || '').trim() ? node.id : '',
+              (node.data.kind === 'composer' || node.data.kind === 'video')
+                && !String(node.data.imageUrl || '').trim()
+                && node.data.videoStatus !== 'running'
+                && node.data.videoStatus !== 'done'
+                ? node.id
+                : '',
             );
             if (!clickedControl && (node.data.kind === 'image' || node.data.kind === 'reference')) {
               // 只有 AI 对话面板打开时才把节点自动加进引用：面板关闭时点节点只做选中，不抢焦点
@@ -3297,13 +4602,27 @@ function CanvasWorkspace() {
             nodeInteractionRef.current = true;
             nodeDragUndoRef.current = cloneGraphForUndo(nodesRef.current, edgesRef.current);
           }}
-          onNodeDragStop={() => {
+          onNodeDragStop={(_event, _node, draggedNodes) => {
             window.clearTimeout(interactionReleaseTimerRef.current);
+            const dragged = applyFinalDraggedPositions(nodesRef.current, draggedNodes);
+            const assigned = assignDraggedGroupMembership(
+              dragged,
+              new Set(draggedNodes.map((node) => String(node.id))),
+            );
+            const normalized = normalizeCanvasGroups(
+              assigned as CanvasNode[],
+              edgesRef.current as CanvasEdge[],
+            );
+            const committedNodes = normalized.nodes as FlowNode[];
+            const committedEdges = normalized.edges as Edge[];
+            nodesRef.current = committedNodes;
+            setNodes(committedNodes);
+            if (committedEdges !== edgesRef.current) setEdgesBoth(committedEdges);
             const before = nodeDragUndoRef.current;
             nodeDragUndoRef.current = null;
             const movedPositions = new Map<string, { x: number; y: number }>();
             const moved = before && before.nodes.some((beforeNode) => {
-              const afterNode = nodesRef.current.find((node) => node.id === beforeNode.id);
+              const afterNode = committedNodes.find((node) => node.id === beforeNode.id);
               const changed = Boolean(afterNode && (
                 afterNode.position.x !== beforeNode.position.x
                 || afterNode.position.y !== beforeNode.position.y
@@ -3311,7 +4630,14 @@ function CanvasWorkspace() {
               if (changed && afterNode) movedPositions.set(afterNode.id, { ...afterNode.position });
               return changed;
             });
-            if (moved) editUndoRef.current.push({ kind: 'graph', nodes: before!.nodes, edges: before!.edges, label: '移动节点' });
+            if (moved) {
+              editUndoRef.current.push({ kind: 'graph', nodes: before!.nodes, edges: before!.edges, label: '移动节点' });
+              // onNodesChange 的最后一个 dragging=false 事件在某些 React Flow 手势路径里会缺席；
+              // 在 drag-stop 用回调提供的最终坐标同步落库，避免后续远端水合把节点弹回旧位置。
+              window.clearTimeout(persistTimerRef.current);
+              suppressPersistRef.current = true;
+              setGraph(stripNodeRuntimeFlags(committedNodes) as CanvasNode[], committedEdges);
+            }
             if (movedPositions.size > 0) {
               nodePositionProtectionRef.current = movedPositions;
               refreshAfterNodeInteraction(true);
@@ -3325,30 +4651,44 @@ function CanvasWorkspace() {
           // 删除前先播放缩小退场：返回的 Promise 会推迟 ReactFlow 的真正移除
           onBeforeDelete={async ({ nodes: nodesToRemove }) => {
             if (nodesToRemove.length === 0) return true;
-            setExitingNodeIds(nodesToRemove.map((node) => String(node.id)));
+            const expandedNodes = new Map<string, FlowNode>(
+              nodesToRemove.map((node) => [String(node.id), node]),
+            );
+            nodesToRemove.forEach((node) => {
+              if (node.data.kind !== 'group') return;
+              collectCanvasGroupMembers(nodesRef.current as CanvasNode[], node.id)
+                .forEach((member) => expandedNodes.set(member.id, member as FlowNode));
+            });
+            const removedIds = new Set(expandedNodes.keys());
+            const expandedEdges = new Map<string, Edge>();
+            edgesRef.current.forEach((edge) => {
+              if (removedIds.has(String(edge.source)) || removedIds.has(String(edge.target))) {
+                expandedEdges.set(edge.id, edge);
+              }
+            });
+            setExitingNodeIds([...removedIds]);
             await new Promise((resolve) => window.setTimeout(resolve, NODE_EXIT_ANIMATION_MS));
-            return true;
+            return { nodes: [...expandedNodes.values()], edges: [...expandedEdges.values()] };
           }}
           onNodeDoubleClick={(event, node) => {
+            if (outpaintNodeId) return;
             // 灵枢同款：只有双击落在图片区域才开大图，输入区/其它区域不抢
             const target = event.target as HTMLElement | null;
             if (!target?.closest('.image-node-media')) return;
-            const url = String(node.data.imageUrl || node.data.referenceDataUrl || '').trim();
+            const url = String(node.data.kind === 'video'
+              ? node.data.videoUrl || ''
+              : node.data.imageUrl || node.data.referenceDataUrl || '').trim();
             if (!url) return;
             emitEvent<NodePreviewDetail>(NODE_EVENTS.preview, { nodeId: node.id });
           }}
-          onPaneClick={(event) => {
+          onPaneClick={() => {
+            if (outpaintNodeId) return;
             // 灵枢同款：双击空白处弹“图像生成 / 上传图片”菜单，单击收起
             setEditingNodeId('');
             selectionIntentRef.current = null;
             setSelectedId('');
             // 点空白处把所有展开的版本宫格收起来（节点侧还有 Esc / 换选兜底）
             emitEvent(NODE_EVENTS.versionsCollapse, {});
-            if (event.detail === 2) {
-              pendingConnectionRef.current = null;
-              openAddMenu({ x: event.clientX, y: event.clientY });
-              return;
-            }
             setAddMenu(null);
             setNodeConnectionMenu(null);
             if (historyOpen && !historyClosing) setHistoryClosing(true);
@@ -3360,6 +4700,7 @@ function CanvasWorkspace() {
             };
           }}
           onConnectEnd={(event) => {
+            if (outpaintNodeId) return;
             const pending = pendingConnectionRef.current;
             if (!pending?.sourceId) return;
             const target = event.target as HTMLElement | null;
@@ -3385,12 +4726,12 @@ function CanvasWorkspace() {
           defaultViewport={active?.viewport}
           fitView={!active?.viewport}
           proOptions={{ hideAttribution: true }}
-          deleteKeyCode={annotateNodeId ? null : ['Backspace', 'Delete']}
+          deleteKeyCode={annotateNodeId || outpaintNodeId ? null : ['Backspace', 'Delete']}
           onReconnectStart={() => {
             edgeReconnectingRef.current = true;
             pendingConnectionRef.current = null;
           }}
-          edgesReconnectable
+          edgesReconnectable={!outpaintNodeId}
           /* 端点抓手半径：xyflow 默认 10px 太小，线条两头基本捏不住。
              放大后两端各有一块明显的拖拽区，拖到空白处即断开（onReconnectEnd 里删边）。 */
           reconnectRadius={16}
@@ -3401,11 +4742,11 @@ function CanvasWorkspace() {
             const targetHandle = newConnection.targetHandle || 'in';
             const sourceNode = nodesRef.current.find((node) => node.id === source);
             const targetNode = nodesRef.current.find((node) => node.id === target);
-            // 规则与新建连接一致：图（结果 / 参考）→ 生成节点；目标必须是 composer
+            // 规则与新建连接一致：图片 / 参考 / 文案生成节点可连到图像、视频或结果节点。
             const valid = Boolean(
               sourceNode
               && targetNode
-              && targetNode.data.kind === 'composer'
+              && canConnectCanvasNodeKinds(sourceNode.data.kind, targetNode.data.kind)
               && source !== target
               // 已连过就不再来一条重复线
               && !edgesRef.current.some((edge) => edge.id !== oldEdge.id && edge.source === source && edge.target === target),
@@ -3442,50 +4783,114 @@ function CanvasWorkspace() {
           snapToGrid
           snapGrid={[12, 12]}
           // 左键拖拽空白处 = 框选；开启"拖动"工具后左键只平移；右键拖拽 = 平移；滚轮 = 缩放
-          {...viewControls.interactionProps}
+          {...flowInteractionProps}
+          zoomOnDoubleClick={false}
         >
           <Background variant={BackgroundVariant.Dots} gap={16} size={2} color="var(--color-canvas-dot)" />
           {/* 左侧功能入口：添加节点（菜单贴按钮展开）+ 拖动工具 */}
-          <CanvasRail
+          {!outpaintNodeId ? <CanvasRail
             onAdd={({ x, y }) => openAddMenu({ x, y })}
             panTool={viewControls.panTool}
             onTogglePanTool={viewControls.togglePanTool}
             addTitle="添加节点"
             extraButtons={(
-              <button
-                type="button"
-                className={`canvas-rail-btn ${historyOpen ? 'is-active' : ''}`}
-                title="生成历史"
-                aria-label="生成历史"
-                aria-pressed={historyOpen}
-                onClick={(event) => {
-                  event.stopPropagation();
-                  if (historyOpen) {
-                    // 收起动画中再点 = 不等了，直接卸载
-                    if (historyClosing) {
-                      setHistoryOpen(false);
-                      setHistoryClosing(false);
+              <>
+                <button
+                  type="button"
+                  className={`canvas-rail-btn ${historyOpen ? 'is-active' : ''}`}
+                  aria-label="生成历史"
+                  aria-pressed={historyOpen}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    if (historyOpen) {
+                      if (historyClosing) {
+                        setHistoryOpen(false);
+                        setHistoryClosing(false);
+                        return;
+                      }
+                      setHistoryClosing(true);
                       return;
                     }
-                    setHistoryClosing(true);
-                    return;
-                  }
-                  const rect = event.currentTarget.getBoundingClientRect();
-                  openHistory({ x: rect.right + 12, y: rect.top - 8 });
-                }}
-              >
-                <HistoryIcon />
-              </button>
+                    const rect = event.currentTarget.getBoundingClientRect();
+                    openHistory({ x: rect.right + 12, y: rect.top - 8 });
+                  }}
+                >
+                  <HistoryIcon />
+                </button>
+                <button
+                  type="button"
+                  className={`canvas-rail-btn ${assetLibraryOpen ? 'is-active' : ''}`}
+                  aria-label="资产库"
+                  aria-pressed={assetLibraryOpen}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    if (assetLibraryOpen) {
+                      setAssetLibraryOpen(false);
+                      return;
+                    }
+                    const rect = event.currentTarget.getBoundingClientRect();
+                    openAssetLibrary({ x: rect.right + 12, y: rect.top - 8 });
+                  }}
+                >
+                  <AssetIcon />
+                </button>
+              </>
             )}
-          />
+          /> : null}
           {/* 左下角缩放 dock：整理 + 重置视角 + 百分比 + 对数滑块 */}
-          <CanvasDock
+          {!outpaintNodeId ? <CanvasDock
             zoom={viewControls.flowViewport.zoom}
             onZoomChange={viewControls.setCanvasZoom}
             onTidy={tidyNodes}
             onReset={viewControls.resetToBestView}
-          />
+          /> : null}
+          {outpaintNodeId ? (() => {
+            const source = nodes.find((item) => item.id === outpaintNodeId);
+            const version = source ? activeVersionOf(source.data) : undefined;
+            const imageUrl = String(version?.imageUrl || source?.data.imageUrl || source?.data.referenceDataUrl || '');
+            if (!source || !imageUrl) return null;
+            const box = nodeBoxFor(source.data);
+            return (
+              <ViewportPortal>
+                <OutpaintEditor
+                  imageUrl={imageUrl}
+                  imageWidth={version?.width || source.data.width}
+                  imageHeight={version?.height || source.data.height}
+                  displayWidth={box.width}
+                  displayHeight={box.height}
+                  position={absoluteNodePosition(nodesRef.current as CanvasNode[], source as CanvasNode)}
+                  model={String(source.data.model || activeProfileOf(settings)?.model || '')}
+                  profileId={String(source.data.profileId || activeProfileOf(settings)?.id || '')}
+                  modelOptions={toolbarModelOptions}
+                  onCancel={closeOutpaint}
+                  onSubmit={submitOutpaint}
+                />
+              </ViewportPortal>
+            );
+          })() : null}
         </ReactFlow>
+        {!outpaintNodeId && groupSelection.length >= 2 ? (
+          <div
+            className="canvas-group-create-panel nodrag nowheel nopan"
+            style={groupCreateToolbarPlacement
+              ? { left: groupCreateToolbarPlacement.left, top: groupCreateToolbarPlacement.top }
+              : undefined}
+            onPointerDown={(event) => event.stopPropagation()}
+          >
+            <button
+              type="button"
+              className="canvas-group-create-button"
+              disabled={!canCreateGroup}
+              title={canCreateGroup ? '将所选节点收进一个编组' : '编组和组内成员不能再次编组'}
+              onClick={createGroupFromSelection}
+            >
+              <svg viewBox="0 0 20 20" fill="none" aria-hidden="true">
+                <rect x="2.3125" y="2.3125" width="15.375" height="15.375" rx="1.875" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+              <span className="canvas-group-create-tooltip" role="tooltip">打组</span>
+            </button>
+          </div>
+        ) : null}
         {nodes.length === 0 && !addMenu ? (
           <div className="image-empty-dropzone" aria-label="双击空白处添加生成节点">
             <svg viewBox="0 0 24 24" fill="none" aria-hidden="true" width="34" height="34">
@@ -3501,6 +4906,12 @@ function CanvasWorkspace() {
           <AddMenu
             x={addMenu.x}
             y={addMenu.y}
+            onCreateTextNode={() => {
+              const menu = addMenu;
+              setAddMenu(null);
+              const id = addTextNode({ x: menu.clientX + 8, y: menu.clientY + 8 });
+              connectPending(id);
+            }}
             onCreateGenerationNode={() => {
               const menu = addMenu;
               setAddMenu(null);
@@ -3515,6 +4926,12 @@ function CanvasWorkspace() {
               pendingConnectionRef.current = null;
               setAddMenu(null);
               menuFileInputRef.current?.click();
+            }}
+            onCreateVideoNode={() => {
+              const menu = addMenu;
+              setAddMenu(null);
+              const id = addVideoNode({ x: menu.clientX + 8, y: menu.clientY + 8 });
+              connectPending(id);
             }}
           />
         ) : null}
@@ -3559,40 +4976,99 @@ function CanvasWorkspace() {
             }}
           />
         ) : null}
-        {selectedImageNode && selectedImageNode.data.status !== 'running' ? (
+        {selectedImageNode && selectedImageNode.data.status !== 'running' && selectedImageNode.data.videoStatus !== 'running' && outpaintNodeId !== selectedImageNode.id ? (
           <NodeSelectionToolbar
             style={selectionToolbarStyle}
             showPreview={Boolean(String(selectedImageNode.data.imageUrl || '').trim())}
             showRedit={selectedImageNode.data.kind === 'image'}
+            copyPrompt={selectedImageNode.data.kind === 'image'
+              ? activePromptOf(selectedImageNode.data)
+              : undefined}
+            regenerateLabel={selectedImageNode.data.kind === 'video' ? '重新编辑视频' : '重新生成'}
+            regenerateTitle={selectedImageNode.data.kind === 'video' ? '重新编辑：返回视频参数与提示词编辑' : '重新生成：在当前节点追加一个新版本'}
+            ariaLabel={selectedImageNode.data.kind === 'video' ? '视频操作' : '图片操作'}
             onPreview={() => emitEvent<NodePreviewDetail>(NODE_EVENTS.preview, { nodeId: selectedImageNode.id })}
             onRedit={() => emitEvent<NodeReditDetail>(NODE_EVENTS.redit, { nodeId: selectedImageNode.id })}
-            onRegenerate={() => regenerateFromImage(selectedImageNode.id)}
-            onAnnotate={() => setAnnotateNodeId(selectedImageNode.id)}
+            onRegenerate={() => {
+              // 视频完成态：退回输入态，提示词与四个参数全保留（等价「再生成一版」）
+              if (selectedImageNode.data.kind === 'video') {
+                emitEvent<NodeVideoReditDetail>(NODE_EVENTS.videoRedit, { nodeId: selectedImageNode.id });
+                return;
+              }
+              regenerateFromImage(selectedImageNode.id);
+            }}
+            onAnnotate={selectedImageNode.data.kind === 'video' ? undefined : () => setAnnotateNodeId(selectedImageNode.id)}
+            onOutpaint={selectedImageNode.data.kind === 'image' || selectedImageNode.data.kind === 'reference'
+              ? () => startOutpaint(selectedImageNode.id)
+              : undefined}
+            onDelete={selectedImageNode.data.kind === 'image' || selectedImageNode.data.kind === 'reference'
+              ? () => { void rf.deleteElements({ nodes: [selectedImageNode] }); }
+              : undefined}
           />
         ) : null}
-        {selectedComposer ? (
+        {selectedGenerator?.data.kind === 'video' ? (
+          <NodeVideoToolbar
+            style={toolbarStyle}
+            model={String(
+              selectedGenerator.data.videoProfileId === selectedVideoProfile?.id
+                && toolbarVideoModelOptions.some((option) => (
+                  option.profileId === selectedVideoProfile?.id
+                  && option.model === selectedGenerator.data.videoModel
+                ))
+                ? selectedGenerator.data.videoModel || selectedVideoProfile?.model || ''
+                : selectedVideoProfile?.model || '',
+            )}
+            profileId={String(selectedVideoProfile?.id || '')}
+            modelOptions={toolbarVideoModelOptions}
+            schema={videoSchema || null}
+            schemaLoading={videoSchemaLoading}
+            schemaError={videoSchemaError}
+            paramValues={(selectedGenerator.data.videoParams || {}) as Record<string, unknown>}
+            onChangeParam={(name, value) => {
+              const current = (selectedGenerator.data.videoParams || {}) as Record<string, unknown>;
+              patchNode(selectedGenerator.id, { videoParams: { ...current, [name]: value } });
+            }}
+            seconds={Number(selectedGenerator.data.videoSeconds || 5)}
+            resolution={(String(selectedGenerator.data.videoResolution || '480p') as VideoResolution)}
+            ratio={(String(selectedGenerator.data.videoRatio || '16:9') as VideoRatio)}
+            generateAudio={selectedGenerator.data.videoAudio === true}
+            referenceMode={(selectedGenerator.data.videoReferenceMode || 'first_frame') as VideoReferenceMode}
+            onSelectModel={(model, profileId) => patchNode(selectedGenerator.id, {
+              videoModel: model,
+              videoProfileId: profileId,
+              // 换模型后旧参数可能非法（不同模型的时长/分辨率枚举不同），清空重选
+              videoParams: {},
+            })}
+            onSelectSeconds={(seconds) => patchNode(selectedGenerator.id, { videoSeconds: seconds })}
+            onSelectResolution={(resolution) => patchNode(selectedGenerator.id, { videoResolution: resolution })}
+            onSelectRatio={(ratio) => patchNode(selectedGenerator.id, { videoRatio: ratio })}
+            onSelectReferenceMode={(videoReferenceMode) => patchNode(selectedGenerator.id, { videoReferenceMode })}
+            onToggleAudio={() => patchNode(selectedGenerator.id, { videoAudio: selectedGenerator.data.videoAudio !== true })}
+          />
+        ) : null}
+        {selectedGenerator && selectedGenerator.data.kind !== 'video' ? (
           <NodeGenerationToolbar
             style={toolbarStyle}
             // 节点自己没选过模型时，工具栏显示当前生效那一路的名字（生成也是走它）：
             // 老画布的节点因此不再显示「选择模型」占位，与新节点一致（Figma 2664:1903）
-            model={String(selectedComposer.data.model || activeProfileOf(settings)?.model || '')}
+            model={String(selectedGenerator.data.model || activeProfileOf(settings)?.model || '')}
             modelOptions={toolbarModelOptions}
-            ratio={String(selectedComposer.data.ratio || '1:1')}
-            prompt={String(selectedComposer.data.prompt || '')}
-            references={selectedComposer.data.references}
+            ratio={String(selectedGenerator.data.ratio || '1:1')}
+            prompt={String(selectedGenerator.data.prompt || '')}
+            references={selectedGenerator.data.references}
             direct={direct}
-            onSelectModel={(model, profileId) => patchNode(selectedComposer.id, { model, profileId })}
-            onSelectRatio={(label) => patchNode(selectedComposer.id, {
+            onSelectModel={(model, profileId) => patchNode(selectedGenerator.id, { model, profileId })}
+            onSelectRatio={(label) => patchNode(selectedGenerator.id, {
               ratio: label,
               // 「自动」档没有固定比例：卡片宽度先按 1:1 给，生成时再按参考图收敛
               cardWidth: label === AUTO_RATIO ? 320 : composerWidthForRatio(ratioToNumber(label)),
             })}
-            resolution={String(selectedComposer.data.resolution || '1K')}
-            onSelectResolution={(label) => patchNode(selectedComposer.id, {
+            resolution={String(selectedGenerator.data.resolution || '1K')}
+            onSelectResolution={(label) => patchNode(selectedGenerator.id, {
               resolution: label === '1K' ? undefined : (label as '2K' | '4K'),
             })}
-            imageCount={clampImageCount(selectedComposer.data.imageCount)}
-            onSelectImageCount={(count) => patchNode(selectedComposer.id, {
+            imageCount={clampImageCount(selectedGenerator.data.imageCount)}
+            onSelectImageCount={(count) => patchNode(selectedGenerator.id, {
               imageCount: count > 1 ? count : undefined,
             })}
             onToggleDirect={() => {
@@ -3630,9 +5106,10 @@ function CanvasWorkspace() {
               return;
             }
             // 参考图落在生成节点左侧，留出手柄连线的空间
+            const composerPosition = absoluteNodePosition(nodesRef.current as CanvasNode[], composer as CanvasNode);
             const screen = rf.flowToScreenPosition({
-              x: composer.position.x - Number(composer.data.cardWidth || 320) - 96,
-              y: composer.position.y + 24,
+              x: composerPosition.x - Number(composer.data.cardWidth || 320) - 96,
+              y: composerPosition.y + 24,
             });
             void addReferenceFile(file, { x: screen.x, y: screen.y }).then((id) => {
               if (id) connectPending(id);
@@ -3648,7 +5125,7 @@ function CanvasWorkspace() {
           </div>
         ) : null}
         {settingsOpen ? <SettingsPanel onClose={() => setSettingsOpen(false)} /> : null}
-        {toast ? <div className="hb-toast">{toast}</div> : null}
+        {toast ? <div className="hb-toast" role="status" aria-live="polite">{toast}</div> : null}
         {historyOpen ? (
           <HistoryPanel
             items={historyItems}
@@ -3660,6 +5137,7 @@ function CanvasWorkspace() {
               setPreviewItem(previewItemOfHistory(item));
             }}
             onLocate={(item) => locateHistoryItem(item)}
+            onSaveAsset={(item) => void saveHistoryAsset(item)}
             onClose={() => {
               setHistoryOpen(false);
               setHistoryClosing(false);
@@ -3670,6 +5148,19 @@ function CanvasWorkspace() {
               setHistoryOpen(false);
               setHistoryClosing(false);
             }}
+          />
+        ) : null}
+        {assetLibraryOpen ? (
+          <AssetLibraryPanel
+            anchorRect={assetLibraryAnchor}
+            onClose={() => setAssetLibraryOpen(false)}
+            onPreview={(item) => setPreviewItem({
+              mediaType: 'image',
+              url: item.url,
+              title: item.prompt || '收藏图片',
+              details: { prompt: item.prompt, model: item.model, size: item.size, fileName: item.fileName },
+            })}
+            onUsePrompt={useAssetPrompt}
           />
         ) : null}
         <ImagePreviewLightbox
@@ -3689,13 +5180,13 @@ function CanvasWorkspace() {
       </div>
       {/* 对话面板是画布之外的浮层：右下角按钮 + 悬浮卡片，不参与画布交互 */}
       <ChatPanel
-        canvasNames={Object.fromEntries(canvases.map((doc) => [doc.id, doc.name]))}
-        onSend={(text, refs, modelSelection) => void startChatRunFlow(text, refs, { modelSelection })}
+        onSend={(text, refs, modelSelection, agentRole) => void startChatRunFlow(text, refs, { modelSelection, agentRole })}
         onStop={stopChatRunFlow}
         submitting={chatRunStarting}
         onLocate={locateChatRef}
         onPreview={(url, title) => setPreviewItem({ url, title })}
         onRetry={retryChatMessage}
+        onApplyVideoScript={applyChatVideoScript}
         onAnswerClarification={answerChatClarification}
         onWidthChange={setChatPanelWidth}
       />

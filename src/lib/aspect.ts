@@ -212,7 +212,17 @@ export function composerWidthForRatio(ratio: number): number {
  * 用途：把 React Flow 的盒子（width/height/measured）收敛到卡片实测盒。盒子比卡片大时，
  * 连线端点（按盒子边框外 24px 起弯）会飘到卡片外面——用户看到的"线离图太远"。
  */
-export function imageNodeFlowBox(data: Pick<CanvasNodeData, 'imageUrl' | 'referenceDataUrl' | 'width' | 'height' | 'size' | 'ratio'>): { width: number; height: number } | null {
+/** 视频成品与图片结果共用比例宽度档位，避免视频节点在画布上过大。 */
+export function videoNodeBoxFor(data: NodeWidthData): { width: number; height: number } | null {
+  if (data.kind !== 'video' || data.videoStatus !== 'done') return null;
+  const aspect = nodeAspectRatio(data);
+  const width = nodeWidthForAspect(aspect);
+  return { width, height: Math.round(width / aspect) };
+}
+
+export function imageNodeFlowBox(data: NodeWidthData): { width: number; height: number } | null {
+  const videoBox = videoNodeBoxFor(data);
+  if (videoBox) return videoBox;
   if (!hasNodeImage(data)) return null;
   const width = nodeWidthFor(data);
   return { width, height: Math.round(width / nodeAspectRatio(data)) };
@@ -236,7 +246,11 @@ export function normalizeAspectRatio(value: number): number {
  * 节点真实宽高比（宽/高，与 CSS aspect-ratio 同向）：位图实际像素 > 尺寸字符串 > 比例预设。
  * 注意 parseSizeRatio / ratioToNumber 返回的是「高/宽」，这里取倒数。
  */
-export function nodeAspectRatio(data: Pick<CanvasNodeData, 'width' | 'height' | 'size' | 'ratio'>): number {
+export function nodeAspectRatio(data: Pick<CanvasNodeData, 'width' | 'height' | 'size' | 'ratio'> & Partial<Pick<CanvasNodeData, 'kind' | 'videoRatio'>>): number {
+  if (data.kind === 'video') {
+    const match = /^(\d+(?:\.\d+)?)\s*[:：xX×]\s*(\d+(?:\.\d+)?)$/.exec(String(data.videoRatio || ''));
+    if (match) return normalizeAspectRatio(Number(match[1]) / Number(match[2]));
+  }
   const width = Number(data.width || 0);
   const height = Number(data.height || 0);
   if (width > 0 && height > 0) return normalizeAspectRatio(width / height);
@@ -258,8 +272,20 @@ export function nodeWidthForAspect(aspect: number): number {
  * 灵枢 getCanvasNodeDimensions：composer 用存的宽度，出图节点按比例；高度一律 宽/比例（下限 160）。
  * 自动定位的居中点、浮层位置都按这个盒子算，不读 node.width/height（React Flow 的实测值在 measured 里）。
  */
-export function nodeBoxFor(data: Pick<CanvasNodeData, 'imageUrl' | 'referenceDataUrl' | 'width' | 'height' | 'size' | 'ratio' | 'cardWidth' | 'nodeHeight' | 'nodeHeightManual'>): { width: number; height: number } {
+type NodeWidthData = Pick<CanvasNodeData, 'imageUrl' | 'referenceDataUrl' | 'width' | 'height' | 'size' | 'ratio' | 'cardWidth'>
+  & Partial<Pick<CanvasNodeData, 'kind' | 'videoStatus' | 'videoRatio'>>;
+
+export function nodeBoxFor(data: NodeWidthData & Pick<CanvasNodeData, 'nodeHeight' | 'nodeHeightManual'>): { width: number; height: number } {
+  const videoBox = videoNodeBoxFor(data);
+  if (videoBox) return videoBox;
   const width = nodeWidthFor(data);
+  if (data.kind === 'text') {
+    const height = Math.min(
+      MAX_COMPOSER_NODE_HEIGHT,
+      Math.max(MIN_COMPOSER_NODE_HEIGHT, Number(data.nodeHeight) || 240),
+    );
+    return { width, height };
+  }
   const fallbackHeight = Math.max(160, width / nodeAspectRatio(data));
   // 手动拖过高度的 composer 用手存的高度（钳 240~620）；其余仍按比例推导。
   // 少了这个分支，拖高度只写进 data 却拿不到盒子上，看起来就是"只能等比拖"。
@@ -279,7 +305,9 @@ function hasNodeImage(data: Pick<CanvasNodeData, 'imageUrl' | 'referenceDataUrl'
 }
 
 /** 卡片宽度：出图节点按真实位图比例重算，composer 用存的 cardWidth（钳 280~600）。 */
-export function nodeWidthFor(data: Pick<CanvasNodeData, 'imageUrl' | 'referenceDataUrl' | 'width' | 'height' | 'size' | 'ratio' | 'cardWidth'>): number {
+export function nodeWidthFor(data: NodeWidthData): number {
+  const videoBox = videoNodeBoxFor(data);
+  if (videoBox) return videoBox.width;
   if (hasNodeImage(data)) return nodeWidthForAspect(nodeAspectRatio(data));
   const stored = Number(data.cardWidth || 0);
   return Math.max(

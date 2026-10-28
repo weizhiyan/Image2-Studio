@@ -69,6 +69,16 @@ export function AtGlyphIcon() {
   );
 }
 
+/** 角色：头像轮廓（输入框左上角角色选择入口）。 */
+export function RoleGlyphIcon() {
+  return (
+    <svg width={16} height={16} viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <circle cx="8" cy="5" r="2.5" stroke="currentColor" strokeWidth="1.4" />
+      <path d="M3.25 13c.45-2.45 2.1-3.75 4.75-3.75S12.3 10.55 12.75 13" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
+    </svg>
+  );
+}
+
 /** 历史对话：时钟（标题栏下拉入口）。 */
 export function HistoryGlyphIcon() {
   return (

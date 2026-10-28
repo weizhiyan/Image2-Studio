@@ -19,6 +19,10 @@ export interface ImagePreviewDetails {
   enhanceFailed?: boolean;
   model?: string;
   size?: string;
+  videoSeconds?: number;
+  videoResolution?: string;
+  videoRatio?: string;
+  videoAudio?: boolean;
   /** 开始生成的时间。 */
   startedAt?: string;
   /** 生成完成的时间。 */
@@ -27,6 +31,7 @@ export interface ImagePreviewDetails {
 }
 
 export interface ImagePreviewItem {
+  mediaType?: 'image' | 'video';
   url: string;
   title: string;
   details?: ImagePreviewDetails;
@@ -95,14 +100,6 @@ export default function ImagePreviewLightbox({
       .find((entry) => entry.text === text.slice(0, 120) && entry.source === 'manual');
     likedIdRef.current = existing?.id || '';
     setLiked(Boolean(existing));
-    if (!item) return undefined;
-    const image = new Image();
-    image.onload = () => setNatural({ width: image.naturalWidth, height: image.naturalHeight });
-    image.onerror = () => setImgMissing(true);
-    image.src = item.url;
-    return () => {
-      image.onload = null;
-    };
   }, [item]);
 
   /* 左右切图：闭包走 ref，避免每次渲染都重绑键盘事件 */
@@ -165,12 +162,20 @@ export default function ImagePreviewLightbox({
 
   if (!item) return null;
 
+  const isVideo = item.mediaType === 'video';
   const details = item.details || {};
   const zoomLabel = `${Math.round(zoom * 100)}%`;
   const currentIndex = item ? (playlist || []).findIndex((entry) => entry.url === item.url) : -1;
-  const resolvedSize = natural.width && natural.height
-    ? `${natural.width} x ${natural.height}`
-    : details.size || '-';
+  const resolvedSize = isVideo
+    ? [
+      natural.width && natural.height ? `${natural.width} x ${natural.height}` : details.videoResolution || details.size,
+      details.videoRatio,
+      details.videoSeconds ? `${details.videoSeconds}s` : '',
+      details.videoAudio ? '有声' : '无声音',
+    ].filter(Boolean).join(' · ') || '-'
+    : natural.width && natural.height
+      ? `${natural.width} x ${natural.height}`
+      : details.size || '-';
   const aspectRatio = natural.width && natural.height
     ? formatAspectRatio(natural.width / natural.height)
     : '-';
@@ -200,10 +205,10 @@ export default function ImagePreviewLightbox({
     void revealLocalFile(fileName).catch(() => undefined);
   };
 
-  const downloadImage = () => {
+  const downloadMedia = () => {
     const link = document.createElement('a');
     link.href = item.url;
-    link.download = String(details.fileName || 'image.png');
+    link.download = String(details.fileName || (isVideo ? 'video.mp4' : 'image.png'));
     link.rel = 'noopener';
     document.body.appendChild(link);
     link.click();
@@ -256,36 +261,55 @@ export default function ImagePreviewLightbox({
       className="image-generation-preview-backdrop"
       role="dialog"
       aria-modal="true"
-      aria-label="生成图片预览"
+      aria-label={isVideo ? '生成视频预览' : '生成图片预览'}
       onClick={onClose}
     >
       <section className="image-generation-preview" onClick={(event) => event.stopPropagation()}>
         <main className="image-generation-preview-main">
           <div
-            className="image-generation-preview-stage"
-            onClick={handleStageClick}
-            onWheel={handleStageWheel}
-            onPointerDown={handlePointerDown}
-            onPointerMove={handlePointerMove}
-            onPointerUp={handlePointerUp}
-            onPointerCancel={handlePointerUp}
+            className={`image-generation-preview-stage${isVideo ? ' is-video' : ''}`}
+            onClick={isVideo ? undefined : handleStageClick}
+            onWheel={isVideo ? undefined : handleStageWheel}
+            onPointerDown={isVideo ? undefined : handlePointerDown}
+            onPointerMove={isVideo ? undefined : handlePointerMove}
+            onPointerUp={isVideo ? undefined : handlePointerUp}
+            onPointerCancel={isVideo ? undefined : handlePointerUp}
           >
             {imgMissing ? (
-              <div className="image-generation-preview-missing" role="img" aria-label="图片文件丢失">
+              <div className="image-generation-preview-missing" role="img" aria-label={`${isVideo ? '视频' : '图片'}文件丢失`}>
                 <svg viewBox="0 0 48 48" fill="none" aria-hidden="true">
                   <rect x="6" y="10" width="36" height="28" rx="4" />
                   <circle cx="17" cy="19" r="2.6" />
                   <path d="M7 33 16 24l7 7 6-6 12 12" />
                   <path d="M8 40 40 8" />
                 </svg>
-                <p className="image-generation-preview-missing-text">图片文件丢失</p>
+                <p className="image-generation-preview-missing-text">{isVideo ? '视频文件丢失' : '图片文件丢失'}</p>
                 {item.details?.fileName ? <p className="image-generation-preview-missing-note">{item.details.fileName}</p> : null}
               </div>
+            ) : isVideo ? (
+              <video
+                src={item.url}
+                controls
+                playsInline
+                preload="auto"
+                onError={() => setImgMissing(true)}
+                onLoadedMetadata={(event) => setNatural({
+                  width: event.currentTarget.videoWidth,
+                  height: event.currentTarget.videoHeight,
+                })}
+              />
             ) : (
               <img
                 src={item.url}
                 alt={item.title}
                 draggable={false}
+                loading="eager"
+                decoding="async"
+                fetchPriority="high"
+                onLoad={(event) => setNatural({
+                  width: event.currentTarget.naturalWidth,
+                  height: event.currentTarget.naturalHeight,
+                })}
                 onError={() => setImgMissing(true)}
                 style={{ transform: `translate3d(${pan.x}px, ${pan.y}px, 0) scale(${zoom})` }}
               />
@@ -320,11 +344,11 @@ export default function ImagePreviewLightbox({
                 </button>
               </>
             ) : null}
-            <span className="image-generation-preview-hint">
+            {!isVideo ? <span className="image-generation-preview-hint">
               滚轮缩放 · 拖拽平移 · 点击切换 1× / 1.6×
               {currentIndex >= 0 && (playlist || []).length > 1 ? ` · ${currentIndex + 1}/${(playlist || []).length}` : ''}
-            </span>
-            <div className="image-generation-preview-zoom" role="group" aria-label="缩放控制">
+            </span> : null}
+            {!isVideo ? <div className="image-generation-preview-zoom" role="group" aria-label="缩放控制">
               <button
                 type="button"
                 aria-label="缩小"
@@ -363,11 +387,11 @@ export default function ImagePreviewLightbox({
               >
                 <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9V5h4M20 9V5h-4M4 15v4h4M20 15v4h-4" /></svg>
               </button>
-            </div>
+            </div> : null}
           </div>
         </main>
         {/* 关闭按钮提到预览层右上角（灵枢同款）：不再挤占右侧信息栏首行 */}
-        <button className="image-generation-preview-close" type="button" onClick={onClose} aria-label="关闭图片预览">×</button>
+        <button className="image-generation-preview-close" type="button" onClick={onClose} aria-label={`关闭${isVideo ? '视频' : '图片'}预览`}>×</button>
         <aside className="image-generation-preview-side">
           {[
             { key: 'prompt', label: '提示词', text: details.prompt || item.title || '' },
@@ -403,7 +427,7 @@ export default function ImagePreviewLightbox({
             <span>生成信息</span>
             <dl>
               <div><dt>模型</dt><dd title={details.model}>{details.model || '-'}</dd></div>
-              <div><dt>尺寸</dt><dd title={resolvedSize}>{resolvedSize}{aspectRatio !== '-' ? ` · ${aspectRatio}` : ''}</dd></div>
+              <div><dt>{isVideo ? '规格' : '尺寸'}</dt><dd title={resolvedSize}>{resolvedSize}{!isVideo && aspectRatio !== '-' ? ` · ${aspectRatio}` : ''}</dd></div>
               {details.enhanceFailed ? <div><dt>优化</dt><dd title="语言模型优化失败，已按原文发送">失败 · 用原文</dd></div> : null}
               {!details.enhanceFailed && details.enhancedPrompt ? <div><dt>优化</dt><dd title="提示词已经语言模型整理后发送">已整理</dd></div> : null}
               <div><dt>用时</dt><dd>{elapsed}</dd></div>
@@ -428,16 +452,16 @@ export default function ImagePreviewLightbox({
             </button>
           </div>
           <div className="image-generation-preview-actions">
-            <button type="button" onClick={downloadImage}>
+            <button type="button" onClick={downloadMedia}>
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v11m0 0 4-4m-4 4-4-4M5 19h14" /></svg>
-              下载图片
+              {isVideo ? '下载视频' : '下载图片'}
             </button>
             <button type="button" onClick={() => window.open(item.url, '_blank', 'noopener,noreferrer')}>
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 4h6v6M20 4l-8 8M18 14v5a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V8a1 1 0 0 1 1-1h5" /></svg>
               新窗口打开
             </button>
             {details.fileName ? (
-              <button type="button" onClick={openLocalFile} title="在 Finder / 资源管理器里定位这张图">
+              <button type="button" onClick={openLocalFile} title={`在 Finder / 资源管理器里定位这个${isVideo ? '视频' : '图片'}`}>
                 <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3.5 7.5A1.5 1.5 0 0 1 5 6h4.2l1.8 2.2H19a1.5 1.5 0 0 1 1.5 1.5v7.8A1.5 1.5 0 0 1 19 19H5a1.5 1.5 0 0 1-1.5-1.5v-10Z" /></svg>
                 打开本地文件
               </button>

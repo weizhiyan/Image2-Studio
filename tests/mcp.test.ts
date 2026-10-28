@@ -57,17 +57,18 @@ function textOf(result: { content: Array<{ type: string; text: string }> }): Rec
 }
 
 describe('MCP 工具面', () => {
-  it('九个工具齐备，generate 带参考图与比例参数', () => {
+  it('十二个工具齐备，generate 带参考图与比例参数', () => {
     const tools = listMcpTools();
     expect(tools.map((tool) => tool.name)).toEqual([
       'huiban_generate', 'huiban_canvases', 'huiban_canvas_create', 'huiban_nodes', 'huiban_locate', 'huiban_models',
-      'huiban_config', 'huiban_prompt_guide', 'huiban_optimize',
+      'huiban_config', 'huiban_prompt_guide', 'huiban_video_prompt_guide', 'huiban_optimize',
+      'huiban_video_generate', 'huiban_video_task',
     ]);
     const optimize = tools.find((tool) => tool.name === 'huiban_optimize') as any;
     expect(optimize.inputSchema.required).toEqual(['prompt']);
     const guide = tools.find((tool) => tool.name === 'huiban_prompt_guide') as any;
     expect(guide.inputSchema.properties.level.enum).toEqual(['strict', 'balanced', 'creative']);
-    const generate = tools[0] as any;
+    const generate = tools.find((tool) => tool.name === 'huiban_generate') as any;
     expect(generate.inputSchema.required).toEqual(['prompt']);
     expect(generate.inputSchema.properties.referenceImages).toBeTruthy();
     expect(generate.inputSchema.properties.ratio.enum).toContain('16:9');
@@ -102,6 +103,67 @@ describe('MCP 工具面', () => {
     const payload = textOf(await callMcpTool('huiban_prompt_guide', {}, deps));
     // makeDeps 的桩 defaultSize=1024x1024 → 方形画幅提示
     expect(payload.spec).toContain('1:1 方形');
+  });
+
+  it('huiban_prompt_guide 把已启用 Skills 提供给外部 Agent', async () => {
+    const deps = makeDeps({
+      listPromptSkills: vi.fn(async () => [{
+        id: 's1', name: '电商主图', description: '产品表现', category: '', avatarUrl: '', content: '# 规则\n突出产品', skills: [], enabled: true,
+        createdAt: 'now', updatedAt: 'now',
+      }]),
+    });
+    const payload = textOf(await callMcpTool('huiban_prompt_guide', {}, deps));
+    expect(payload.enabledSkills).toEqual([{ name: '电商主图', description: '产品表现', content: '# 规则\n突出产品' }]);
+  });
+
+  it('huiban_video_generate 只允许目标画布中的视频节点', async () => {
+    const deps = makeDeps({
+      readCanvasDoc: vi.fn(async () => ({
+        name: '测试', nodes: [{ id: 'image-1', type: 'flow-image', position: { x: 0, y: 0 }, data: { kind: 'image' } }], edges: [],
+      })) as unknown as McpDeps['readCanvasDoc'],
+    });
+    await expect(callMcpTool('huiban_video_generate', {
+      canvasId: 'c1', nodeId: 'image-1', prompt: '镜头推进',
+    }, deps)).rejects.toThrow(/不是该画布上的视频节点/);
+  });
+
+  it('huiban_video_generate 同步提示词并把已连首帧传给现有视频路由', async () => {
+    const patchVideoNode = vi.fn(async () => true);
+    const originalFetch = globalThis.fetch;
+    const requestBodies: Array<Record<string, unknown>> = [];
+    globalThis.fetch = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      requestBodies.push(JSON.parse(String(init?.body || '{}')) as Record<string, unknown>);
+      return new Response(JSON.stringify({
+        data: { ok: true, taskId: 'task-1' },
+        msg: '视频任务已受理',
+      }), { status: 200 });
+    }) as typeof fetch;
+    try {
+      const deps = makeDeps({
+        readCanvasDoc: vi.fn(async () => ({
+          name: '测试',
+          nodes: [{
+            id: 'video-1', type: 'flow-image', position: { x: 0, y: 0 },
+            data: { kind: 'video', videoSeconds: 6, videoRatio: '9:16', references: [{ kind: 'image', url: '/api/files/frame.png' }] },
+          }],
+          edges: [],
+        })) as unknown as McpDeps['readCanvasDoc'],
+        patchVideoNode: patchVideoNode as unknown as McpDeps['patchVideoNode'],
+      });
+      const result = textOf(await callMcpTool('huiban_video_generate', {
+        canvasId: 'c1', nodeId: 'video-1', prompt: '角色转身，镜头缓慢推进',
+      }, deps));
+      expect(result).toMatchObject({ ok: true, taskId: 'task-1', statusTool: 'huiban_video_task' });
+      expect(patchVideoNode).toHaveBeenCalledWith('c1', 'video-1', expect.objectContaining({
+        prompt: '角色转身，镜头缓慢推进', videoSeconds: 6, videoRatio: '9:16',
+      }));
+      expect(requestBodies[0]).toMatchObject({
+        canvasId: 'c1', nodeId: 'video-1', prompt: '角色转身，镜头缓慢推进',
+        seconds: 6, ratio: '9:16', imageFileNames: ['frame.png'],
+      });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
   });
 
   it('huiban_optimize 走语言模型并带回下一步指引', async () => {

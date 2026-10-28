@@ -1,16 +1,25 @@
 import http from 'node:http';
+import { createReadStream } from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { CANVASES_FILE, CANVAS_DOCS_FILE, CHAT_DOCS_FILE, HOST, MEDIA_DIR, PORT, STATIC_DIR } from './paths.js';
-import { createProfile, findProfile, normalizeEnhanceLevel, publicView, readSettings, resolveTextProfile, writeSettings, type ModelProfile } from './settings.js';
+import { createProfile, findProfile, normalizeEnhanceLevel, publicView, readSettings, resolveTextProfile, resolveVideoProfile, writeSettings, type ModelProfile } from './settings.js';
 import { addManualPreference, clearPreferences, distillPreferences, removePreference, setPreferencesEnabled } from './preferences.js';
 import { generateImages, normalizeImageSize } from './imageApi.js';
-import { detectReferenceUsage, directStyleNote, enhancePromptDetailed, fidelityForUsage, testTextProfile, usageForGenerateRequest } from './textApi.js';
+import { detectReferenceUsage, directStyleNote, enhancePromptDetailed, fidelityForUsage, optimizeVideoPrompt, testTextProfile, usageForGenerateRequest } from './textApi.js';
 import { fetchProviderModels, fetchRemoteImage, testProviderConnection } from './providerApi.js';
-import { addSseClient, pushCanvasUpdated, pushImage } from './hub.js';
+import { addSseClient, pushCanvasUpdated, pushImage, pushVideo } from './hub.js';
 import { deleteChatThread, putChatThread, readChatThreads } from './chat.js';
-import { answerChatRun, startChatRun, stopChatRun, subscribeChatRun, type StartRunRequest } from './runs.js';
-import { contentTypeOf, copyMediaFile, deleteMediaFile, imageExtensionOf, revealLocalFile, saveDataUrl } from './files.js';
+import { answerChatRun, buildAgentSystemSpec, startChatRun, stopChatRun, subscribeChatRun, type StartRunRequest } from './runs.js';
+import { contentTypeOf, copyMediaFile, deleteMediaFile, imageExtensionOf, revealLocalFile, saveDataUrl, safeMediaPath } from './files.js';
+import { createVideoTask, describeVideoModel, downloadVideoUrl, encodeVideoImagesAsDataUrls, getMediaVideoPriceQuote, listVideoModels, normalizeVideoRatio, normalizeVideoResolution, probeVideoConnection, validateVideoConfig, validateVideoImageDataUrls, VideoConfigurationError, VideoImageInputError, VideoRequestError, videoImagesUseDataUrls, videoUploadSupportsInlineDataUrl } from './videoApi.js';
+import { detectVideoProtocol, ensureVideoApiMode } from './videoProtocol.js';
+import { claimVideoDownload, completeVideoTask, confirmVideoSubmission, failVideoSubmission, findVideoTaskByNode, getVideoTaskRecord, markVideoSubmissionUnknown, releaseVideoDownload, removeVideoTask, removeVideoTaskByNode, removeVideoTasksByCanvas, reserveVideoTask } from './videoTasks.js';
+import { describeImageHostFailure, defaultImageHost, imageHostReady, isLegacyDefaultImageHost, readImageHost, resolveImageHost, uploadToImageHost, writeImageHost, EMPTY_IMAGE_HOST, IMAGE_HOST_PRESETS, type ImageHostConfig } from './imageHost.js';
+import { isAgentPresenceFresh, readAgentPresence } from './agentPresence.js';
+import { collectHistoryItems } from './history.js';
+import { addAsset, createAssetFolder, deleteAsset, deleteAssetFolder, listAssets, moveAsset, renameAssetFolder } from './assets.js';
+import { deletePromptSkill, listPromptSkills, savePromptSkill } from './skills.js';
 
 interface CanvasRegistry { [canvasId: string]: string }
 
@@ -44,9 +53,25 @@ const MIME: Record<string, string> = {
   '.woff2': 'font/woff2',
 };
 
+const MCP_ENTRY = path.resolve(STATIC_DIR, '..', 'bridge', 'dist', 'index.js');
+const MCP_LAUNCHER = path.resolve(STATIC_DIR, '..', 'bridge', 'mcp-launch.sh');
+
 function json(res: http.ServerResponse, status: number, body: unknown): void {
   res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' });
   res.end(JSON.stringify(body));
+}
+
+function readRoleSkills(raw: unknown): Array<{ id: string; name: string; content: string }> {
+  if (!Array.isArray(raw)) return [];
+  return raw.flatMap((entry) => {
+    if (!entry || typeof entry !== 'object') return [];
+    const item = entry as Record<string, unknown>;
+    return [{
+      id: String(item.id || ''),
+      name: String(item.name || ''),
+      content: String(item.content || ''),
+    }];
+  });
 }
 
 async function readBody(req: http.IncomingMessage): Promise<unknown> {
@@ -74,21 +99,65 @@ async function serveSpa(res: http.ServerResponse): Promise<void> {
   res.end(index);
 }
 
-async function serveMediaFile(res: http.ServerResponse, fileName: string): Promise<void> {
+async function serveMediaFile(req: http.IncomingMessage, res: http.ServerResponse, fileName: string): Promise<void> {
   if (!/^[\w.-]+$/.test(fileName)) {
     json(res, 400, { code: 1, data: null, msg: '非法文件名' });
     return;
   }
-  const data = await fs.readFile(path.join(MEDIA_DIR, fileName)).catch(() => null);
-  if (!data) {
+  const filePath = path.join(MEDIA_DIR, fileName);
+  const stat = await fs.stat(filePath).catch(() => null);
+  if (!stat || !stat.isFile()) {
     json(res, 404, { code: 1, data: null, msg: '文件不存在' });
     return;
   }
-  const contentType = contentTypeOf(fileName) === 'application/octet-stream'
-    ? `image/${imageExtensionOf(data, path.extname(fileName).slice(1))}`
-    : contentTypeOf(fileName);
-  res.writeHead(200, { 'Content-Type': contentType, 'Cache-Control': 'private, max-age=31536000, immutable' });
-  res.end(data);
+  let contentType = contentTypeOf(fileName);
+  if (contentType === 'application/octet-stream') {
+    // 没有扩展名的旧媒体：读前 32 字节嗅探图片格式
+    const head = Buffer.alloc(Math.min(32, stat.size));
+    const handle = await fs.open(filePath, 'r').catch(() => null);
+    if (handle) {
+      await handle.read(head, 0, head.length, 0).catch(() => undefined);
+      await handle.close().catch(() => undefined);
+    }
+    contentType = `image/${imageExtensionOf(head, path.extname(fileName).slice(1))}`;
+  }
+
+  const total = stat.size;
+  res.setHeader('Accept-Ranges', 'bytes');
+  res.setHeader('Cache-Control', 'private, max-age=31536000, immutable');
+  res.setHeader('Content-Type', contentType);
+
+  // 视频播放器（尤其 Safari）要求分段请求：没有 206 会直接判成无法播放。
+  const rangeHeader = String(req.headers.range || '').trim();
+  if (rangeHeader) {
+    const match = /^bytes=(\d*)-(\d*)$/.exec(rangeHeader);
+    if (match) {
+      const hasStart = match[1] !== '';
+      const hasEnd = match[2] !== '';
+      let start = hasStart ? Number(match[1]) : 0;
+      let end = hasEnd ? Number(match[2]) : total - 1;
+      if (!hasStart && hasEnd) {
+        // suffix range: bytes=-N 表示最后 N 字节
+        start = Math.max(0, total - Number(match[2]));
+        end = total - 1;
+      }
+      if (start >= total || start > end) {
+        res.writeHead(416, { 'Content-Range': `bytes */${total}` });
+        res.end();
+        return;
+      }
+      end = Math.min(end, total - 1);
+      res.writeHead(206, {
+        'Content-Range': `bytes ${start}-${end}/${total}`,
+        'Content-Length': String(end - start + 1),
+      });
+      createReadStream(filePath, { start, end }).pipe(res);
+      return;
+    }
+  }
+
+  res.writeHead(200, { 'Content-Length': String(total) });
+  createReadStream(filePath).pipe(res);
 }
 
 async function readRegistry(): Promise<CanvasRegistry> {
@@ -161,6 +230,36 @@ export async function readCanvasDoc(canvasId: string): Promise<CanvasDocRecord |
   return docs[canvasId];
 }
 
+/** MCP 视频生成前更新已有节点输入快照，串行写入并广播，让画布与任务提示词一致。 */
+export async function patchCanvasVideoNode(
+  canvasId: string,
+  nodeId: string,
+  patch: Record<string, unknown>,
+): Promise<boolean> {
+  const updatedAt = await withCanvasWriteLock(async () => {
+    const docs = await readCanvasDocs();
+    const doc = docs[canvasId];
+    if (!doc || !Array.isArray(doc.nodes)) return '';
+    const index = doc.nodes.findIndex((raw) => {
+      const node = raw as { id?: unknown; data?: Record<string, unknown> };
+      return String(node?.id || '') === nodeId && node.data?.kind === 'video';
+    });
+    if (index < 0) return '';
+    const nodes = [...doc.nodes];
+    const node = nodes[index] as { id: string; data: Record<string, unknown> };
+    nodes[index] = { ...node, data: { ...node.data, ...patch } };
+    const now = Date.now();
+    const previous = Date.parse(String(doc.updatedAt || ''));
+    const timestamp = new Date(Math.max(now, Number.isFinite(previous) ? previous + 1 : now)).toISOString();
+    docs[canvasId] = { ...doc, nodes, updatedAt: timestamp };
+    await backupCanvasDocs();
+    await fs.writeFile(CANVAS_DOCS_FILE, JSON.stringify(docs, null, 2), 'utf8');
+    return timestamp;
+  });
+  if (updatedAt) pushCanvasUpdated({ type: 'canvas-updated', canvasId, updatedAt });
+  return Boolean(updatedAt);
+}
+
 /** MCP 追加图片节点（外部写入）。注册表和文档都没有这个 id 时拒绝——
    防把提示词里拼错的 canvasId 写成一张幽灵画布。
    幂等：已存在的节点 id 跳过——对话 agent 的节点 id 由 runId+callId 确定性生成，
@@ -229,25 +328,79 @@ export function keepExternalNodesOnSnapshot(
   return revived.length > 0 ? [...incomingNodes, ...revived] : incomingNodes;
 }
 
-function mergeCanvasSnapshot(
+type VideoNodeRecord = {
+  id?: string;
+  data?: Record<string, unknown>;
+};
+
+function isVideoTerminalNode(node: VideoNodeRecord | undefined): boolean {
+  return node?.data?.kind === 'video'
+    && node.data.videoStatus === 'done'
+    && Boolean(String(node.data.videoUrl || '').trim());
+}
+
+/** 视频终态字段：成品地址、任务号、完成时间等。 */
+function pickVideoTerminalFields(data: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const key of [
+    'videoStatus', 'videoProgress', 'videoUrl', 'videoFileName', 'videoTaskId',
+    'videoError', 'videoSubmissionUnknown', 'finishedAt', 'createdAt',
+  ]) {
+    if (data[key] !== undefined) out[key] = data[key];
+  }
+  return out;
+}
+
+/**
+ * 视频终态保护：旧快照缺 videoUrl 时，不能把已经出好的视频冲掉。
+ *
+ * 判据：上一版已经 done+url，而这一版没有，并且这一版的 createdAt **不晚于**
+ * 上一版完成时间——说明这是旧快照，不是用户主动重新生成。
+ * 用户点「重新生成」会把 createdAt 刷新到现在，此时允许清空旧视频。
+ */
+export function protectVideoTerminalNodes(
   previousNodes: unknown[] | undefined,
   incomingNodes: unknown[],
-  previousEdges: unknown[] | undefined,
+): unknown[] {
+  if (!Array.isArray(previousNodes) || previousNodes.length === 0) return incomingNodes;
+  const previousById = new Map<string, VideoNodeRecord>();
+  for (const node of previousNodes) {
+    const item = node as VideoNodeRecord;
+    if (item?.id) previousById.set(String(item.id), item);
+  }
+  let changed = false;
+  const nodes = incomingNodes.map((node) => {
+    const item = node as VideoNodeRecord;
+    const previous = item?.id ? previousById.get(String(item.id)) : undefined;
+    if (!previous || !isVideoTerminalNode(previous) || isVideoTerminalNode(item)) return node;
+    const previousDoneAt = Date.parse(String(previous.data?.finishedAt || previous.data?.createdAt || ''));
+    const incomingStartedAt = Date.parse(String(item.data?.createdAt || ''));
+    if (Number.isFinite(previousDoneAt) && Number.isFinite(incomingStartedAt) && incomingStartedAt > previousDoneAt) {
+      return node; // 用户已经开了新一轮，允许清空
+    }
+    changed = true;
+    return {
+      ...item,
+      data: { ...(item.data || {}), ...pickVideoTerminalFields(previous.data || {}) },
+    };
+  });
+  return changed ? nodes : incomingNodes;
+}
+
+export function mergeCanvasSnapshot(
+  previousNodes: unknown[] | undefined,
+  incomingNodes: unknown[],
   incomingEdges: unknown[],
+  snapshotUpdatedAt: string | undefined,
 ): { nodes: unknown[]; edges: unknown[] } {
-  const nodes = new Map<string, unknown>();
-  for (const node of previousNodes || []) nodes.set(String((node as { id?: unknown })?.id || ''), node);
-  for (const node of incomingNodes) nodes.set(String((node as { id?: unknown })?.id || ''), node);
-  const edges = new Map<string, unknown>();
-  const edgeKey = (edge: unknown) => {
-    const item = edge as { id?: unknown; source?: unknown; target?: unknown };
-    return String(item.id || `${item.source || ''}->${item.target || ''}`);
-  };
-  for (const edge of previousEdges || []) edges.set(edgeKey(edge), edge);
-  for (const edge of incomingEdges) edges.set(edgeKey(edge), edge);
   return {
-    nodes: [...nodes.values()].filter((node) => String((node as { id?: unknown })?.id || '')),
-    edges: [...edges.values()],
+    // Incoming arrays are the user's full current snapshot. Unioning old entries here made
+    // intentional node/edge deletions impossible and caused them to reappear after saving.
+    nodes: protectVideoTerminalNodes(
+      previousNodes,
+      keepExternalNodesOnSnapshot(previousNodes, incomingNodes, snapshotUpdatedAt),
+    ),
+    edges: incomingEdges,
   };
 }
 
@@ -257,6 +410,22 @@ export function createHttpServer() {
     const pathname = decodeURIComponent(url.pathname);
 
     try {
+      if (pathname === '/api/agent/status' && req.method === 'GET') {
+        const presence = await readAgentPresence();
+        json(res, 200, {
+          code: 0,
+          data: {
+            connected: isAgentPresenceFresh(presence),
+            lastSeenAt: presence.lastSeenAt || '',
+            canvasId: presence.canvasId || '',
+            transport: presence.transport || 'stdio',
+            mcpEntry: MCP_ENTRY,
+            nodeCommand: MCP_LAUNCHER,
+          },
+          msg: 'ok',
+        });
+        return;
+      }
       if (pathname === '/api/settings' && req.method === 'GET') {
         json(res, 200, { code: 0, data: publicView(await readSettings()), msg: 'ok' });
         return;
@@ -292,9 +461,15 @@ export function createHttpServer() {
             defaultSize: String(draft.defaultSize || ''),
             models: Array.isArray(draft.models) ? draft.models.map((item) => String(item)) : undefined,
             enabledModels: Array.isArray(draft.enabledModels) ? draft.enabledModels.map((item) => String(item)) : undefined,
-            kind: draft.kind === 'text' ? 'text' : 'image',
+            kind: draft.kind === 'text' || draft.kind === 'video' ? draft.kind : 'image',
             textFormat: (draft.textFormat === 'chat' || draft.textFormat === 'responses') ? draft.textFormat : 'auto',
             imageApiMode: draft.imageApiMode === 'responses' ? 'responses' : 'images',
+            videoApiMode: draft.videoApiMode === 'openai-videos' || draft.videoApiMode === 'xai-videos' || draft.videoApiMode === 'grsai-generate' || draft.videoApiMode === 'media-v1' || draft.videoApiMode === 'custom' || draft.videoApiMode === 'auto'
+              ? draft.videoApiMode
+              : undefined,
+            videoCustomConfig: draft.videoCustomConfig && typeof draft.videoCustomConfig === 'object'
+              ? draft.videoCustomConfig as ModelProfile['videoCustomConfig']
+              : undefined,
             responsesModel: String(draft.responsesModel || ''),
             enabled: typeof draft.enabled === 'boolean' ? draft.enabled : undefined,
           }))
@@ -416,11 +591,32 @@ export function createHttpServer() {
           json(res, 400, { code: 1, data: null, msg: '尚未配置 API Key：请先填写并保存' });
           return;
         }
-        const kind = String(body.kind || '') === 'text' || saved?.kind === 'text' ? 'text' : 'image';
+        const kind = body.kind === 'text' || body.kind === 'video' || saved?.kind === 'text' || saved?.kind === 'video'
+          ? (body.kind || saved?.kind)
+          : 'image';
         try {
-          const message = kind === 'text'
-            ? await testTextProfile({ ...(saved || createProfile('测试配置', 'text')), baseUrl, apiKey, model })
-            : await testProviderConnection({ baseUrl, apiKey, model });
+          let message: string;
+          if (kind === 'text') {
+            message = await testTextProfile({ ...(saved || createProfile('测试配置', 'text')), baseUrl, apiKey, model });
+          } else if (kind === 'video') {
+            const draft = {
+              ...(saved || createProfile('测试配置', 'video')),
+              baseUrl,
+              apiKey,
+              model,
+              ...(body.videoApiMode ? { videoApiMode: body.videoApiMode as ModelProfile['videoApiMode'] } : {}),
+              ...(body.videoCustomConfig && typeof body.videoCustomConfig === 'object'
+                ? { videoCustomConfig: body.videoCustomConfig as ModelProfile['videoCustomConfig'] }
+                : {}),
+            };
+            // 视频先做只读协议探测，把识别依据一并返回；用户不用先猜该选哪个协议
+            const detection = await detectVideoProtocol(draft, { force: true });
+            const probe = await probeVideoConnection({ ...draft, videoApiMode: detection.mode });
+            const confidence = detection.confidence === 'high' ? '高' : detection.confidence === 'medium' ? '中' : '低';
+            message = `${probe}\n协议识别：${detection.mode}（${confidence}置信度）—— ${detection.evidence}`;
+          } else {
+            message = await testProviderConnection({ baseUrl, apiKey, model });
+          }
           json(res, 200, { code: 0, data: { message }, msg: 'ok' });
         } catch (err) {
           json(res, 502, { code: 1, data: null, msg: err instanceof Error ? err.message : '连接测试失败' });
@@ -455,8 +651,7 @@ function readReferenceUrls(body: { referenceDataUrl?: unknown; referenceDataUrls
             // 多图按前端传的数组顺序走：数组第 1 张就是画布 chips 上的「图 1」
             referenceDataUrls: readReferenceUrls(body),
             level: current.enhanceLevel,
-            // 参考图用法自动预判：规则判「改这张图」才走 edit，其余一律 style（零用户操作）；
-            // 前端将来若传显式选择，以 body.usage 为准
+            // 二次编辑由前端显式锁定 edit；普通参考图才按措辞自动预判。
             usage: (body.usage === 'edit' || body.usage === 'style') ? body.usage : detectReferenceUsage(prompt),
             // 档案只在开启时注入；直连时整条优化层被跳过，这里传了也不起作用
             preferences: current.preferences.enabled ? current.preferences.entries : [],
@@ -464,6 +659,33 @@ function readReferenceUrls(body: { referenceDataUrl?: unknown; referenceDataUrls
           json(res, 200, { code: 0, data: enhanced, msg: 'ok' });
         } catch (err) {
           json(res, 502, { code: 1, data: null, msg: err instanceof Error ? err.message : '提示词优化失败' });
+        }
+        return;
+      }
+      if (pathname === '/api/enhance-video' && req.method === 'POST') {
+        const body = await readBody(req) as Record<string, unknown>;
+        const current = await readSettings();
+        const textProfile = resolveTextProfile(current, body.profileId ? String(body.profileId) : undefined);
+        if (!textProfile) {
+          json(res, 400, { code: 1, data: null, msg: '尚未配置语言模型：请在「生图设置」里添加一路语言模型' });
+          return;
+        }
+        const prompt = String(body.prompt || '').trim();
+        if (!prompt) {
+          json(res, 400, { code: 1, data: null, msg: '视频描述不能为空' });
+          return;
+        }
+        try {
+          const optimized = await optimizeVideoPrompt(textProfile, {
+            prompt,
+            ratio: String(body.ratio || '16:9'),
+            seconds: Number(body.seconds || 5),
+            resolution: String(body.resolution || '480p'),
+            referenceMode: String(body.referenceMode || 'first_frame'),
+          });
+          json(res, 200, { code: 0, data: { prompt: optimized }, msg: 'ok' });
+        } catch (err) {
+          json(res, 502, { code: 1, data: null, msg: err instanceof Error ? err.message : '视频脚本优化失败' });
         }
         return;
       }
@@ -541,6 +763,486 @@ function readReferenceUrls(body: { referenceDataUrl?: unknown; referenceDataUrls
         json(res, 200, { code: 0, data: { ok: true, jobId, images }, msg: 'ok' });
         return;
       }
+      /* ── 视频生成 ──
+         OpenAI Videos 与 GrsAI 异步任务走「受理 → 轮询 → SSE」；GrsAI 同步结果走「生成 → 下载 → SSE」。
+         两条路都先落任务占位，保证 bridge 重启或浏览器刷新时不会丢状态。 */
+      /* ── 视频模型目录 ──
+         media-v1 协议把每个模型的参数 schema 暴露成接口，界面据此动态渲染表单。
+         这样「加一个模型就能跑」是自然结果，不用为每个模型写一套代码。 */
+      if (pathname === '/api/video-models' && req.method === 'POST') {
+        const body = await readBody(req) as Record<string, string>;
+        const current = await readSettings();
+        // 草稿态留空的字段回落到已保存配置，拉列表不需要先保存
+        const profileId = String(body.profileId || '').trim();
+        const saved = profileId
+          ? current.profiles.find((profile) => profile.id === profileId)
+          : resolveVideoProfile(current);
+        const baseUrl = String(body.baseUrl || '').trim() || saved?.baseUrl || '';
+        const sameBase = saved && baseUrl.replace(/\/+$/, '') === saved.baseUrl.trim().replace(/\/+$/, '');
+        const apiKey = String(body.apiKey || '').trim() || (sameBase ? saved?.apiKey || '' : '');
+        if (!baseUrl) {
+          json(res, 400, { code: 1, data: null, msg: '尚未配置 Base URL：请先填写' });
+          return;
+        }
+        if (!apiKey) {
+          json(res, 400, { code: 1, data: null, msg: '尚未配置 API Key：请先填写并保存' });
+          return;
+        }
+        const draft = {
+          ...(saved || createProfile('视频模型', 'video')),
+          baseUrl,
+          apiKey,
+          videoApiMode: (String(body.videoApiMode || saved?.videoApiMode || 'auto') as ModelProfile['videoApiMode']),
+        } as ModelProfile;
+        try {
+          // 先探测协议（只发 GET），再按探测结果取模型列表：
+          // 未知中转站不再静默按 openai-videos 发请求，设置面板能直接看到识别依据。
+          const detection = await detectVideoProtocol(draft, { force: true });
+          const models = await listVideoModels({ ...draft, videoApiMode: detection.mode });
+          json(res, 200, {
+            code: 0,
+            data: {
+              models,
+              profileId: saved?.id || '',
+              protocol: detection.mode,
+              confidence: detection.confidence,
+              evidence: detection.evidence,
+            },
+            msg: 'ok',
+          });
+        } catch (err) {
+          json(res, 502, { code: 1, data: null, msg: err instanceof Error ? err.message : '拉取视频模型失败' });
+        }
+        return;
+      }
+
+      if (pathname === '/api/video-model' && req.method === 'GET') {
+        const profileId = url.searchParams.get('profileId') || undefined;
+        const model = String(url.searchParams.get('model') || '').trim();
+        if (!model) {
+          json(res, 400, { code: 1, data: null, msg: '缺少 model 参数' });
+          return;
+        }
+        const settings = await readSettings();
+        const profile = resolveVideoProfile(settings, profileId);
+        if (!profile) {
+          json(res, 400, { code: 1, data: null, msg: '尚未配置视频模型' });
+          return;
+        }
+        try {
+          // auto 模式下先探测：media-v1 的 schema 端点只在协议识别正确时才存在
+          const runtimeProfile = await ensureVideoApiMode(profile);
+          const schema = await describeVideoModel(runtimeProfile, model);
+          json(res, 200, { code: 0, data: { schema, profileId: profile.id, protocol: runtimeProfile.videoApiMode }, msg: 'ok' });
+        } catch (err) {
+          json(res, 502, { code: 1, data: null, msg: err instanceof Error ? err.message : '读取模型参数失败' });
+        }
+        return;
+      }
+      if (pathname === '/api/video-quote' && req.method === 'GET') {
+        const settings = await readSettings();
+        const profileId = String(url.searchParams.get('profileId') || '').trim();
+        const model = String(url.searchParams.get('model') || '').trim();
+        const seconds = Number(url.searchParams.get('seconds') || 5);
+        const profile = resolveVideoProfile(settings, profileId || undefined);
+        if (!profile || !model) {
+          json(res, 400, { code: 1, data: null, msg: '缺少视频模型配置或模型名' });
+          return;
+        }
+        try {
+          const runtimeProfile = await ensureVideoApiMode(profile);
+          if (runtimeProfile.videoApiMode !== 'media-v1') {
+            json(res, 200, {
+              code: 0,
+              data: { supported: false, seconds, warning: '当前接口没有提供可读取的余额 / 报价接口，费用需在服务商后台确认。' },
+              msg: '此协议不提供报价预览',
+            });
+            return;
+          }
+          const quote = await getMediaVideoPriceQuote(runtimeProfile, model, seconds);
+          json(res, 200, { code: 0, data: quote, msg: 'ok' });
+        } catch (error) {
+          json(res, 502, { code: 1, data: null, msg: error instanceof Error ? error.message : '读取报价失败' });
+        }
+        return;
+      }
+
+      if (pathname === '/api/videos' && req.method === 'POST') {
+        const body = await readBody(req) as Record<string, unknown>;
+        const prompt = String(body.prompt || '').trim();
+        const nodeId = String(body.nodeId || '').trim();
+        const canvasId = String(body.canvasId || '').trim();
+        if (!prompt) {
+          json(res, 400, { code: 1, data: null, msg: '提示词不能为空' });
+          return;
+        }
+        if (!nodeId || !canvasId) {
+          json(res, 400, { code: 1, data: null, msg: '缺少 nodeId / canvasId' });
+          return;
+        }
+        const settings = await readSettings();
+        const profile = resolveVideoProfile(settings, body.profileId ? String(body.profileId) : undefined);
+        if (!profile) {
+          json(res, 400, { code: 1, data: null, msg: '尚未配置视频模型：请在「生图设置」里添加一路视频模型' });
+          return;
+        }
+        if (!profile.apiKey) {
+          json(res, 400, { code: 1, data: null, msg: `「${profile.name}」尚未配置 API Key` });
+          return;
+        }
+        const model = body.model ? String(body.model).trim() : String(profile.model || '').trim();
+        // auto 协议先探测（只发 GET），后续请求一律使用确定的协议，避免静默打错 endpoint
+        const runtimeProfile = await ensureVideoApiMode(profile);
+        try {
+          validateVideoConfig(runtimeProfile, model);
+        } catch (err) {
+          json(res, 400, { code: 1, data: null, msg: err instanceof Error ? err.message : '视频模型配置不完整' });
+          return;
+        }
+        // 优先遵循模型 schema 的文件输入约定；明确支持 data URL 的媒体模型无需第三方图床。
+        const imageUrls: string[] = [];
+        const taskImageUrls: string[] = [];
+        const rawImageUrls = Array.isArray(body.imageUrls) ? body.imageUrls.map((item) => String(item || '').trim()).filter(Boolean) : [];
+        const rawFileNames = Array.isArray(body.imageFileNames) ? body.imageFileNames.map((item) => String(item || '').trim()).filter(Boolean) : [];
+        const extraParams = body.params && typeof body.params === 'object' && !Array.isArray(body.params)
+          ? body.params as Record<string, unknown>
+          : {};
+        const imageParamName = String(body.imageParamName || '').trim();
+
+        const inlineCustomImages = videoImagesUseDataUrls(runtimeProfile);
+
+        // 公网 HTTPS 地址直接用；自定义协议可显式声明接受内联 Data URL。
+        for (const url of rawImageUrls) {
+          if (/^https:\/\//i.test(url)) {
+            imageUrls.push(url);
+            taskImageUrls.push(url);
+          } else if (inlineCustomImages && /^data:image\/[a-z0-9.+-]+;base64,/i.test(url)) {
+            imageUrls.push(url);
+          } else {
+            json(res, 400, { code: 1, data: null, msg: `图生视频的引用图片必须是公网 HTTPS 地址,收到: ${url}` });
+            return;
+          }
+        }
+
+        let inlineDataUrlSupported = inlineCustomImages;
+        if (rawFileNames.length > 0 && runtimeProfile.videoApiMode === 'media-v1') {
+          try {
+            const schema = await describeVideoModel(runtimeProfile, model);
+            const imageParam = schema.params.find((spec) => spec.type === 'upload' && spec.name === imageParamName)
+              || schema.params.find((spec) => spec.type === 'upload');
+            inlineDataUrlSupported = Boolean(imageParam && videoUploadSupportsInlineDataUrl(imageParam.description));
+          } catch {
+            // Schema 临时不可读时保留图床兜底，不把素材直接发给不明确支持的上游。
+          }
+        }
+
+        if (rawFileNames.length > 0) {
+          if (inlineDataUrlSupported) {
+            const localImages: Array<{ buffer: Buffer; mimeType: string }> = [];
+            for (const fileName of rawFileNames) {
+              const filePath = safeMediaPath(fileName);
+              if (!filePath) {
+                json(res, 400, { code: 1, data: null, msg: `非法的图片文件名:${fileName}` });
+                return;
+              }
+              try {
+                const buffer = await fs.readFile(filePath);
+                const declaredType = contentTypeOf(fileName);
+                const extension = imageExtensionOf(buffer, path.extname(fileName).slice(1));
+                const mimeType = declaredType.startsWith('image/')
+                  ? declaredType
+                  : `image/${extension === 'jpg' ? 'jpeg' : extension}`;
+                localImages.push({ buffer, mimeType });
+              } catch {
+                json(res, 400, { code: 1, data: null, msg: `读取参考图片失败:${fileName}` });
+                return;
+              }
+            }
+            try {
+              imageUrls.push(...encodeVideoImagesAsDataUrls(localImages));
+            } catch (err) {
+              const status = err instanceof VideoImageInputError ? 413 : 400;
+              json(res, status, { code: 1, data: null, msg: err instanceof Error ? err.message : '参考图片无法处理' });
+              return;
+            }
+          } else {
+            const host = await resolveImageHost();
+            for (const fileName of rawFileNames) {
+              const filePath = safeMediaPath(fileName);
+              if (!filePath) {
+                json(res, 400, { code: 1, data: null, msg: `非法的图片文件名:${fileName}` });
+                return;
+              }
+              try {
+                const buffer = await fs.readFile(filePath);
+                const uploadedUrl = await uploadToImageHost(host, {
+                  buffer,
+                  fileName,
+                  contentType: contentTypeOf(fileName),
+                });
+                imageUrls.push(uploadedUrl);
+                taskImageUrls.push(uploadedUrl);
+              } catch (err) {
+                json(res, 502, { code: 1, data: null, msg: describeImageHostFailure(err, host.uploadUrl) });
+                return;
+              }
+            }
+          }
+        }
+        if (inlineCustomImages) {
+          try {
+            validateVideoImageDataUrls(imageUrls);
+          } catch (err) {
+            const message = err instanceof Error ? err.message : '参考图片无法处理';
+            json(res, /超过/.test(message) ? 413 : 400, { code: 1, data: null, msg: message });
+            return;
+          }
+        }
+        const ratio = String(body.ratio || '16:9');
+        const resolution = normalizeVideoResolution(body.resolution);
+        const seconds = Number(body.seconds || 5);
+        const referenceMode = body.referenceMode === 'last_frame' || body.referenceMode === 'style'
+          ? body.referenceMode
+          : 'first_frame';
+        // 同一节点已有在途任务时直接返回它：连点两次生成不该向上游重复下单（会重复计费）
+        const existing = await findVideoTaskByNode(nodeId);
+        if (
+          existing
+          && !existing.submissionUnknown
+          && !existing.url
+          && (existing.status === 'queued' || existing.status === 'in_progress')
+        ) {
+          json(res, 200, { code: 0, data: { ok: true, taskId: existing.taskId, duplicate: true }, msg: '该节点已有在途视频任务' });
+          return;
+        }
+        // 先占位再提交：POST 发出后进程崩掉的话，这条任务有据可查，不会凭空消失
+        await reserveVideoTask({
+          profileId: profile.id,
+          nodeId,
+          canvasId,
+          prompt,
+          model: model || profile.model,
+          seconds,
+          resolution,
+          ratio,
+          referenceMode,
+          params: extraParams,
+          apiMode: runtimeProfile.videoApiMode,
+          videoCustomConfig: runtimeProfile.videoApiMode === 'custom' ? runtimeProfile.videoCustomConfig : undefined,
+          imageParamName,
+          imageUrls: taskImageUrls,
+          imageFileNames: rawFileNames,
+        });
+        pushVideo({ type: 'video', phase: 'submitted', canvasId, nodeId, taskId: '', status: 'queued', progress: 0 });
+        try {
+          const snapshot = await createVideoTask(runtimeProfile, {
+            prompt,
+            model,
+            seconds,
+            resolution,
+            ratio: normalizeVideoRatio(ratio),
+            generateAudio: body.generateAudio === true,
+            watermark: body.watermark === true,
+            referenceMode,
+            imageUrls,
+            extraParams,
+            imageParamName,
+          });
+          // 先记住上游任务 ID / 直返地址，再做耗时下载。下载过程中崩溃也能在重启后续上。
+          // snapshot.status 已是适配器归一后的终态语义，不再把 failed 改写成 in_progress。
+          await confirmVideoSubmission(nodeId, snapshot.id, {
+            status: snapshot.status === 'completed' && !snapshot.outputUrl ? 'in_progress' : snapshot.status,
+            progress: snapshot.progress,
+            outputUrl: snapshot.outputUrl,
+          });
+          if (snapshot.outputUrl) {
+            const claimed = await claimVideoDownload(snapshot.id);
+            if (!claimed) {
+              json(res, 200, { code: 0, data: { ok: true, taskId: snapshot.id }, msg: '视频已生成，正在接收文件' });
+              return;
+            }
+            try {
+              const saved = await downloadVideoUrl(snapshot.outputUrl, runtimeProfile.apiKey, runtimeProfile.baseUrl);
+              await completeVideoTask(snapshot.id, saved);
+              json(res, 200, { code: 0, data: { ok: true, taskId: snapshot.id }, msg: '视频已生成' });
+            } catch (err) {
+              const detail = err instanceof Error ? err.message : '视频文件下载失败';
+              await releaseVideoDownload(snapshot.id);
+              // 记录里已经保存了 outputUrl，轮询器会接着重试下载
+              pushVideo({
+                type: 'video',
+                phase: 'download-failed',
+                canvasId,
+                nodeId,
+                taskId: snapshot.id,
+                status: 'in_progress',
+                progress: snapshot.progress,
+                error: detail,
+                recoverable: true,
+              });
+              json(res, 200, {
+                code: 0,
+                data: { ok: true, taskId: snapshot.id },
+                msg: `视频已生成，正在重试接收文件：${detail}`,
+              });
+            }
+            return;
+          }
+          pushVideo({
+            type: 'video',
+            phase: 'progress',
+            canvasId,
+            nodeId,
+            taskId: snapshot.id,
+            status: snapshot.status,
+            progress: snapshot.progress,
+          });
+          json(res, 200, { code: 0, data: { ok: true, taskId: snapshot.id }, msg: '视频任务已受理' });
+        } catch (err) {
+          const detail = err instanceof Error ? err.message : '视频任务提交失败';
+          const submissionUnknown = !(
+            (err instanceof VideoRequestError && err.definitiveFailure)
+            || err instanceof VideoConfigurationError
+          );
+          const message = submissionUnknown
+            ? `提交结果未知，上游可能已收到请求。请先核查服务商任务记录，避免重复提交。${detail ? `（${detail}）` : ''}`
+            : detail;
+          if (submissionUnknown) await markVideoSubmissionUnknown(nodeId, message);
+          else await failVideoSubmission(nodeId, message);
+          pushVideo({ type: 'video', phase: 'failed', canvasId, nodeId, taskId: '', status: 'failed', error: message, submissionUnknown });
+          json(res, 200, { code: 0, data: { ok: false, error: message, submissionUnknown }, msg: message });
+        }
+        return;
+      }
+      if (pathname.startsWith('/api/videos/') && req.method === 'GET') {
+        const rest = decodeURIComponent(pathname.slice('/api/videos/'.length));
+        if (rest.startsWith('node/')) {
+          const record = await findVideoTaskByNode(rest.slice('node/'.length));
+          if (!record) {
+            json(res, 404, { code: 1, data: null, msg: '这个节点没有在跑的视频任务' });
+            return;
+          }
+          json(res, 200, { code: 0, data: record, msg: 'ok' });
+          return;
+        }
+        const record = await getVideoTaskRecord(rest);
+        if (!record) {
+          json(res, 404, { code: 1, data: null, msg: '找不到这个视频任务（bridge 可能重启过且任务已过期）' });
+          return;
+        }
+        json(res, 200, { code: 0, data: record, msg: 'ok' });
+        return;
+      }
+      if (pathname.startsWith('/api/videos/node/') && req.method === 'POST') {
+        const nodeId = decodeURIComponent(pathname.slice('/api/videos/node/'.length));
+        const record = await findVideoTaskByNode(nodeId);
+        if (!record) {
+          json(res, 404, { code: 1, data: null, msg: '找不到这个视频任务' });
+          return;
+        }
+        if (record.url) {
+          json(res, 200, { code: 0, data: { taskId: record.taskId, url: record.url }, msg: '视频已在本机' });
+          return;
+        }
+        if (!record.outputUrl || !record.taskId) {
+          json(res, 409, { code: 1, data: null, msg: '没有可恢复的视频文件地址；不会重新提交生成任务' });
+          return;
+        }
+        const claimed = await claimVideoDownload(record.taskId);
+        if (!claimed) {
+          json(res, 409, { code: 1, data: null, msg: '视频文件正在接收，请稍后查看节点' });
+          return;
+        }
+        try {
+          const settings = await readSettings();
+          const profile = settings.profiles.find((item) => item.id === record.profileId);
+          if (!profile?.apiKey) {
+            throw new Error('原视频模型配置或 API Key 已不可用；请恢复配置后再试');
+          }
+          const saved = await downloadVideoUrl(record.outputUrl, profile.apiKey, profile.baseUrl);
+          await completeVideoTask(record.taskId, saved);
+          json(res, 200, { code: 0, data: { taskId: record.taskId, url: saved.url }, msg: '视频已重新接收' });
+        } catch (error) {
+          await releaseVideoDownload(record.taskId);
+          const message = error instanceof Error ? error.message : '视频文件接收失败';
+          json(res, 502, { code: 1, data: null, msg: message });
+        }
+        return;
+      }
+      if (pathname.startsWith('/api/videos/') && req.method === 'DELETE') {
+        const rest = decodeURIComponent(pathname.slice('/api/videos/'.length));
+        // ?nodeId= 专门删「提交结果未知」的占位（taskId 为空，按 id 删不掉）
+        const nodeId = String(url.searchParams.get('nodeId') || '').trim();
+        if (rest === 'node' || nodeId) {
+          const targetNode = nodeId || rest.slice('node/'.length);
+          const removedByNode = await removeVideoTaskByNode(targetNode);
+          json(res, 200, {
+            code: 0,
+            data: { nodeId: targetNode, removed: removedByNode },
+            msg: removedByNode ? '已移除该节点的任务记录（上游任务未必取消）' : '该节点没有任务记录',
+          });
+          return;
+        }
+        const removed = await removeVideoTask(rest);
+        if (!removed) {
+          json(res, 404, { code: 1, data: null, msg: '找不到这个视频任务' });
+          return;
+        }
+        json(res, 200, { code: 0, data: { id: rest }, msg: '已移除本地任务记录（上游任务未必取消）' });
+        return;
+      }
+      if (pathname === '/api/image-host' && req.method === 'GET') {
+        const host = await readImageHost();
+        // 旧版内置 Catbox 配置等同于「没自定义」：经代理会被 Catbox 判成 invalid uploader
+        const usingDefault = !imageHostReady(host) || isLegacyDefaultImageHost(host);
+        json(res, 200, {
+          code: 0,
+          data: {
+            // configured 表示「用户自定义」；未自定义时图生视频自动使用内置 ImgDB 临时图床
+            configured: !usingDefault,
+            usingDefault,
+            effective: usingDefault ? defaultImageHost() : host,
+            defaultPreset: 'imgdb',
+            config: usingDefault ? EMPTY_IMAGE_HOST : host,
+            presets: IMAGE_HOST_PRESETS,
+          },
+          msg: 'ok',
+        });
+        return;
+      }
+      if (pathname === '/api/image-host' && req.method === 'PUT') {
+        const body = await readBody(req) as Partial<ImageHostConfig>;
+        const saved = await writeImageHost({
+          uploadUrl: String(body.uploadUrl || '').trim(),
+          fileField: String(body.fileField || 'file').trim() || 'file',
+          urlField: String(body.urlField || '').trim(),
+          headers: (body.headers && typeof body.headers === 'object' ? body.headers : {}) as Record<string, string>,
+          extraFields: (body.extraFields && typeof body.extraFields === 'object' ? body.extraFields : {}) as Record<string, string>,
+        });
+        json(res, 200, { code: 0, data: { configured: imageHostReady(saved), config: saved || EMPTY_IMAGE_HOST }, msg: saved ? 'ok' : '已清空图床配置' });
+        return;
+      }
+      if (pathname === '/api/image-host/upload' && req.method === 'POST') {
+        const body = await readBody(req) as { fileName?: string };
+        const host = await resolveImageHost();
+        const filePath = safeMediaPath(String(body.fileName || ''));
+        if (!filePath) {
+          json(res, 400, { code: 1, data: null, msg: '非法的文件名' });
+          return;
+        }
+        try {
+          const buffer = await fs.readFile(filePath);
+          const url = await uploadToImageHost(host, {
+            buffer,
+            fileName: String(body.fileName),
+            contentType: contentTypeOf(String(body.fileName)),
+          });
+          json(res, 200, { code: 0, data: { url }, msg: 'ok' });
+        } catch (err) {
+          json(res, 502, { code: 1, data: null, msg: err instanceof Error ? err.message : '上传失败' });
+        }
+        return;
+      }
       if (pathname === '/api/events' && req.method === 'GET') {
         const canvasId = url.searchParams.get('canvasId');
         res.writeHead(200, {
@@ -579,14 +1281,14 @@ function readReferenceUrls(body: { referenceDataUrl?: unknown; referenceDataUrls
           const merged = mergeCanvasSnapshot(
             previous?.nodes,
             Array.isArray(body.nodes) ? body.nodes : (previous?.nodes || []),
-            previous?.edges,
             Array.isArray(body.edges) ? body.edges : (previous?.edges || []),
+            body.updatedAt,
           );
           // 时间戳由 Bridge 生成，避免不同电脑的时钟和旧标签页时间把新写入挡掉。
           const updatedAt = new Date().toISOString();
           docs[canvasId] = {
             name,
-            nodes: keepExternalNodesOnSnapshot(previous?.nodes, merged.nodes, updatedAt),
+            nodes: merged.nodes,
             edges: merged.edges,
             ...(body.viewport ? { viewport: body.viewport } : {}),
             updatedAt,
@@ -613,6 +1315,8 @@ function readReferenceUrls(body: { referenceDataUrl?: unknown; referenceDataUrls
           await backupCanvasDocs();
           await fs.writeFile(CANVAS_DOCS_FILE, JSON.stringify(docs, null, 2), 'utf8');
         });
+        // 级联清掉该画布的视频任务：否则轮询器会一直在后台查一个已删除画布的任务
+        await removeVideoTasksByCanvas(canvasId);
         json(res, 200, { code: 0, data: { id: canvasId }, msg: 'ok' });
         return;
       }
@@ -638,66 +1342,130 @@ function readReferenceUrls(body: { referenceDataUrl?: unknown; referenceDataUrls
         return;
       }
       if (pathname === '/api/history' && req.method === 'GET') {
-        // 生成历史：把全部画布的图片节点汇成一张时间线（新的在前），
-        // Codex 推来的图与浏览器生成的图都算，点击可在灯箱里回看。
         const registry = await readRegistry();
         const docs = await readCanvasDocs();
-        const ids = new Set([...Object.keys(registry), ...Object.keys(docs)]);
-        const items: Array<Record<string, unknown>> = [];
-        for (const id of ids) {
-          const doc = docs[id];
-          if (!doc || !Array.isArray(doc.nodes)) continue;
-          for (const node of doc.nodes) {
-            const data = (node as { data?: Record<string, unknown> })?.data || {};
-            const nodeId = String((node as { id?: unknown })?.id || '');
-            const storedVersions = Array.isArray(data.versions) ? data.versions as Array<Record<string, unknown>> : [];
-            const base = {
-              canvasId: id,
-              canvasName: doc.name || registry[id] || '未命名画布',
-              source: String(data.source || 'browser'),
-              nodeId,
-            };
-            if (storedVersions.length > 0) {
-              // 版本链节点：每一版都上榜，序号 + 基数 + 基准版本一起丢出去，
-              // 历史面板才能写清“这张是第几版、由哪一版二次编辑来”
-              storedVersions.forEach((item, index) => {
-                const url = String(item.imageUrl || '').trim();
-                if (!url) return;
-                items.push({
-                  ...base,
-                  url,
-                  prompt: String(item.prompt || ''),
-                  enhancedPrompt: String(item.enhancedPrompt || ''),
-                  revisedPrompt: String(item.revisedPrompt || ''),
-                  model: String(item.model || ''),
-                  size: String(item.size || ''),
-                  fileName: String(item.fileName || ''),
-                  createdAt: String(item.finishedAt || item.createdAt || ''),
-                  versionId: String(item.id || ''),
-                  versionIndex: index + 1,
-                  versionCount: storedVersions.length,
-                  baseVersionId: String(item.baseVersionId || ''),
-                });
-              });
-              continue;
-            }
-            const url = String(data.imageUrl || '').trim();
-            if (!url || data.kind !== 'image') continue;
-            items.push({
-              ...base,
-              url,
-              prompt: String(data.prompt || ''),
-              enhancedPrompt: String(data.enhancedPrompt || ''),
-              revisedPrompt: String(data.revisedPrompt || ''),
-              model: String(data.model || ''),
-              size: String(data.size || ''),
-              fileName: String(data.fileName || ''),
-              createdAt: String(data.finishedAt || data.createdAt || ''),
-            });
-          }
+        json(res, 200, { code: 0, data: collectHistoryItems(docs, registry), msg: 'ok' });
+        return;
+      }
+      if (pathname === '/api/assets' && req.method === 'GET') {
+        json(res, 200, { code: 0, data: await listAssets(), msg: 'ok' });
+        return;
+      }
+      if (pathname === '/api/assets/folders' && req.method === 'POST') {
+        const body = await readBody(req) as Record<string, unknown>;
+        try {
+          const folder = await createAssetFolder(String(body.name || ''));
+          json(res, 200, { code: 0, data: folder, msg: '已创建文件夹' });
+        } catch (error) {
+          json(res, 400, { code: 1, data: null, msg: error instanceof Error ? error.message : '创建文件夹失败' });
         }
-        items.sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')));
-        json(res, 200, { code: 0, data: items.slice(0, 300), msg: 'ok' });
+        return;
+      }
+      if (pathname.startsWith('/api/assets/folders/') && req.method === 'PATCH') {
+        const folderId = decodeURIComponent(pathname.slice('/api/assets/folders/'.length));
+        const body = await readBody(req) as Record<string, unknown>;
+        try {
+          const folder = await renameAssetFolder(folderId, String(body.name || ''));
+          json(res, 200, { code: 0, data: folder, msg: '已重命名文件夹' });
+        } catch (error) {
+          json(res, 400, { code: 1, data: null, msg: error instanceof Error ? error.message : '重命名文件夹失败' });
+        }
+        return;
+      }
+      if (pathname.startsWith('/api/assets/folders/') && req.method === 'DELETE') {
+        const folderId = decodeURIComponent(pathname.slice('/api/assets/folders/'.length));
+        try {
+          await deleteAssetFolder(folderId);
+          json(res, 200, { code: 0, data: { id: folderId }, msg: '已删除文件夹' });
+        } catch (error) {
+          json(res, 409, { code: 1, data: null, msg: error instanceof Error ? error.message : '删除文件夹失败' });
+        }
+        return;
+      }
+      if (pathname === '/api/assets/items' && req.method === 'POST') {
+        const body = await readBody(req) as Record<string, unknown>;
+        try {
+          const asset = await addAsset({
+            folderId: String(body.folderId || ''),
+            fileName: String(body.fileName || ''),
+            prompt: String(body.prompt || ''),
+            model: String(body.model || ''),
+            size: String(body.size || ''),
+            sourceKey: String(body.sourceKey || ''),
+          });
+          json(res, 200, { code: 0, data: asset, msg: '已收藏到资产库' });
+        } catch (error) {
+          json(res, 400, { code: 1, data: null, msg: error instanceof Error ? error.message : '收藏失败' });
+        }
+        return;
+      }
+      if (pathname.startsWith('/api/assets/items/') && req.method === 'PATCH') {
+        const itemId = decodeURIComponent(pathname.slice('/api/assets/items/'.length));
+        const body = await readBody(req) as Record<string, unknown>;
+        try {
+          const asset = await moveAsset(itemId, String(body.folderId || ''));
+          json(res, 200, { code: 0, data: asset, msg: '已移动资产' });
+        } catch (error) {
+          json(res, 400, { code: 1, data: null, msg: error instanceof Error ? error.message : '移动资产失败' });
+        }
+        return;
+      }
+      if (pathname.startsWith('/api/assets/items/') && req.method === 'DELETE') {
+        const itemId = decodeURIComponent(pathname.slice('/api/assets/items/'.length));
+        try {
+          await deleteAsset(itemId);
+          json(res, 200, { code: 0, data: { id: itemId }, msg: '已移除资产' });
+        } catch (error) {
+          json(res, 404, { code: 1, data: null, msg: error instanceof Error ? error.message : '移除资产失败' });
+        }
+        return;
+      }
+      if (pathname === '/api/skills' && req.method === 'GET') {
+        json(res, 200, { code: 0, data: await listPromptSkills(), msg: 'ok' });
+        return;
+      }
+      if (pathname === '/api/skills' && req.method === 'POST') {
+        const body = await readBody(req) as Record<string, unknown>;
+        try {
+          const skill = await savePromptSkill({
+            name: String(body.name || ''),
+            description: String(body.description || ''),
+            category: String(body.category || ''),
+            avatarUrl: String(body.avatarUrl || ''),
+            content: String(body.content || ''),
+            skills: readRoleSkills(body.skills),
+            enabled: body.enabled !== false,
+          });
+          json(res, 200, { code: 0, data: skill, msg: '已安装 Skill' });
+        } catch (error) {
+          json(res, 400, { code: 1, data: null, msg: error instanceof Error ? error.message : '安装 Skill 失败' });
+        }
+        return;
+      }
+      if (pathname.startsWith('/api/skills/') && req.method === 'PATCH') {
+        const id = decodeURIComponent(pathname.slice('/api/skills/'.length));
+        const body = await readBody(req) as Record<string, unknown>;
+        try {
+          const skill = await savePromptSkill({
+            id,
+            name: String(body.name || ''),
+            description: String(body.description || ''),
+            category: String(body.category || ''),
+            avatarUrl: String(body.avatarUrl || ''),
+            content: String(body.content || ''),
+            skills: readRoleSkills(body.skills),
+            enabled: body.enabled !== false,
+          });
+          json(res, 200, { code: 0, data: skill, msg: '已更新 Skill' });
+        } catch (error) {
+          json(res, 400, { code: 1, data: null, msg: error instanceof Error ? error.message : '更新 Skill 失败' });
+        }
+        return;
+      }
+      if (pathname.startsWith('/api/skills/') && req.method === 'DELETE') {
+        const id = decodeURIComponent(pathname.slice('/api/skills/'.length));
+        const removed = await deletePromptSkill(id);
+        json(res, removed ? 200 : 404, { code: removed ? 0 : 1, data: { id }, msg: removed ? '已删除 Skill' : '找不到这个 Skill' });
         return;
       }
       /* ── 对话线程（实体，一张画布多条）──
@@ -706,6 +1474,18 @@ function readReferenceUrls(body: { referenceDataUrl?: unknown; referenceDataUrls
          与 canvas-docs 同款三条保险。 */
       if (pathname === '/api/chat/threads' && req.method === 'GET') {
         json(res, 200, { code: 0, data: await readChatThreads(), msg: 'ok' });
+        return;
+      }
+      if (pathname === '/api/chat/general-prompt' && req.method === 'GET') {
+        json(res, 200, {
+          code: 0,
+          data: {
+            name: '通用模式',
+            description: '当前 AI 对话使用的基础系统提示词。',
+            content: buildAgentSystemSpec(),
+          },
+          msg: 'ok',
+        });
         return;
       }
       if (pathname === '/api/chat/threads' && req.method === 'POST') {
@@ -768,7 +1548,7 @@ function readReferenceUrls(body: { referenceDataUrl?: unknown; referenceDataUrls
         return;
       }
       if (pathname.startsWith('/api/files/') && req.method === 'GET') {
-        await serveMediaFile(res, pathname.slice('/api/files/'.length));
+        await serveMediaFile(req, res, pathname.slice('/api/files/'.length));
         return;
       }
       if (pathname === '/api/files/delete-if-unused' && req.method === 'POST') {
@@ -839,21 +1619,23 @@ function readReferenceUrls(body: { referenceDataUrl?: unknown; referenceDataUrls
   });
 }
 
-export function listenHttpServer(): Promise<void> {
+export function listenHttpServer(): Promise<boolean> {
   const server = createHttpServer();
   return new Promise((resolve) => {
     server.once('error', (err: NodeJS.ErrnoException) => {
       if (err.code === 'EADDRINUSE') {
-        // 已有实例在跑（浏览器页或另一个 MCP 进程）：复用现状，MCP 侧仍可工作
+        // 已有实例在跑（浏览器页或另一个 MCP 进程）：复用现状，MCP 侧仍可工作。
+        // 返回 false = 本进程不拥有端口，视频轮询不该在这里跑（否则同一个任务被查两遍）。
         console.error(`[huiban] 端口 ${PORT} 已被占用，HTTP/SSE 复用已有实例`);
+        resolve(false);
       } else {
         console.error(`[huiban] HTTP 服务启动失败：${err.message}`);
+        resolve(false);
       }
-      resolve();
     });
     server.listen(PORT, HOST, () => {
       console.error(`[huiban] HTTP 服务 listening on http://${HOST}:${PORT}`);
-      resolve();
+      resolve(true);
     });
   });
 }

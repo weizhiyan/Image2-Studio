@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { ChatImageRef, ChatModelSelection } from '@/types';
+import type { ChatImageRef, ChatModelSelection, ChatRoleSnapshot, ChatThread } from '@/types';
 import { activeThreadOf, allThreads, useChatStore } from '@/stores/chatStore';
 import ChatComposer from './ChatComposer';
 import ChatMessageList from './ChatMessageList';
 import ClarificationModal from './ClarificationModal';
 import { ChevronGlyphIcon, CloseGlyphIcon, NewThreadGlyphIcon, PencilGlyphIcon, TrashGlyphIcon } from './ChatIcons';
+import { getChatPanelResizeFrame } from '@/lib/chatPanelResize';
 import './ChatPanel.css';
 
 /** 面板宽度可调范围（方案 §5.2）。 */
@@ -17,25 +18,24 @@ const CHAT_PANEL_ANIMATION_MS = 360;
  * 面板只负责界面与收集输入；起 run / 定位 / 预览等动作由 CanvasPage 接走。
  */
 export default function ChatPanel({
-  canvasNames,
   onSend,
   onStop,
   submitting = false,
   onLocate,
   onPreview,
   onRetry,
+  onApplyVideoScript,
   onAnswerClarification,
   onWidthChange,
 }: {
-  /** 画布 id → 名字：历史菜单里显示最近结果落点（如有）。 */
-  canvasNames: Record<string, string>;
-  onSend: (text: string, refs: ChatImageRef[], modelSelection: ChatModelSelection) => void;
+  onSend: (text: string, refs: ChatImageRef[], modelSelection: ChatModelSelection, agentRole?: ChatRoleSnapshot) => void;
   /** 停止当前运行：入口只保留输入区那个，头部不再放重复按钮。 */
   onStop: () => void;
   submitting?: boolean;
   onLocate: (ref: { canvasId: string; nodeId: string; versionId?: string; force?: boolean }) => void;
   onPreview: (url: string, title: string) => void;
   onRetry: (messageId: string) => void;
+  onApplyVideoScript: (prompt: string, references?: ChatImageRef[]) => void;
   onAnswerClarification: (runId: string, callId: string, answers: Record<string, string[]> | null) => Promise<boolean>;
   onWidthChange?: (width: number) => void;
 }) {
@@ -47,16 +47,31 @@ export default function ChatPanel({
   const threads = useChatStore(allThreads);
   const activeRun = useChatStore((state) => state.activeRun);
   const threadRun = activeRun && activeRun.threadId === thread?.id ? activeRun : null;
-  const pendingClarification = thread?.messages
-    .flatMap((message) => message.clarifications || [])
-    .find((item) => item.status === 'awaiting_input') || null;
+  const pendingClarification = threadRun
+    ? thread?.messages
+      .find((message) => message.id === threadRun.messageId)
+      ?.clarifications?.find((item) => item.status === 'awaiting_input') || null
+    : null;
 
   const [historyOpen, setHistoryOpen] = useState(false);
   const [renamingId, setRenamingId] = useState('');
   const [renameValue, setRenameValue] = useState('');
   const [leaving, setLeaving] = useState(false);
   const [width, setWidth] = useState(360);
+  const [viewportWidth, setViewportWidth] = useState(() => typeof window === 'undefined' ? 1280 : window.innerWidth);
+  const [isResizing, setIsResizing] = useState(false);
+  const [hasResized, setHasResized] = useState(false);
+  const resizeCleanupRef = useRef<(() => void) | null>(null);
   const headerRef = useRef<HTMLElement>(null);
+  const sideInset = viewportWidth > 640 && viewportWidth <= 900 ? 32 : 24;
+  const panelWidth = Math.min(width, Math.max(8, Math.min(MAX_WIDTH, viewportWidth - sideInset)));
+  const resizeFrame = getChatPanelResizeFrame(panelWidth, MIN_WIDTH);
+
+  useEffect(() => {
+    const onViewportResize = () => setViewportWidth(window.innerWidth);
+    window.addEventListener('resize', onViewportResize);
+    return () => window.removeEventListener('resize', onViewportResize);
+  }, []);
 
   const closePanel = useCallback(() => {
     if (leaving) return;
@@ -65,8 +80,8 @@ export default function ChatPanel({
   }, [leaving, setOpen]);
 
   useEffect(() => {
-    onWidthChange?.(width);
-  }, [onWidthChange, width]);
+    onWidthChange?.(Math.max(0, panelWidth));
+  }, [onWidthChange, panelWidth]);
 
   // 收起动画播完再真正卸载：期间面板不拦截画布点击
   useEffect(() => {
@@ -76,6 +91,12 @@ export default function ChatPanel({
     }, CHAT_PANEL_ANIMATION_MS);
     return () => window.clearTimeout(timer);
   }, [leaving]);
+
+  useEffect(() => {
+    if (!open && !leaving) setHasResized(false);
+  }, [leaving, open]);
+
+  useEffect(() => () => resizeCleanupRef.current?.(), []);
 
   // 菜单外点击 / Escape 关闭历史菜单（方案 §7）
   useEffect(() => {
@@ -99,28 +120,50 @@ export default function ChatPanel({
   }, [historyOpen]);
 
   // 左缘拖拽调宽
-  const onResizeStart = (event: React.PointerEvent) => {
+  const onResizeStart = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (event.button !== 0 || leaving) return;
     event.preventDefault();
+    resizeCleanupRef.current?.();
+    const handle = event.currentTarget;
     const startX = event.clientX;
-    const startWidth = width;
-    const onMove = (move: PointerEvent) => {
-      const next = startWidth - (move.clientX - startX);
-      const nextWidth = Math.min(MAX_WIDTH, Math.max(MIN_WIDTH, next));
+    const pointerId = event.pointerId;
+    const startWidth = panelWidth;
+    let finalWidth = startWidth;
+    handle.setPointerCapture(pointerId);
+    setHasResized(true);
+    setIsResizing(true);
+    const updateWidth = (clientX: number) => {
+      const next = startWidth - (clientX - startX);
+      const nextWidth = Math.min(Math.min(MAX_WIDTH, window.innerWidth - sideInset), Math.max(-window.innerWidth, next));
+      finalWidth = nextWidth;
       setWidth(nextWidth);
-      onWidthChange?.(nextWidth);
+      onWidthChange?.(Math.max(0, nextWidth));
     };
-    const onUp = () => {
+    const onMove = (move: PointerEvent) => {
+      if (move.pointerId !== pointerId) return;
+      updateWidth(move.clientX);
+    };
+    const onUp = (up: PointerEvent) => {
+      if (up.pointerId !== pointerId) return;
+      if (up.type === 'pointerup') updateWidth(up.clientX);
+      resizeCleanupRef.current?.();
+      setIsResizing(false);
+      if (finalWidth <= 0) setOpen(false);
+    };
+    const cleanup = () => {
       window.removeEventListener('pointermove', onMove);
       window.removeEventListener('pointerup', onUp);
+      window.removeEventListener('pointercancel', onUp);
+      if (handle.hasPointerCapture(pointerId)) handle.releasePointerCapture(pointerId);
+      resizeCleanupRef.current = null;
     };
+    resizeCleanupRef.current = cleanup;
     window.addEventListener('pointermove', onMove);
     window.addEventListener('pointerup', onUp);
+    window.addEventListener('pointercancel', onUp);
   };
 
-  const canvasNameOf = (canvasId?: string): string => {
-    const id = typeof canvasId === 'string' ? canvasId.trim() : '';
-    return id && id !== '[object Object]' ? (canvasNames[id] || id) : '独立对话';
-  };
+  const threadGroups = groupThreads(threads);
 
   if (!open && !leaving) {
     return (
@@ -128,7 +171,12 @@ export default function ChatPanel({
         <button
           type="button"
           className="hb-chat-fab"
-          onClick={() => setOpen(true)}
+          onClick={() => {
+            if (width <= MIN_WIDTH / 2) {
+              setWidth(360);
+            }
+            setOpen(true);
+          }}
           title="AI 对话"
           aria-label="打开 AI 对话"
         >
@@ -144,8 +192,14 @@ export default function ChatPanel({
 
   return (
     <aside
-      className={`hb-chat-panel ${leaving ? 'is-leaving' : ''}`}
-      style={{ ['--hb-chat-width' as string]: `${width}px` }}
+      className={`hb-chat-panel ${leaving ? 'is-leaving' : ''} ${isResizing ? 'is-resizing' : ''} ${hasResized ? 'is-resized' : ''} ${resizeFrame.contentHidden ? 'is-content-hidden' : ''} ${panelWidth < MIN_WIDTH / 2 ? 'is-collapsed-drag' : ''}`}
+      style={{
+        ['--hb-chat-width' as string]: `${resizeFrame.shellWidth}px`,
+        ['--hb-chat-min-width' as string]: `${MIN_WIDTH}px`,
+        ['--hb-chat-collapse-x' as string]: `${resizeFrame.collapseOffset}px`,
+        ['--hb-chat-shell-opacity' as string]: resizeFrame.shellOpacity,
+        ['--hb-chat-content-opacity' as string]: resizeFrame.contentOpacity,
+      }}
       aria-label="AI 对话"
     >
       <div
@@ -169,7 +223,6 @@ export default function ChatPanel({
           }}
         >
             <strong>{thread?.title || '新对话'}</strong>
-          <span>{canvasNameOf(activeCanvasId)}</span>
           <ChevronGlyphIcon up={historyOpen} />
         </button>
         <div className="hb-chat-actions">
@@ -199,79 +252,81 @@ export default function ChatPanel({
               新建对话
             </button>
             <div className="hb-chat-thread-list">
-              {threads.length === 0 ? (
+              {threadGroups.length === 0 ? (
                 <p className="hb-chat-menu-empty">还没有历史对话，发一句话就自动开一条</p>
-              ) : threads.map((item) => (
-                <div key={item.id} className={`hb-chat-thread-row ${renamingId === item.id ? 'is-renaming' : ''}`}>
-                  {renamingId === item.id ? (
-                    <div className="hb-chat-thread-rename">
-                      <input
-                        value={renameValue}
-                        autoFocus
-                        aria-label="对话新标题"
-                        onChange={(event) => setRenameValue(event.target.value)}
-                        onKeyDown={(event) => {
-                          if (event.key === 'Enter') {
-                            useChatStore.getState().renameThread(item.id, renameValue);
-                            setRenamingId('');
-                          } else if (event.key === 'Escape') {
-                            setRenamingId('');
-                          }
-                        }}
-                      />
-                      <button
-                        type="button"
-                        onClick={() => {
-                          useChatStore.getState().renameThread(item.id, renameValue);
-                          setRenamingId('');
-                        }}
-                      >
-                        保存
-                      </button>
+              ) : threadGroups.map((group) => (
+                <section key={group.label} className="hb-chat-thread-group" aria-label={group.label}>
+                  <h3 className="hb-chat-thread-group-label">{group.label}</h3>
+                  {group.items.map((item) => (
+                    <div key={item.id} className={`hb-chat-thread-row ${item.id === thread?.id ? 'is-active' : ''} ${renamingId === item.id ? 'is-renaming' : ''}`}>
+                      {renamingId === item.id ? (
+                        <div className="hb-chat-thread-rename">
+                          <input
+                            value={renameValue}
+                            autoFocus
+                            aria-label="对话新标题"
+                            onChange={(event) => setRenameValue(event.target.value)}
+                            onKeyDown={(event) => {
+                              if (event.key === 'Enter') {
+                                useChatStore.getState().renameThread(item.id, renameValue);
+                                setRenamingId('');
+                              } else if (event.key === 'Escape') {
+                                setRenamingId('');
+                              }
+                            }}
+                          />
+                          <button
+                            type="button"
+                            onClick={() => {
+                              useChatStore.getState().renameThread(item.id, renameValue);
+                              setRenamingId('');
+                            }}
+                          >
+                            保存
+                          </button>
+                        </div>
+                      ) : (
+                        <>
+                          <button
+                            type="button"
+                            className="hb-chat-thread-item-main"
+                            role="menuitem"
+                            aria-current={item.id === thread?.id ? 'true' : undefined}
+                            onClick={() => {
+                              useChatStore.getState().switchThread(item.id);
+                              setHistoryOpen(false);
+                            }}
+                          >
+                            <strong>{item.title}</strong>
+                          </button>
+                          <div className="hb-chat-thread-actions" aria-label={`对话「${item.title}」的操作`}>
+                            <button
+                              type="button"
+                              className="hb-chat-thread-action-button"
+                              title="编辑对话名称"
+                              aria-label={`编辑对话「${item.title}」名称`}
+                              onClick={() => {
+                                setRenamingId(item.id);
+                                setRenameValue(item.title);
+                              }}
+                            >
+                              <PencilGlyphIcon />
+                            </button>
+                            <button
+                              type="button"
+                              className="hb-chat-thread-action-button is-danger"
+                              title="删除对话"
+                              aria-label={`删除对话「${item.title}」`}
+                              onClick={() => useChatStore.getState().deleteThread(item.id)}
+                            >
+                              <TrashGlyphIcon />
+                            </button>
+                          </div>
+                        </>
+                      )}
                     </div>
-                  ) : (
-                    <>
-                      <button
-                        type="button"
-                        className={`hb-chat-thread-item-main ${item.id === thread?.id ? 'is-active' : ''}`}
-                        role="menuitem"
-                        onClick={() => {
-                          useChatStore.getState().switchThread(item.id);
-                          setHistoryOpen(false);
-                        }}
-                      >
-                        <strong>{item.title}</strong>
-                        <span>
-                          {typeof item.canvasId === 'string' && item.canvasId.trim() ? `${canvasNameOf(item.canvasId)} · ` : ''}{formatTime(item.updatedAt)}
-                          {item.messages.length > 0 ? ` · ${item.messages.length} 条消息` : ''}
-                        </span>
-                      </button>
-                      <div className="hb-chat-thread-actions" aria-label={`对话「${item.title}」的操作`}>
-                        <button
-                          type="button"
-                          className="hb-chat-thread-action-button"
-                          title="编辑对话名称"
-                          aria-label={`编辑对话「${item.title}」名称`}
-                          onClick={() => {
-                            setRenamingId(item.id);
-                            setRenameValue(item.title);
-                          }}
-                        >
-                          <PencilGlyphIcon />
-                        </button>
-                        <button
-                          type="button"
-                          className="hb-chat-thread-action-button is-danger"
-                          title="删除对话"
-                          aria-label={`删除对话「${item.title}」`}
-                          onClick={() => useChatStore.getState().deleteThread(item.id)}
-                        >
-                          <TrashGlyphIcon />
-                        </button>
-                      </div>
-                    </>
-                  )}
-                </div>
+                  ))}
+                </section>
               ))}
             </div>
           </div>
@@ -282,6 +337,7 @@ export default function ChatPanel({
           onLocate={onLocate}
           onPreview={onPreview}
           onRetry={onRetry}
+          onApplyVideoScript={onApplyVideoScript}
         />
         {pendingClarification && threadRun ? (
           <ClarificationModal
@@ -297,14 +353,34 @@ export default function ChatPanel({
   );
 }
 
-/** 历史菜单里的更新时间：今天显示时刻，否则显示日期。 */
-function formatTime(iso: string): string {
-  const time = Date.parse(String(iso || ''));
-  if (!Number.isFinite(time)) return '未知时间';
-  const date = new Date(time);
+interface ThreadGroup {
+  label: string;
+  items: ChatThread[];
+}
+
+/** 历史菜单按近期开启频率分组，较早的对话按月份归档。 */
+function groupThreads(threads: ChatThread[]): ThreadGroup[] {
   const now = new Date();
-  const sameDay = date.toDateString() === now.toDateString();
-  const pad = (value: number) => String(value).padStart(2, '0');
-  const clock = `${pad(date.getHours())}:${pad(date.getMinutes())}`;
-  return sameDay ? clock : `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  const dayMs = 24 * 60 * 60 * 1000;
+  const groups = new Map<string, ChatThread[]>();
+
+  for (const thread of threads) {
+    const time = Date.parse(String(thread.updatedAt || thread.createdAt || ''));
+    const date = Number.isFinite(time) ? new Date(time) : null;
+    const dayStart = date ? new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime() : NaN;
+    const dayAge = Number.isFinite(dayStart) ? Math.floor((today - dayStart) / dayMs) : Number.POSITIVE_INFINITY;
+    const label = dayAge <= 2
+      ? '近 3 天'
+      : dayAge <= 6
+        ? '近 7 天'
+        : date
+          ? `${date.getFullYear()}.${String(date.getMonth() + 1).padStart(2, '0')}`
+          : '更早';
+    const items = groups.get(label);
+    if (items) items.push(thread);
+    else groups.set(label, [thread]);
+  }
+
+  return [...groups.entries()].map(([label, items]) => ({ label, items }));
 }

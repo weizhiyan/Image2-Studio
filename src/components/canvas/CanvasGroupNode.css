@@ -1,0 +1,335 @@
+/* 组框作为底层画布；标题和工具栏接收指针事件，成员卡片始终在上层。 */
+.image-canvas-flow .react-flow__node.react-flow__node-canvas-group,
+.image-canvas-flow .react-flow__node.canvas-group-node,
+.image-canvas-flow .react-flow__node.react-flow__node-canvas-group.selected,
+.image-canvas-flow .react-flow__node.canvas-group-node.selected,
+.image-canvas-flow .react-flow__node.react-flow__node-canvas-group:hover,
+.image-canvas-flow .react-flow__node.canvas-group-node:hover {
+  z-index: 4 !important;
+  pointer-events: none;
+}
+
+.canvas-group-node-shell {
+  --canvas-group-accent: var(--color-text-tertiary);
+  --canvas-group-tint: transparent;
+  position: relative;
+  display: flex;
+  width: 100%;
+  height: 100%;
+  flex-direction: column;
+  overflow: visible;
+  border: 1px solid color-mix(in srgb, var(--canvas-group-accent) 34%, transparent);
+  border-radius: var(--radius-md);
+  background: var(--canvas-group-tint);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-paper) 3%, transparent);
+  pointer-events: none;
+  transition:
+    border-color var(--motion-fast) var(--ease-out),
+    background var(--motion-fast) var(--ease-out),
+    box-shadow var(--motion-fast) var(--ease-out);
+}
+
+.canvas-group-node-shell.is-selected {
+  border-color: var(--canvas-group-accent);
+  box-shadow:
+    inset 0 0 0 1px color-mix(in srgb, var(--canvas-group-accent) 22%, transparent),
+    0 0 0 1px color-mix(in srgb, var(--canvas-group-accent) 18%, transparent);
+}
+
+.canvas-group-node-shell.is-blue {
+  --canvas-group-accent: var(--color-accent-blue);
+  --canvas-group-tint: color-mix(in srgb, var(--color-accent-blue) 8%, transparent);
+}
+
+.canvas-group-node-shell.is-green {
+  --canvas-group-accent: var(--color-accent-green);
+  --canvas-group-tint: color-mix(in srgb, var(--color-accent-green) 8%, transparent);
+}
+
+.canvas-group-node-shell.is-amber {
+  --canvas-group-accent: var(--color-accent-amber);
+  --canvas-group-tint: color-mix(in srgb, var(--color-accent-amber) 8%, transparent);
+}
+
+.canvas-group-node-shell.is-purple {
+  --canvas-group-accent: var(--color-accent-purple);
+  --canvas-group-tint: color-mix(in srgb, var(--color-accent-purple) 8%, transparent);
+}
+
+.canvas-group-header {
+  display: flex;
+  height: calc(var(--spacing-8) + var(--spacing-2));
+  flex: none;
+  align-items: center;
+  overflow: hidden;
+  border-radius: var(--radius-md) var(--radius-md) 0 0;
+  padding: 0 var(--spacing-3);
+  cursor: move;
+  pointer-events: auto;
+}
+
+.canvas-group-name,
+.canvas-group-name-input {
+  min-width: 0;
+  color: var(--color-text-primary);
+  font-family: var(--font-sans);
+  font-size: var(--font-size-base);
+  font-weight: var(--font-weight-semibold);
+  letter-spacing: 0;
+  line-height: 1.4;
+}
+
+.canvas-group-name {
+  overflow: hidden;
+  cursor: text;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.canvas-group-name:focus-visible {
+  border-radius: var(--radius-2xs);
+  outline: 1px solid var(--canvas-group-accent);
+  outline-offset: var(--spacing-1);
+}
+
+.canvas-group-name-input {
+  width: 100%;
+  border: 1px solid var(--canvas-group-accent);
+  border-radius: var(--radius-2xs);
+  background: var(--surface-popover-bg);
+  padding: var(--spacing-1) var(--spacing-2);
+  outline: none;
+}
+
+.canvas-group-toolbar {
+  position: absolute;
+  bottom: calc(100% + var(--spacing-2));
+  left: 50%;
+  display: flex;
+  height: calc(var(--spacing-8) + var(--spacing-3));
+  align-items: center;
+  gap: var(--spacing-2);
+  border: 1px solid color-mix(in srgb, var(--color-paper) 13%, transparent);
+  border-radius: var(--radius-full);
+  background: color-mix(in srgb, var(--color-bg-overlay) 88%, transparent);
+  box-shadow:
+    0 18px 42px var(--shadow-ink-deep),
+    inset 0 1px 0 color-mix(in srgb, var(--color-paper) 7%, transparent);
+  padding: var(--spacing-2) var(--spacing-3);
+  transform-origin: bottom center;
+  backdrop-filter: var(--surface-popover-glass-blur);
+  -webkit-backdrop-filter: var(--surface-popover-glass-blur);
+  pointer-events: auto;
+}
+
+.canvas-group-colors {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-2);
+}
+
+.canvas-group-color {
+  width: calc(var(--spacing-4) + var(--spacing-1));
+  height: calc(var(--spacing-4) + var(--spacing-1));
+  border: 1px solid color-mix(in srgb, var(--color-paper) 24%, transparent);
+  border-radius: var(--radius-full);
+  background: var(--color-text-tertiary);
+  padding: 0;
+  transition:
+    transform var(--motion-fast) var(--ease-out),
+    box-shadow var(--motion-fast) var(--ease-out);
+}
+
+.canvas-group-color:hover {
+  transform: scale(1.12);
+}
+
+.canvas-group-color.is-active {
+  box-shadow:
+    0 0 0 2px color-mix(in srgb, var(--color-bg-overlay) 96%, transparent),
+    0 0 0 3px var(--color-text-primary);
+}
+
+.canvas-group-color.is-blue {
+  background: var(--color-accent-blue);
+}
+
+.canvas-group-color.is-green {
+  background: var(--color-accent-green);
+}
+
+.canvas-group-color.is-amber {
+  background: var(--color-accent-amber);
+}
+
+.canvas-group-color.is-purple {
+  background: var(--color-accent-purple);
+}
+
+.canvas-group-toolbar-divider {
+  width: 1px;
+  height: calc(var(--spacing-4) + var(--spacing-1));
+  background: color-mix(in srgb, var(--color-paper) 14%, transparent);
+}
+
+.canvas-group-action {
+  position: relative;
+  display: inline-flex;
+  width: calc(var(--spacing-8) + var(--spacing-1));
+  height: calc(var(--spacing-8) + var(--spacing-1));
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: var(--radius-full);
+  background: transparent;
+  color: var(--color-text-secondary);
+  padding: 0;
+  transition:
+    background var(--motion-fast) var(--ease-out),
+    color var(--motion-fast) var(--ease-out);
+}
+
+.canvas-group-action:hover {
+  background: color-mix(in srgb, var(--color-paper) 9%, transparent);
+  color: var(--color-text-primary);
+}
+
+.canvas-group-action:focus-visible,
+.canvas-group-color:focus-visible {
+  outline: 1px solid var(--color-paper);
+  outline-offset: 2px;
+}
+
+.canvas-group-action svg {
+  width: var(--icon-glyph-md);
+  height: var(--icon-glyph-md);
+}
+
+.canvas-group-tooltip {
+  position: absolute;
+  bottom: calc(100% + var(--spacing-2));
+  left: 50%;
+  z-index: 2;
+  width: max-content;
+  max-width: min(220px, calc(100vw - var(--spacing-8)));
+  border: 1px solid var(--surface-popover-border);
+  border-radius: var(--radius-xs);
+  background: var(--surface-popover-glass-bg);
+  box-shadow: var(--surface-popover-glass-shadow);
+  color: var(--color-text-primary);
+  padding: 6px 8px;
+  font-family: var(--font-sans);
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-medium);
+  line-height: 1.4;
+  white-space: nowrap;
+  pointer-events: none;
+  opacity: 0;
+  transform: translate(-50%, var(--spacing-1));
+  transition:
+    opacity var(--motion-tooltip) var(--ease-tooltip),
+    transform var(--motion-tooltip) var(--ease-tooltip);
+  backdrop-filter: var(--surface-popover-glass-blur);
+  -webkit-backdrop-filter: var(--surface-popover-glass-blur);
+}
+
+.canvas-group-action:hover .canvas-group-tooltip,
+.canvas-group-action:focus-visible .canvas-group-tooltip {
+  opacity: 1;
+  transform: translate(-50%, 0);
+}
+
+.canvas-group-create-panel {
+  position: absolute;
+  z-index: 30;
+  border: 1px solid color-mix(in srgb, var(--color-paper) 13%, transparent);
+  border-radius: var(--radius-full);
+  background: color-mix(in srgb, var(--color-bg-overlay) 88%, transparent);
+  box-shadow:
+    0 18px 42px var(--shadow-ink-deep),
+    inset 0 1px 0 color-mix(in srgb, var(--color-paper) 7%, transparent);
+  padding: var(--spacing-2);
+  transform: translateX(-50%);
+  backdrop-filter: var(--surface-popover-glass-blur);
+  -webkit-backdrop-filter: var(--surface-popover-glass-blur);
+}
+
+.canvas-group-create-button {
+  position: relative;
+  display: inline-flex;
+  width: calc(var(--spacing-8) + var(--spacing-1));
+  height: calc(var(--spacing-8) + var(--spacing-1));
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: var(--radius-full);
+  background: transparent;
+  color: var(--color-text-primary);
+  padding: 0;
+  transition:
+    background var(--motion-fast) var(--ease-out),
+    color var(--motion-fast) var(--ease-out),
+    opacity var(--motion-fast) var(--ease-out);
+}
+
+.canvas-group-create-button:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--color-paper) 10%, transparent);
+}
+
+.canvas-group-create-button:disabled {
+  color: var(--color-text-tertiary);
+  cursor: not-allowed;
+  opacity: 0.58;
+}
+
+.canvas-group-create-button:focus-visible {
+  outline: 1px solid var(--color-paper);
+  outline-offset: 2px;
+}
+
+.canvas-group-create-button svg {
+  width: var(--icon-glyph-md);
+  height: var(--icon-glyph-md);
+}
+
+.canvas-group-create-tooltip {
+  position: absolute;
+  bottom: calc(100% + var(--spacing-2));
+  left: 50%;
+  width: max-content;
+  border: 1px solid var(--surface-popover-border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-popover-glass-bg);
+  box-shadow: var(--surface-popover-glass-shadow);
+  color: var(--color-text-primary);
+  padding: 6px 10px;
+  font-family: var(--font-sans);
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-medium);
+  line-height: 1.4;
+  pointer-events: none;
+  opacity: 0;
+  transform: translate(-50%, var(--spacing-1));
+  transition:
+    opacity var(--motion-tooltip) var(--ease-tooltip),
+    transform var(--motion-tooltip) var(--ease-tooltip);
+  backdrop-filter: var(--surface-popover-glass-blur);
+  -webkit-backdrop-filter: var(--surface-popover-glass-blur);
+}
+
+.canvas-group-create-button:hover:not(:disabled) .canvas-group-create-tooltip,
+.canvas-group-create-button:focus-visible:not(:disabled) .canvas-group-create-tooltip {
+  opacity: 1;
+  transform: translate(-50%, 0);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .canvas-group-node-shell,
+  .canvas-group-color,
+  .canvas-group-action,
+  .canvas-group-create-button,
+  .canvas-group-tooltip,
+  .canvas-group-create-tooltip {
+    transition: none;
+  }
+}

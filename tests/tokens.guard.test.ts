@@ -1,5 +1,5 @@
 /**
- * 设计 Token 守护测试 —— 判法照搬灵枢的 guard：
+ * 绘板设计 Token 守护测试：
  * 1. 字面色（hex / rgb / rgba）零容忍；mask* 声明整条遮罩（遮罩色渲染不进画面）；
  * 2. 圆角只挡非零绝对单位（正圆的 50% 是合法的，--radius-full 归它管）；
  * 3. 幽灵 Token 零容忍：定义可以出现在任何 CSS 里，JS 注入的走白名单且反查 TSX。
@@ -57,6 +57,11 @@ const JS_INJECTED = new Set([
   '--image-node-width',
   '--image-aspect-ratio',
   '--image-node-height',
+  '--parameter-slider-progress',
+  '--segment-count',
+  '--segment-index',
+  '--choice-count',
+  '--choice-index',
 ]);
 
 describe('设计 Token 硬规则', () => {

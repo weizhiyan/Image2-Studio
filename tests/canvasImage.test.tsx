@@ -8,7 +8,17 @@ describe('CanvasImage', () => {
     const html = renderToStaticMarkup(<CanvasImage src="/api/files/img_ok.png" alt="一只柴犬" />);
     expect(html).toContain('<img');
     expect(html).toContain('src="/api/files/img_ok.png"');
+    expect(html).toContain('loading="lazy"');
+    expect(html).toContain('decoding="async"');
     expect(html).not.toContain('canvas-image-missing');
+  });
+
+  it('调用方可以覆盖图片加载策略', () => {
+    const html = renderToStaticMarkup(
+      <CanvasImage src="/api/files/img_now.png" alt="预览图片" loading="eager" decoding="sync" />,
+    );
+    expect(html).toContain('loading="eager"');
+    expect(html).toContain('decoding="sync"');
   });
 
   it('空 src 直接出占位卡，不渲染 img（引用未就位也不露裂图）', () => {

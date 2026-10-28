@@ -1,4 +1,22 @@
-import type { CanvasDoc, ChatClarificationQuestion, ChatModelSelection, ChatThread, ChatThreadMemory, EnhanceLevel, GenerateOutcome, HistoryItem, ImageApiMode, MediaSettings, PreferenceEntry, PreferenceProfile } from '@/types';
+import type { CanvasDoc, ChatClarificationQuestion, ChatModelSelection, ChatRoleSnapshot, ChatThread, ChatThreadMemory, CustomVideoApiConfig, EnhanceLevel, GenerateOutcome, HistoryItem, ImageApiMode, MediaSettings, PreferenceEntry, PreferenceProfile, ProfileKind, VideoApiMode, VideoModelInfo, VideoModelSchema, VideoRatio, VideoReferenceMode, VideoResolution, VideoTaskStatus } from '@/types';
+import { subscribeEventStream } from './eventStream';
+
+export interface AgentStatus {
+  connected: boolean;
+  lastSeenAt?: string;
+  canvasId?: string;
+  transport?: string;
+  mcpEntry?: string;
+  nodeCommand?: string;
+}
+
+/** 第三方 Agent 的最近连接状态；bridge 通过 MCP 活跃文件判断，不暴露工具参数。 */
+export async function getAgentStatus(): Promise<AgentStatus> {
+  const res = await fetch('/api/agent/status');
+  if (!res.ok) throw new Error('读取 Agent 连接状态失败');
+  const body = await res.json() as { data?: AgentStatus };
+  return body.data || { connected: false };
+}
 
 /** 画布注册表：让 Codex 侧的工具能列出/选择画布。 */
 export async function registerCanvas(canvasId: string, name: string): Promise<void> {
@@ -15,6 +33,129 @@ export async function getHistory(): Promise<HistoryItem[]> {
   if (!res.ok) throw new Error('读取生成历史失败');
   const body = await res.json() as { data?: HistoryItem[] };
   return body.data || [];
+}
+
+export interface AssetFolder {
+  id: string;
+  name: string;
+  createdAt: string;
+}
+
+export interface AssetItem {
+  id: string;
+  folderId: string;
+  fileName: string;
+  url: string;
+  prompt: string;
+  model: string;
+  size: string;
+  sourceKey: string;
+  createdAt: string;
+}
+
+export interface AssetLibrary {
+  folders: AssetFolder[];
+  items: AssetItem[];
+}
+
+async function assetRequest<T>(pathname: string, init?: RequestInit): Promise<T> {
+  const response = await fetch(pathname, init);
+  const body = await response.json().catch(() => null) as { data?: T; msg?: string } | null;
+  if (!response.ok || body?.data === undefined) throw new Error(body?.msg || `资产库请求失败（HTTP ${response.status}）`);
+  return body.data;
+}
+
+export function getAssets(): Promise<AssetLibrary> {
+  return assetRequest<AssetLibrary>('/api/assets');
+}
+
+export function createAsset(input: {
+  folderId?: string;
+  fileName: string;
+  prompt: string;
+  model: string;
+  size: string;
+  sourceKey: string;
+}): Promise<AssetItem> {
+  return assetRequest<AssetItem>('/api/assets/items', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input),
+  });
+}
+
+export function createAssetFolder(name: string): Promise<AssetFolder> {
+  return assetRequest<AssetFolder>('/api/assets/folders', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name }),
+  });
+}
+
+export function renameAssetFolder(id: string, name: string): Promise<AssetFolder> {
+  return assetRequest<AssetFolder>(`/api/assets/folders/${encodeURIComponent(id)}`, {
+    method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name }),
+  });
+}
+
+export async function deleteAssetFolder(id: string): Promise<void> {
+  await assetRequest(`/api/assets/folders/${encodeURIComponent(id)}`, { method: 'DELETE' });
+}
+
+export function moveAssetToFolder(id: string, folderId: string): Promise<AssetItem> {
+  return assetRequest<AssetItem>(`/api/assets/items/${encodeURIComponent(id)}`, {
+    method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ folderId }),
+  });
+}
+
+export async function removeAsset(id: string): Promise<void> {
+  await assetRequest(`/api/assets/items/${encodeURIComponent(id)}`, { method: 'DELETE' });
+}
+
+export interface RoleSkill {
+  id: string;
+  name: string;
+  content: string;
+}
+
+/** 角色与内嵌 Skill。沿用 /api/skills 的存储和接口名以兼容已有本机数据。 */
+export interface PromptSkill {
+  id: string;
+  name: string;
+  /** 旧版简介字段，仅兼容读取。 */
+  description?: string;
+  category: string;
+  avatarUrl: string;
+  content: string;
+  skills: RoleSkill[];
+  enabled: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface GeneralChatPrompt {
+  name: string;
+  description: string;
+  content: string;
+}
+
+export async function getPromptSkills(): Promise<PromptSkill[]> {
+  return assetRequest<PromptSkill[]>('/api/skills');
+}
+
+export async function getGeneralChatPrompt(): Promise<GeneralChatPrompt> {
+  return assetRequest<GeneralChatPrompt>('/api/chat/general-prompt');
+}
+
+export function savePromptSkill(input: Partial<PromptSkill> & Pick<PromptSkill, 'name' | 'content'>): Promise<PromptSkill> {
+  const id = String(input.id || '');
+  return assetRequest<PromptSkill>(id ? `/api/skills/${encodeURIComponent(id)}` : '/api/skills', {
+    method: id ? 'PATCH' : 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input),
+  });
+}
+
+export async function deletePromptSkill(id: string): Promise<void> {
+  await assetRequest(`/api/skills/${encodeURIComponent(id)}`, { method: 'DELETE' });
 }
 
 /** 服务端全量画布文档：换浏览器/新 profile 打开链接时靠它还原，不是只存名字。 */
@@ -76,14 +217,24 @@ export async function deleteCanvasDoc(canvasId: string): Promise<void> {
 
 /** 把浏览器图片落到 bridge 媒体目录，画布只保存轻量 /api/files 引用。 */
 export async function saveImageDataUrl(dataUrl: string): Promise<{ url: string; fileName: string }> {
-  const res = await fetch('/api/files', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ dataUrl }),
-  });
-  const body = await res.json().catch(() => null) as { data?: { url?: string; fileName?: string }; msg?: string } | null;
-  if (!res.ok || !body?.data?.url) throw new Error(body?.msg || `图片保存失败（HTTP ${res.status}）`);
-  return { url: body.data.url, fileName: body.data.fileName || '' };
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 30_000);
+  try {
+    const res = await fetch('/api/files', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ dataUrl }),
+      signal: controller.signal,
+    });
+    const body = await res.json().catch(() => null) as { data?: { url?: string; fileName?: string }; msg?: string } | null;
+    if (!res.ok || !body?.data?.url) throw new Error(body?.msg || `图片保存失败（HTTP ${res.status}）`);
+    return { url: body.data.url, fileName: body.data.fileName || '' };
+  } catch (error) {
+    if (controller.signal.aborted) throw new Error('图片保存超时，请重试');
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 export async function deleteImageIfUnused(fileName: string): Promise<boolean> {
@@ -124,7 +275,6 @@ export async function deleteChatThread(threadId: string): Promise<void> {
 export async function getSettings(): Promise<MediaSettings> {
   const res = await fetch('/api/settings', {
     cache: 'no-store',
-    signal: AbortSignal.timeout(10000),
   });
   if (!res.ok) throw new Error('读取配置失败');
   const body = await res.json() as { data: MediaSettings };
@@ -154,8 +304,10 @@ export interface ModelProfileInput {
   defaultSize: string;
   models?: string[];
   enabledModels?: string[];
-  kind?: 'image' | 'text';
+  kind?: ProfileKind;
   imageApiMode?: ImageApiMode;
+  videoApiMode?: VideoApiMode;
+  videoCustomConfig?: CustomVideoApiConfig;
   responsesModel?: string;
   enabled?: boolean;
 }
@@ -264,7 +416,15 @@ export async function revealLocalFile(fileName: string): Promise<string> {
 }
 
 /** 测试连接：生图模型会真实生成一张 1024×1024 的测试图（消耗额度）；语言模型只发一句最小对话。 */
-export async function testConnection(input: { baseUrl: string; apiKey: string; model: string; profileId?: string; kind?: 'image' | 'text' }): Promise<string> {
+export async function testConnection(input: {
+  baseUrl: string;
+  apiKey: string;
+  model: string;
+  profileId?: string;
+  kind?: ProfileKind;
+  videoApiMode?: VideoApiMode;
+  videoCustomConfig?: CustomVideoApiConfig;
+}): Promise<string> {
   const res = await fetchWithTimeout('/api/test', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -310,6 +470,7 @@ export async function enhancePromptApi(input: {
   referenceDataUrl?: string;
   referenceDataUrls?: string[];
   profileId?: string;
+  usage?: 'style' | 'edit';
 }): Promise<{ prompt: string; usage?: 'style' | 'edit' }> {
   const res = await fetch('/api/enhance', {
     method: 'POST',
@@ -324,6 +485,24 @@ export async function enhancePromptApi(input: {
   const body = await res.json().catch(() => null) as { data?: { prompt: string; usage?: 'style' | 'edit' }; msg?: string } | null;
   if (!res.ok || !body?.data) throw new Error(body?.msg || `提示词优化失败（HTTP ${res.status}）`);
   return { prompt: String(body.data.prompt || ''), usage: body.data.usage };
+}
+
+export async function enhanceVideoPromptApi(input: {
+  prompt: string;
+  ratio?: VideoRatio;
+  seconds?: number;
+  resolution?: VideoResolution;
+  referenceMode?: VideoReferenceMode;
+  profileId?: string;
+}): Promise<{ prompt: string }> {
+  const res = await fetch('/api/enhance-video', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input),
+  });
+  const body = await res.json().catch(() => null) as { data?: { prompt?: string }; msg?: string } | null;
+  if (!res.ok || !body?.data?.prompt) throw new Error(body?.msg || `视频脚本优化失败（HTTP ${res.status}）`);
+  return { prompt: String(body.data.prompt).trim() };
 }
 
 /** 生图统一走 bridge：绕开浏览器直连中转站的 CORS，且和 Codex 路径同一出口。 */
@@ -362,7 +541,6 @@ export interface PushedImageEvent {
 
 /** 订阅 Codex 推来的新图。EventSource 断线由浏览器自动重试。 */
 export function subscribePushedImages(canvasId: string, onImage: (event: PushedImageEvent) => void): () => void {
-  const source = new EventSource(`/api/events?canvasId=${encodeURIComponent(canvasId)}`);
   const handler = (event: MessageEvent<string>) => {
     try {
       const parsed = JSON.parse(event.data) as PushedImageEvent;
@@ -371,11 +549,252 @@ export function subscribePushedImages(canvasId: string, onImage: (event: PushedI
       /* 单条脏数据不该打断订阅 */
     }
   };
-  source.addEventListener('image', handler as EventListener);
-  return () => {
-    source.removeEventListener('image', handler as EventListener);
-    source.close();
+  return subscribeEventStream(`/api/events?canvasId=${encodeURIComponent(canvasId)}`, [
+    { type: 'image', handler: handler as EventListener },
+  ]);
+}
+
+/* ── 视频任务 ──
+   一条视频会推多次：受理 → 进度(可能多条) → 完成 / 失败。
+   前端按 taskId + nodeId 认出是同一条任务，分别更新节点上的进度条与成品。 */
+
+export type VideoEventPhase = 'submitted' | 'progress' | 'download-failed' | 'done' | 'failed';
+
+export interface PushedVideoEvent {
+  type: 'video';
+  phase: VideoEventPhase;
+  canvasId: string;
+  nodeId: string;
+  taskId: string;
+  status?: VideoTaskStatus;
+  progress?: number;
+  fileName?: string;
+  url?: string;
+  outputUrl?: string;
+  error?: string;
+  submissionUnknown?: boolean;
+  recoverable?: boolean;
+  finishedAt?: string;
+}
+
+/** 订阅视频任务事件。与推图同一条 SSE 流，事件名不同。 */
+export function subscribePushedVideos(canvasId: string, onVideo: (event: PushedVideoEvent) => void): () => void {
+  const handler = (event: MessageEvent<string>) => {
+    try {
+      const parsed = JSON.parse(event.data) as PushedVideoEvent;
+      if (parsed?.type === 'video' && parsed.canvasId === canvasId) onVideo(parsed);
+    } catch {
+      /* 单条脏数据不该打断订阅 */
+    }
   };
+  return subscribeEventStream(`/api/events?canvasId=${encodeURIComponent(canvasId)}`, [
+    { type: 'video', handler: handler as EventListener },
+  ]);
+}
+
+/* ── 视频模型目录（media-v1 协议） ──
+   中转站把每个模型的参数 schema 暴露成接口，界面据此动态渲染表单，
+   不再写死「比例 / 画质 / 时长」三件套。 */
+
+export interface VideoModelFetchResult {
+  models: VideoModelInfo[];
+  /** bridge 只读探测出的协议（media-v1 / openai-videos / xai-videos / grsai-generate） */
+  protocol?: VideoApiMode;
+  confidence?: 'high' | 'medium' | 'low' | string;
+  evidence?: string;
+}
+
+export async function fetchVideoModels(input: {
+  profileId?: string;
+  baseUrl?: string;
+  apiKey?: string;
+  videoApiMode?: VideoApiMode;
+}): Promise<VideoModelFetchResult> {
+  const res = await fetch('/api/video-models', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input),
+  });
+  const body = await res.json().catch(() => null) as {
+    data?: { models?: VideoModelInfo[]; protocol?: VideoApiMode; confidence?: string; evidence?: string };
+    msg?: string;
+  } | null;
+  if (!res.ok || !body?.data) throw new Error(body?.msg || `拉取视频模型失败（HTTP ${res.status}）`);
+  return {
+    models: body.data.models || [],
+    protocol: body.data.protocol,
+    confidence: body.data.confidence,
+    evidence: body.data.evidence,
+  };
+}
+
+export async function fetchVideoModelSchema(profileId: string, model: string): Promise<VideoModelSchema> {
+  const query = new URLSearchParams({ profileId, model }).toString();
+  const res = await fetch(`/api/video-model?${query}`);
+  const body = await res.json().catch(() => null) as { data?: { schema?: VideoModelSchema }; msg?: string } | null;
+  if (!res.ok || !body?.data?.schema) throw new Error(body?.msg || `读取模型参数失败（HTTP ${res.status}）`);
+  return body.data.schema;
+}
+
+export interface VideoPriceQuote {
+  supported: boolean;
+  balance?: number;
+  unit?: string;
+  billingMethod?: string;
+  minimumUnitPrice?: number;
+  minimumEstimate?: number;
+  seconds: number;
+  warning?: string;
+}
+
+export async function fetchVideoPriceQuote(profileId: string, model: string, seconds: number): Promise<VideoPriceQuote> {
+  const query = new URLSearchParams({ profileId, model, seconds: String(seconds) }).toString();
+  const res = await fetch(`/api/video-quote?${query}`);
+  const body = await res.json().catch(() => null) as { data?: VideoPriceQuote; msg?: string } | null;
+  if (!res.ok || !body?.data) throw new Error(body?.msg || `读取视频费用信息失败（HTTP ${res.status}）`);
+  return body.data;
+}
+
+export interface VideoSubmitRequest {  nodeId: string;
+  canvasId: string;
+  prompt: string;
+  profileId?: string;
+  model?: string;
+  seconds?: number;
+  resolution?: VideoResolution;
+  ratio?: VideoRatio;
+  generateAudio?: boolean;
+  watermark?: boolean;
+  referenceMode?: VideoReferenceMode;
+  /** 按模型 schema 选出的参数值，原样进上游的 params。 */
+  params?: Record<string, unknown>;
+  /** 承载参考图的参数名（images / img_url …）。 */
+  imageParamName?: string;
+  /** 已经上传图床拿到的公网地址。 */
+  imageUrls?: string[];
+  /** 本机 /api/files 文件名，由 bridge 负责过图床。 */
+  imageFileNames?: string[];
+}
+
+export interface VideoSubmitResult {
+  ok: boolean;
+  taskId?: string;
+  error?: string;
+  submissionUnknown?: boolean;
+}
+
+/** 提交视频任务：受理即返回，不等结果；连接中断时保留“结果未知”以避免重复扣费。 */
+export async function submitVideoTask(input: VideoSubmitRequest): Promise<VideoSubmitResult> {
+  try {
+    const res = await fetch('/api/videos', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(input),
+    });
+    const body = await res.json().catch(() => null) as { data?: VideoSubmitResult; msg?: string } | null;
+    if (!res.ok) {
+      return {
+        ok: false,
+        error: body?.msg || `视频任务提交失败（HTTP ${res.status}）`,
+        submissionUnknown: res.status >= 500 && res.status !== 502,
+      };
+    }
+    if (!body?.data) {
+      return { ok: false, error: '服务器未返回提交结果；请先核查服务商任务记录，避免重复提交', submissionUnknown: true };
+    }
+    return body.data;
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : '本地视频服务连接中断';
+    return {
+      ok: false,
+      error: `提交结果未知，本地连接中断，上游可能已收到请求。请先核查服务商任务记录，避免重复提交。（${detail}）`,
+      submissionUnknown: true,
+    };
+  }
+}
+
+export interface VideoTaskRecord {
+  taskId: string;
+  nodeId: string;
+  canvasId: string;
+  prompt: string;
+  model: string;
+  seconds: number;
+  resolution: string;
+  ratio: string;
+  referenceMode?: VideoReferenceMode;
+  params?: Record<string, unknown>;
+  imageParamName?: string;
+  imageUrls: string[];
+  status: VideoTaskStatus;
+  progress: number;
+  submissionUnknown?: boolean;
+  fileName?: string;
+  url?: string;
+  outputUrl?: string;
+  error?: string;
+  createdAt: string;
+  finishedAt?: string;
+}
+
+/** 按节点查任务：刷新页面后靠它把「还在跑的任务」和画布节点重新对上。 */
+export async function getVideoTaskByNode(nodeId: string): Promise<VideoTaskRecord | null> {
+  const res = await fetch(`/api/videos/node/${encodeURIComponent(nodeId)}`);
+  if (!res.ok) return null;
+  const body = await res.json().catch(() => null) as { data?: VideoTaskRecord } | null;
+  return body?.data || null;
+}
+
+/** 重新接收已生成的视频文件；只下载既有 outputUrl，不会再次提交生成任务。 */
+export async function recoverVideoDownload(nodeId: string): Promise<void> {
+  const res = await fetch(`/api/videos/node/${encodeURIComponent(nodeId)}`, { method: 'POST' });
+  const body = await res.json().catch(() => null) as { msg?: string } | null;
+  if (!res.ok) throw new Error(body?.msg || `视频接收失败（HTTP ${res.status}）`);
+}
+
+/** 移除本地任务记录（上游任务未必取消，只是不再轮询）。 */
+export async function dismissVideoTask(taskId: string): Promise<void> {
+  await fetch(`/api/videos/${encodeURIComponent(taskId)}`, { method: 'DELETE' }).catch(() => undefined);
+}
+
+/** 按节点清掉任务记录：用于「提交结果未知」占位（taskId 为空，按 id 删不掉）。 */
+export async function dismissVideoTasksByNode(nodeId: string): Promise<void> {
+  await fetch(`/api/videos/node?nodeId=${encodeURIComponent(nodeId)}`, { method: 'DELETE' }).catch(() => undefined);
+}
+
+export interface ImageHostView {
+  /** 用户是否自定义过图床。未自定义时图生视频使用内置临时图床。 */
+  configured: boolean;
+  /** true = 正在使用内置默认临时图床。 */
+  usingDefault?: boolean;
+  defaultPreset?: string;
+  config: {
+    uploadUrl: string;
+    fileField: string;
+    urlField: string;
+    headers: Record<string, string>;
+    extraFields: Record<string, string>;
+  };
+  presets: Record<string, Partial<{ uploadUrl: string; fileField: string; urlField: string; headers: Record<string, string>; extraFields: Record<string, string> }>>;
+}
+
+/** 读图床配置：图生视频的前提，没配的话界面要提示而不是静默失败。 */
+export async function getImageHost(): Promise<ImageHostView> {
+  const res = await fetch('/api/image-host');
+  if (!res.ok) throw new Error('读取图床配置失败');
+  const body = await res.json().catch(() => null) as { data?: ImageHostView } | null;
+  return body?.data || { configured: false, config: { uploadUrl: '', fileField: 'file', urlField: '', headers: {}, extraFields: {} }, presets: {} };
+}
+
+export async function saveImageHost(config: ImageHostView['config']): Promise<ImageHostView> {
+  const res = await fetch('/api/image-host', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(config),
+  });
+  const body = await res.json().catch(() => null) as { data?: ImageHostView; msg?: string } | null;
+  if (!res.ok || !body?.data) throw new Error(body?.msg || '保存图床配置失败');
+  return body.data;
 }
 
 export interface CanvasUpdatedEvent {
@@ -387,7 +806,6 @@ export interface CanvasUpdatedEvent {
 
 /** 订阅同一画布的远端写入（局域网其他页面）：收到后拉最新文档合并，看到对方的上传与编辑。 */
 export function subscribeCanvasUpdated(canvasId: string, onUpdate: (event: CanvasUpdatedEvent) => void): () => void {
-  const source = new EventSource(`/api/events?canvasId=${encodeURIComponent(canvasId)}`);
   const handler = (event: MessageEvent<string>) => {
     try {
       const parsed = JSON.parse(event.data) as CanvasUpdatedEvent;
@@ -399,11 +817,9 @@ export function subscribeCanvasUpdated(canvasId: string, onUpdate: (event: Canva
       /* 单条脏数据不该打断订阅 */
     }
   };
-  source.addEventListener('canvas-updated', handler as EventListener);
-  return () => {
-    source.removeEventListener('canvas-updated', handler as EventListener);
-    source.close();
-  };
+  return subscribeEventStream(`/api/events?canvasId=${encodeURIComponent(canvasId)}`, [
+    { type: 'canvas-updated', handler: handler as EventListener },
+  ]);
 }
 
 export interface PushedLocateEvent {
@@ -421,7 +837,6 @@ export interface PushedLocateEvent {
  * 由页面层决定切不切换。EventSource 断线由浏览器自动重试。
  */
 export function subscribeCanvasLocate(onLocate: (event: PushedLocateEvent) => void): () => void {
-  const source = new EventSource('/api/events');
   const handler = (event: MessageEvent<string>) => {
     try {
       const parsed = JSON.parse(event.data) as PushedLocateEvent;
@@ -430,11 +845,7 @@ export function subscribeCanvasLocate(onLocate: (event: PushedLocateEvent) => vo
       /* 单条脏数据不该打断订阅 */
     }
   };
-  source.addEventListener('locate', handler as EventListener);
-  return () => {
-    source.removeEventListener('locate', handler as EventListener);
-    source.close();
-  };
+  return subscribeEventStream('/api/events', [{ type: 'locate', handler: handler as EventListener }]);
 }
 
 /* ── Agent 运行（方案 §12/§13）：起 run → SSE 推事件 → 可停止 ── */
@@ -453,6 +864,8 @@ export interface ChatRunRequest {
   assistantMessageId: string;
   /** 本轮对话显式选择的语言模型和生图模型。 */
   modelSelection?: ChatModelSelection;
+  /** 本轮角色快照；没有选择角色时不发送。 */
+  agentRole?: ChatRoleSnapshot;
 }
 
 export type ChatRunEvent =
@@ -486,7 +899,7 @@ export async function startChatRun(request: ChatRunRequest): Promise<string> {
  * 刷新页面后凭 store 里留下的 runId 重连，不会丢中间过程。
  */
 export function subscribeChatRunEvents(runId: string, onEvent: (event: ChatRunEvent) => void): () => void {
-  const source = new EventSource(`/api/chat/runs/${encodeURIComponent(runId)}/events`);
+  let cleanup = () => {};
   const types: Array<ChatRunEvent['type']> = [
     'message_delta', 'thinking', 'clarification_requested', 'clarification_answered', 'tool_started', 'tool_progress',
     'image_completed', 'context_updated', 'memory_updated', 'tool_finished', 'message_done', 'error',
@@ -494,18 +907,20 @@ export function subscribeChatRunEvents(runId: string, onEvent: (event: ChatRunEv
   const listeners = types.map((type) => {
     const handler = (event: MessageEvent<string>) => {
       try {
-        onEvent(JSON.parse(event.data) as ChatRunEvent);
+        const parsed = JSON.parse(event.data) as ChatRunEvent;
+        try {
+          onEvent(parsed);
+        } finally {
+          if (parsed.type === 'message_done' || parsed.type === 'error') cleanup();
+        }
       } catch {
         /* 单条脏数据不该打断订阅 */
       }
     };
-    source.addEventListener(type, handler as EventListener);
-    return { type, handler };
+    return { type, handler: handler as EventListener };
   });
-  return () => {
-    for (const { type, handler } of listeners) source.removeEventListener(type, handler as EventListener);
-    source.close();
-  };
+  cleanup = subscribeEventStream(`/api/chat/runs/${encodeURIComponent(runId)}/events`, listeners);
+  return cleanup;
 }
 
 /** 停止运行中的 run：中断在途的模型 / 生图请求。 */

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import CanvasImage from './CanvasImage';
+import { useNearViewport } from './useNearViewport';
 import type { HistoryItem } from '@/types';
 import { deleteImageIfUnused, revealLocalFile } from '@/lib/bridge';
 import './HistoryPanel.css';
@@ -13,14 +14,30 @@ const hiddenKeys = new Set<string>();
 
 /** 历史条目的稳定标识：删除隐藏、勾选计数都用它。 */
 function historyKeyOf(item: HistoryItem): string {
-  return `${item.canvasId}:${item.fileName}:${item.createdAt}`;
+  return `${item.mediaType || 'image'}:${item.canvasId}:${item.fileName}:${item.createdAt}`;
 }
 
 /** 展示形式：宫格（只放图）/ 列表（按天分组 + 小图 + 两行文字）。 */
 type HistoryView = 'grid' | 'list';
+type HistoryMediaFilter = 'all' | 'image' | 'video';
 
 /** 列表视图的一“天”：组标题日期 + 当天条目（进组前 list 已按时间排好序）。 */
 type HistoryDayGroup = { key: string; label: string; items: HistoryItem[] };
+
+function HistoryVideoPreview({ item }: { item: HistoryItem }) {
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const nearViewport = useNearViewport(videoRef, Boolean(item.url));
+
+  return <video ref={videoRef} src={item.url} muted playsInline preload={nearViewport ? 'metadata' : 'none'} />;
+}
+
+function StarIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <path d="m12 3.8 2.5 5.1 5.6.8-4.1 4 .9 5.6-4.9-2.6-4.9 2.6.9-5.6-4.1-4 5.6-.8L12 3.8Z" stroke="currentColor" strokeWidth="1.6" strokeLinejoin="round" />
+    </svg>
+  );
+}
 
 /** 历史面板：贴在左侧功能竖条旁的长方形弹窗，滚轮/触控板滚动查看，点条目开大图。 */
 export default function HistoryPanel({
@@ -29,11 +46,13 @@ export default function HistoryPanel({
   error,
   onSelect,
   onLocate,
+  onSaveAsset,
   onClose,
   onRequestClose,
   onClosed,
   closing,
   anchorRect,
+  inline = false,
 }: {
   items: HistoryItem[];
   loading: boolean;
@@ -41,6 +60,7 @@ export default function HistoryPanel({
   onSelect: (item: HistoryItem) => void;
   /** 定位到该图所属的结果节点：必要时先切画布，再在画布上摊开它的版本宫格。 */
   onLocate?: (item: HistoryItem) => void;
+  onSaveAsset?: (item: HistoryItem) => void;
   /** 立即关闭（选中条目开大图这类不等动画的场景）。 */
   onClose: () => void;
   /** 请求关闭（Esc / 点空白）：先播收起动画，动画结束再回调 onClosed 卸载。 */
@@ -50,7 +70,9 @@ export default function HistoryPanel({
   /** 收起动画播放中：面板挂 is-leaving 并屏蔽指针。 */
   closing?: boolean;
   /** 触发按钮的屏幕锚点：面板贴着它右侧展开。 */
-  anchorRect: { x: number; y: number } | null;
+  anchorRect?: { x: number; y: number } | null;
+  /** 工作台内联展开：跟随结果区排版，不使用画布的固定浮层定位。 */
+  inline?: boolean;
 }) {
   /* hidden 是模块级 hiddenKeys 的本地镜像：删完改镜像触发一次重渲染，条目当场消失，
      模块级那份负责跨「关闭再打开」记住删过谁。 */
@@ -61,6 +83,15 @@ export default function HistoryPanel({
     visible.sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')));
     return visible.slice(0, 300);
   }, [items, hidden]);
+  const [mediaFilter, setMediaFilter] = useState<HistoryMediaFilter>('all');
+  const imageCount = list.filter((item) => item.mediaType !== 'video').length;
+  const videoCount = list.length - imageCount;
+  const visibleList = useMemo(
+    () => mediaFilter === 'all'
+      ? list
+      : list.filter((item) => (item.mediaType || 'image') === mediaFilter),
+    [list, mediaFilter],
+  );
   // 同一节点的版本id → 序号：把 baseVersionId 翻译成“基于 V1”
   const versionIndexById = useMemo(() => {
     const map = new Map<string, number>();
@@ -75,7 +106,7 @@ export default function HistoryPanel({
   const groups = useMemo<HistoryDayGroup[]>(() => {
     const out: HistoryDayGroup[] = [];
     const atOf = new Map<string, number>();
-    for (const item of list) {
+    for (const item of visibleList) {
       const label = formatHistoryDay(item.createdAt);
       const index = atOf.get(label);
       if (index === undefined) {
@@ -86,7 +117,7 @@ export default function HistoryPanel({
       }
     }
     return out;
-  }, [list]);
+  }, [visibleList]);
   const rootRef = useRef<HTMLElement>(null);
   const [position, setPosition] = useState<CSSProperties>({});
 
@@ -98,19 +129,23 @@ export default function HistoryPanel({
   const [confirming, setConfirming] = useState(false);
   const [deleteError, setDeleteError] = useState('');
   const selectedItems = useMemo(
-    () => list.filter((item) => selected.has(historyKeyOf(item))),
-    [list, selected],
+    () => visibleList.filter((item) => selected.has(historyKeyOf(item))),
+    [visibleList, selected],
   );
   const selectedCount = selectedItems.length;
 
   // 贴着锚点右侧展开，竖向居中：宫格内容更高，贴按钮定位容易顶出屏幕
   useLayoutEffect(() => {
+    if (inline) {
+      setPosition({});
+      return;
+    }
     if (!anchorRect) {
       setPosition({});
       return;
     }
     setPosition({ left: anchorRect.x, top: '50%', transform: 'translateY(-50%)' });
-  }, [anchorRect, list.length]);
+  }, [anchorRect, inline, list.length]);
 
   const [revealError, setRevealError] = useState('');
   const revealFolder = useCallback(() => {
@@ -236,7 +271,7 @@ export default function HistoryPanel({
     return (
       <div
         key={historyKeyOf(item)}
-        className={`image-history-item${view === 'list' ? ' is-list' : ' is-grid'}${isSelected ? ' is-selected' : ''}`}
+        className={`image-history-item${view === 'list' ? ' is-list' : ' is-grid'}${isSelected ? ' is-selected' : ''}${item.mediaType === 'video' ? ' is-video' : ''}`}
       >
         <button
           type="button"
@@ -246,7 +281,14 @@ export default function HistoryPanel({
           title={item.prompt || item.canvasName}
         >
           <span className="image-history-item-thumb">
-            <CanvasImage src={item.url} alt={item.prompt || '生成图'} loading="lazy" draggable={false} />
+            {item.mediaType === 'video' ? (
+              <>
+                <HistoryVideoPreview item={item} />
+                <span className="image-history-video-mark" aria-hidden="true"><PlayIcon /></span>
+              </>
+            ) : (
+              <CanvasImage src={item.url} alt={item.prompt || '生成图'} loading="lazy" draggable={false} />
+            )}
             {/* 多选态：图片左上角勾选圈，未选空心、选中实心勾，图片同时压暗一档 */}
             {multi ? (
               <span className={`image-history-check${isSelected ? ' is-on' : ''}`} aria-hidden="true">
@@ -273,6 +315,17 @@ export default function HistoryPanel({
             <LocateIcon />
           </button>
         ) : null}
+        {onSaveAsset && item.mediaType !== 'video' && item.fileName && !multi ? (
+          <button
+            type="button"
+            className="image-history-item-save nodrag"
+            onClick={() => onSaveAsset(item)}
+            title="收藏到资产库"
+            aria-label="收藏到资产库"
+          >
+            <StarIcon />
+          </button>
+        ) : null}
       </div>
     );
   };
@@ -280,7 +333,7 @@ export default function HistoryPanel({
   return (
     <section
       ref={rootRef}
-      className={`image-history-panel${closing ? ' is-leaving' : ''}`}
+      className={`image-history-panel${inline ? ' is-inline' : ''}${closing ? ' is-leaving' : ''}`}
       role="dialog"
       aria-label="生成历史"
       style={position}
@@ -290,7 +343,7 @@ export default function HistoryPanel({
         if (closing && event.target === event.currentTarget) onClosed?.();
       }}
     >
-      <header className="image-history-head">
+      {!inline ? <header className="image-history-head">
         <div className="image-history-title">
           <strong>生成历史</strong>
           <span>({loading ? '…' : list.length})</span>
@@ -312,7 +365,7 @@ export default function HistoryPanel({
               className={`image-history-delete${confirming ? ' is-armed' : ''}`}
               onClick={onDeleteClick}
               disabled={deleting || selectedCount === 0}
-              title={confirming ? '再点一次确认删除' : '删除选中的图片'}
+              title={confirming ? '再点一次确认删除' : '删除选中的媒体文件'}
             >
               {deleting ? '删除中…' : confirming ? '确认删除' : `删除(${selectedCount})`}
             </button>
@@ -346,16 +399,68 @@ export default function HistoryPanel({
         <button type="button" onClick={revealFolder} aria-label="打开本地文件" title="打开本地文件">
           <FolderIcon />
         </button>
-      </header>
+      </header> : null}
+      <nav className="image-history-filter" aria-label="生成历史分类">
+        {([
+          ['all', '全部', list.length],
+          ['image', '图片', imageCount],
+          ['video', '视频', videoCount],
+        ] as const).map(([filter, label, count]) => (
+          <button
+            key={filter}
+            type="button"
+            className="image-history-filter-btn"
+            aria-pressed={mediaFilter === filter}
+            onClick={() => {
+              setMediaFilter(filter);
+              setSelected(new Set());
+              setConfirming(false);
+            }}
+          >
+            {label}<span>{count}</span>
+          </button>
+        ))}
+        {inline ? (
+          <div className="image-history-filter-actions">
+            {revealError ? <span className="image-history-reveal-error" role="alert">{revealError}</span> : null}
+            <div className="image-history-views">
+              <button
+                type="button"
+                className="image-history-view-btn"
+                aria-pressed={view === 'grid'}
+                aria-label="宫格视图"
+                title="宫格视图"
+                onClick={() => setView('grid')}
+              ><GridIcon /></button>
+              <button
+                type="button"
+                className="image-history-view-btn"
+                aria-pressed={view === 'list'}
+                aria-label="列表视图"
+                title="列表视图"
+                onClick={() => setView('list')}
+              ><ListIcon /></button>
+            </div>
+            <button type="button" onClick={revealFolder} aria-label="打开本地文件" title="打开本地文件">
+              <FolderIcon />
+            </button>
+            <button type="button" className="image-history-close" onClick={onClose} aria-label="关闭生成历史" title="关闭生成历史">
+              <CloseIcon />
+            </button>
+          </div>
+        ) : null}
+      </nav>
       <div className={`image-history-scroll${view === 'list' ? ' is-list' : ''}`}>
         {error ? <div className="image-history-error" role="alert">{error}</div> : null}
         {deleteError ? <div className="image-history-error" role="alert">{deleteError}</div> : null}
-        {!loading && !error && list.length === 0 ? (
-          <div className="image-history-empty">还没有生成记录，去画布上发送第一条提示词吧</div>
+        {!loading && !error && visibleList.length === 0 ? (
+          <div className="image-history-empty">
+            {list.length === 0 ? '还没有生成记录，去画布上发送第一条提示词吧' : `暂无${mediaFilter === 'video' ? '视频' : '图片'}记录`}
+          </div>
         ) : null}
         {/* 宫格只放图：prompt/meta/版本文字一律不渲染，信息都在列表视图里 */}
         {view === 'grid'
-          ? list.map((item) => renderItem(item))
+          ? visibleList.map((item) => renderItem(item))
           : groups.map((group) => (
             <section className="image-history-day" key={group.key}>
               <div className="image-history-day-label">{group.label}</div>
@@ -375,12 +480,28 @@ function FolderIcon() {
   );
 }
 
+function CloseIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <path d="m6 6 12 12M18 6 6 18" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" />
+    </svg>
+  );
+}
+
 function LocateIcon() {
   return (
     <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
       <circle cx="12" cy="12" r="6.2" stroke="currentColor" strokeWidth="1.7" />
       <path d="M12 2.6v3.2M12 18.2v3.2M2.6 12h3.2M18.2 12h3.2" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" />
       <circle cx="12" cy="12" r="1.5" fill="currentColor" />
+    </svg>
+  );
+}
+
+function PlayIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <path d="m9 6.5 9 5.5-9 5.5v-11Z" fill="currentColor" />
     </svg>
   );
 }
@@ -446,6 +567,7 @@ function versionTagOf(item: HistoryItem, indexById: Map<string, number>): string
 /** 列表条目第二排元信息：版本 → 画布 → 来源 → 时刻，弱化小字，超长自己收省略号 */
 function historyMetaOf(item: HistoryItem, versionTag: string): string {
   const parts = [
+    item.mediaType === 'video' ? '视频' : '图片',
     versionTag,
     item.canvasName,
     item.source === 'mcp' ? 'Codex' : '浏览器',

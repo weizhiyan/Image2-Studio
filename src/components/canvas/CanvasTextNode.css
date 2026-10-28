@@ -1,0 +1,102 @@
+.canvas-text-node {
+  height: var(--image-node-height, 240px);
+  min-width: 0;
+  min-height: 0;
+  overflow: visible;
+}
+
+.canvas-text-node-body {
+  height: 100%;
+}
+
+.canvas-text-node-kind-label {
+  cursor: grab;
+}
+
+.canvas-text-node-kind-label:active {
+  cursor: grabbing;
+}
+
+.canvas-text-node-card {
+  height: 100%;
+  min-height: 0;
+  padding: var(--spacing-3);
+  gap: var(--spacing-2);
+}
+
+.canvas-text-node-input,
+.canvas-text-node-preview {
+  width: 100%;
+  min-height: 0;
+  flex: 1;
+  box-sizing: border-box;
+  overflow: auto;
+  border: 0;
+  background: transparent;
+  color: var(--color-text-primary);
+  font-family: var(--font-sans);
+  font-size: var(--font-size-sm);
+  line-height: var(--line-height-relaxed);
+  padding: 0;
+}
+
+.canvas-text-node-input {
+  resize: none;
+  outline: none;
+}
+
+.canvas-text-node-preview {
+  cursor: text;
+}
+
+.canvas-text-node-preview .hb-chat-text {
+  color: var(--color-text-primary);
+  font-size: var(--font-size-sm);
+  line-height: var(--line-height-relaxed);
+}
+
+.canvas-text-node-preview .hb-chat-text > :first-child {
+  margin-top: 0;
+}
+
+.canvas-text-node-actions {
+  flex: none;
+  display: flex;
+  justify-content: flex-end;
+}
+
+.canvas-text-node-polish {
+  min-height: var(--control-height-compact);
+  display: inline-flex;
+  align-items: center;
+  gap: var(--spacing-1);
+  padding: 0 var(--spacing-2);
+  border: 0;
+  border-radius: var(--radius-xs);
+  color: var(--color-text-secondary);
+  background: transparent;
+  font: inherit;
+  font-size: var(--font-size-xs);
+  cursor: pointer;
+}
+
+.canvas-text-node-polish svg {
+  width: 14px;
+  height: 14px;
+}
+
+.canvas-text-node-polish:hover:not(:disabled) {
+  color: var(--color-text-primary);
+  background: var(--control-bg-hover);
+}
+
+.canvas-text-node-polish:disabled {
+  color: var(--color-text-tertiary);
+  cursor: default;
+  opacity: 0.55;
+}
+
+.canvas-text-node-polish:focus-visible {
+  outline: 1px solid var(--control-border-focus);
+  outline-offset: 1px;
+}

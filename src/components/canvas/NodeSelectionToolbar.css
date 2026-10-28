@@ -1,9 +1,59 @@
 /* 结果工具栏（Figma 2664:1926）在 ImageNodes.css 基础样式之上的增量。
- * 基础形状（定位、容器玻璃、图标钮、分隔线）都在 ImageNodes.css:1209 起，禁改；
- * 这里补两类：一是「重新生成」淡底图标钮，二是按定稿还原的钮宽 / 图标尺寸。 */
+ * 基础形状（定位、容器玻璃、图标钮、分隔线）都在 ImageNodes.css:1209 起；
+ * 这里补功能气泡、焦点反馈、危险操作，以及缩小一档的图标尺寸。
+ * 点击命中区保持原定稿度量：普通钮 32×32、放大/绘画 36×32、重新生成 42×32。 */
+
+.image-selection-toolbar > button {
+  position: relative;
+}
+
+.image-selection-toolbar > button:focus-visible {
+  background: var(--color-ui-control-hover);
+  color: var(--color-text-primary);
+  outline: 1px solid var(--color-ui-border-strong);
+  outline-offset: 1px;
+}
+
+.image-selection-toolbar-tooltip {
+  --tooltip-offset-y: var(--spacing-2);
+  position: absolute;
+  bottom: calc(100% + var(--spacing-2));
+  left: 50%;
+  z-index: 2;
+  width: max-content;
+  max-width: min(220px, calc(100vw - 32px));
+  border: 1px solid var(--surface-popover-border);
+  border-radius: var(--radius-xs);
+  background: var(--surface-popover-glass-bg);
+  box-shadow: var(--surface-popover-glass-shadow);
+  color: var(--color-text-primary);
+  padding: 6px 8px;
+  font-family: var(--font-sans);
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-medium);
+  line-height: 1.4;
+  text-align: center;
+  white-space: normal;
+  pointer-events: none;
+  user-select: none;
+  opacity: 0;
+  transform: translate(-50%, var(--tooltip-offset-y));
+  transition:
+    opacity var(--motion-tooltip) var(--ease-tooltip),
+    transform var(--motion-tooltip) var(--ease-tooltip);
+  backdrop-filter: var(--surface-popover-glass-blur);
+  -webkit-backdrop-filter: var(--surface-popover-glass-blur);
+}
+
+.image-selection-toolbar > button:hover > .image-selection-toolbar-tooltip,
+.image-selection-toolbar > button:focus-visible > .image-selection-toolbar-tooltip {
+  opacity: 1;
+  transform: translate(-50%, 0);
+}
 
 .image-selection-toolbar .image-selection-toolbar-accent {
   width: 42px;
+  height: 32px;
   background: var(--color-ui-control-hover);
   color: var(--color-text-primary);
 }
@@ -12,30 +62,59 @@
   background: var(--color-ui-control-active);
 }
 
+.image-selection-toolbar .image-selection-toolbar-danger:hover:not(:disabled),
+.image-selection-toolbar .image-selection-toolbar-danger:focus-visible {
+  background: color-mix(in srgb, var(--color-accent-red) 12%, transparent);
+  color: var(--color-accent-red);
+}
+
+.image-selection-toolbar .image-selection-toolbar-glyph-sm.is-copied {
+  color: var(--color-brand);
+}
+
 /* ── Figma 2664:1926 度量对齐 ────────────────────────────────────────────
    基础规则（ImageNodes.css:1231 起，禁改）把图标钮一律做成 32×32、svg 压到 17px，
-   那是旧手写图标的尺寸；换成 Figma 资产后按定稿逐项还原：
-   - 放大 / 绘画：20px 图标 → 钮 36×32（图标 x=8，左右各留 8）
-   - 二次编辑：18px 图标 + 文字，宽度跟内容走（定稿 90）
+   那是旧手写图标的尺寸。本轮将图标统一缩小一档，但不改变按钮命中区：
+   - 放大 / 绘画：18px 图标 → 钮仍为 36×32
+   - 二次编辑 / 重新生成：16px 图标 → 文字钮自动宽 / 淡底钮仍为 42×32
+   - 复制提示词 / 删除节点：16px 图标 → 普通钮仍为 32×32
    全部用「类名 + 类名」两级选择器，特异性稳压 ImageNodes.css 的同名基础规则，
    不依赖两个文件的注入顺序。 */
 .image-selection-toolbar > button.image-selection-toolbar-glyph-lg {
   width: 36px;
+  height: 32px;
 }
 
 .image-selection-toolbar > button.image-selection-toolbar-glyph-lg svg {
-  width: 20px;
-  height: 20px;
+  width: var(--icon-glyph-md);
+  height: var(--icon-glyph-md);
 }
 
-/* 「二次编辑」文案 13px：定稿 text-13px，与生成工具栏同档（基础样式是 11px） */
+.image-selection-toolbar > button.image-selection-toolbar-glyph-sm {
+  width: 32px;
+  height: 32px;
+}
+
+/* 「二次编辑」文案 13px，与生成工具栏同档（基础样式是 11px）。 */
 .image-selection-toolbar > button.image-selection-toolbar-text {
+  height: 32px;
   font-size: var(--font-size-base);
 }
 
-/* 二次编辑 / 重新生成：图标同为 18px（定稿），前者宽度跟内容走 */
+/* 二次编辑 / 重新生成 / 复制提示词 / 删除：统一缩小为 16px 图标。 */
 .image-selection-toolbar > button.image-selection-toolbar-text svg,
-.image-selection-toolbar > button.image-selection-toolbar-accent svg {
-  width: 18px;
-  height: 18px;
+.image-selection-toolbar > button.image-selection-toolbar-accent svg,
+.image-selection-toolbar > button.image-selection-toolbar-glyph-sm svg {
+  width: var(--icon-glyph-sm);
+  height: var(--icon-glyph-sm);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .image-selection-toolbar {
+    animation: none;
+  }
+
+  .image-selection-toolbar-tooltip {
+    transition: none;
+  }
 }

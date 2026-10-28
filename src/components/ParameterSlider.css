@@ -1,0 +1,98 @@
+.parameter-slider {
+  min-width: 0;
+  display: grid;
+  gap: var(--spacing-1);
+}
+
+.parameter-slider-main {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--spacing-2);
+}
+
+.parameter-slider-main input[type="range"] {
+  width: 100%;
+  height: var(--control-height);
+  min-width: 0;
+  margin: 0;
+  appearance: none;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: linear-gradient(
+    to right,
+    var(--color-ui-control-active) 0 var(--parameter-slider-progress),
+    var(--segment-track-bg) var(--parameter-slider-progress) 100%
+  );
+  cursor: pointer;
+}
+
+.parameter-slider-main input[type="range"]::-webkit-slider-runnable-track {
+  height: var(--control-height);
+  border-radius: var(--radius-sm);
+  background: transparent;
+}
+
+.parameter-slider-main input[type="range"]::-webkit-slider-thumb {
+  width: var(--spacing-6);
+  height: var(--control-height-compact);
+  margin-top: calc((var(--control-height) - var(--control-height-compact)) / 2);
+  appearance: none;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: var(--segment-thumb-bg);
+  box-shadow: var(--segment-thumb-shadow);
+}
+
+.parameter-slider-main input[type="range"]::-moz-range-track {
+  height: var(--control-height);
+  border-radius: var(--radius-sm);
+  background: transparent;
+}
+
+.parameter-slider-main input[type="range"]::-moz-range-thumb {
+  width: var(--spacing-6);
+  height: var(--control-height-compact);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: var(--segment-thumb-bg);
+  box-shadow: var(--segment-thumb-shadow);
+}
+
+.parameter-slider-main input[type="range"]:focus-visible {
+  outline: 1px solid var(--control-border-focus);
+  outline-offset: 2px;
+}
+
+.parameter-slider-main input[type="range"]:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+
+.parameter-slider-output {
+  min-width: 64px;
+  height: var(--control-height);
+  box-sizing: border-box;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--control-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-ui-control);
+  color: var(--color-text-primary);
+  padding: 0 var(--spacing-3);
+  font-size: var(--font-size-sm);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.parameter-slider-scale {
+  min-width: 0;
+  display: flex;
+  justify-content: space-between;
+  gap: var(--spacing-2);
+  color: var(--color-text-tertiary);
+  font-size: var(--font-size-2xs);
+  font-variant-numeric: tabular-nums;
+}

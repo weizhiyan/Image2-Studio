@@ -417,7 +417,7 @@ export async function callTextModel(profile: ModelProfile, params: TextCallParam
  */
 export type ReferenceUsage = 'style' | 'edit';
 
-const EDIT_HINTS = /(基于|改成|换成|换上|加上|去掉|去除|删掉|把这张|在这张|修改|调整这|[余其]中|based on|modify|edit|replace|remove|add to|change)/i;
+const EDIT_HINTS = /(基于|改成|改为|换成|换上|加上|去掉|去除|删掉|扩图|扩展画布|延展画布|补全画面|补足画面|把这张|在这张|修改|调整这|[余其]中|based on|modify|edit|replace|remove|add to|change|outpaint)/i;
 const GEN_HINTS = /(生成|画一|做一|来一|创作|新的|generate|create|make a)/i;
 
 export function detectReferenceUsage(prompt: string): ReferenceUsage {
@@ -474,8 +474,11 @@ export async function enhancePromptDetailed(profile: ModelProfile, params: Enhan
   // 而 chips 序号 = 本数组下标顺序。不写清楚，模型会按画面内容自行配对，张冠李戴。
   const numbering = imageUrls.map((_, index) => `参考图 ${index + 1} = 第 ${index + 1} 张图`).join('，');
   const usage = params.usage || 'style';
+  const isOutpaintRequest = /(扩图|扩展画布|延展画布|补全画面|补足画面|扩展到|改为\s*\d{1,2}\s*[:：]\s*\d{1,2})/i.test(params.prompt);
   const usageRule = usage === 'edit'
-    ? `\n\n本次用法：图生图——保留参考图的主体与构图，只把用户要求的改动应用上去，其余保持原样。`
+    ? isOutpaintRequest
+      ? `\n\n本次用法：扩图 / 画布延展。不是重绘，也不是风格参考。必须保留参考图中已有的主体、位置、比例、视角、光线、色彩和细节，原图区域只作为不可改动的已存在画面；只描述需要新增的画布区域及其与原图边缘的自然衔接。若用户指定主体位于左侧、右侧留白等空间关系，必须原样保留，不得把原图主体改成新的主体。`
+      : `\n\n本次用法：图生图——保留参考图的主体与构图，只把用户要求的改动应用上去，其余保持原样。`
     : `\n\n本次用法：风格参考。请按这个思路写提示词：参考图只贡献色系、光线氛围、质感与情绪，最终提示词必须正面描述一个与参考图主体不同的全新场景——新的主体、新的视角或新的构图完整写出来（比如把灯塔换成一道从云海中崛起的山脊），不要只换角度保留原主体，也不要罗列"不要出现什么"，用"画面里有什么"来写。若用户要求这张图"做背景 / 放在某页 / 结尾用"，在提示词里写明为文字预留的干净区域的位置与大致占比（如 upper third in deep blue for a title, lower two thirds calm）。若同时给了页面参考图：把它当版式锚点，描述它的留白结构让新图适配，而不要复刻页面里的内容。`;
   const referenceGuide = imageUrls.length > 1
       ? `\n\n（本次附带 ${imageUrls.length} 张参考图，按消息中的提供顺序编号：${numbering}。用户提到的「图一 / 图二 / 图1 / 图2」等说法一律按此编号对应，不要按画面内容自行调换顺序。${usageRule}\n请在 JSON 的 referenceRoles 中标注每张图的作用；不要把参考图分析或说明文字写进 prompt。）`
@@ -505,6 +508,52 @@ export async function enhancePromptDetailed(profile: ModelProfile, params: Enhan
 
 export async function enhancePrompt(profile: ModelProfile, params: EnhanceParams): Promise<string> {
   return (await enhancePromptDetailed(profile, params)).prompt;
+}
+
+export function buildVideoPromptSpec(input: {
+  ratio?: string;
+  seconds?: number;
+  resolution?: string;
+  referenceMode?: string;
+}): string {
+  const referenceLabel = input.referenceMode === 'style'
+    ? '风格参考图'
+    : input.referenceMode === 'last_frame'
+      ? '尾帧参考图'
+      : '首帧参考图';
+  return [
+    '你是视频生成提示词编辑器。把用户原始描述整理成可直接提交给视频生成模型的一段提示词。',
+    '只输出最终提示词，不要标题、解释、Markdown、JSON 或选项。保持用户使用的主要语言。',
+    '完整保留用户指定的主体、动作、场景、风格和因果关系；不能替换主体，不能擅自增加角色、道具、剧情或场景。',
+    '把描述整理为清楚的时间推进：开场状态、主要动作、镜头运动、结束状态。用户未指定的运动和节奏只做克制补充，不要堆叠多个互相冲突的运镜。',
+    `目标参数：画幅 ${input.ratio || '16:9'}，时长 ${Number(input.seconds) || 5} 秒，清晰度 ${input.resolution || '480p'}。这些是生成参数，不要把它们变成画面中的文字。`,
+    `如有连接图片，按「${referenceLabel}」理解用户希望的用途。不要声称看到了图片内容；只依据用户文本描述整理动作与镜头。`,
+  ].join('\n');
+}
+
+export async function optimizeVideoPrompt(profile: ModelProfile, input: {
+  prompt: string;
+  ratio?: string;
+  seconds?: number;
+  resolution?: string;
+  referenceMode?: string;
+}): Promise<string> {
+  const prompt = String(input.prompt || '').trim();
+  if (!prompt) throw new Error('视频描述不能为空');
+  const result = await callTextModel(profile, {
+    systemSpec: buildVideoPromptSpec(input),
+    userText: prompt,
+    imageUrls: [],
+    maxTokens: 1000,
+  });
+  const optimized = stripFences(result).trim();
+  if (!optimized || optimized.startsWith('{') || /作为(?:一个)?(?:人工智能|AI|语言模型)/.test(optimized)) {
+    throw new Error('语言模型没有返回可用的视频提示词');
+  }
+  if (optimized.length < 6 || optimized.split(/\s+/).filter(Boolean).length > 400) {
+    throw new Error('视频提示词长度异常，请缩短原始描述后重试');
+  }
+  return optimized;
 }
 
 /** 通用文本问答：偏好归纳这类非生图任务复用同一条调用链（格式回落 + 人话报错）。 */

@@ -31,8 +31,47 @@ export function AiGlyphIcon() {
   );
 }
 
-/** 下拉箭头：工具栏各下拉触发器尾部。 */
-export function ChevronGlyphIcon() {
+/** 复制提示词：双层文档与文字行，和「复制图片」的介质语义区分开。 */
+export function CopyPromptGlyphIcon() {
+  return (
+    <svg width={18} height={18} viewBox="0 0 18 18" fill="none" aria-hidden="true">
+      <rect x="6.25" y="5.25" width="8.5" height="10" rx="1.75" stroke="currentColor" strokeWidth="1.4" />
+      <path d="M4.35 12.8h-.85A1.75 1.75 0 0 1 1.75 11.05V5a1.75 1.75 0 0 1 1.75-1.75h5.3" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+/** 删除节点：工具栏危险操作使用，形状与现有 18×18 图标集一致。 */
+export function DeleteGlyphIcon() {
+  return (
+    <svg width={18} height={18} viewBox="0 0 18 18" fill="none" aria-hidden="true">
+      <path d="M3.25 5.25h11.5M7 2.75h4M5.25 5.25l.6 9.05a1.25 1.25 0 0 0 1.25 1.2h3.8a1.25 1.25 0 0 0 1.25-1.2l.6-9.05M7.4 8v4.5M10.6 8v4.5" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+/** 视频：摄像机外形（视频工具栏「视频参数」触发器）。新增图标，无 Figma 资产，
+ *  沿用同文件 20×20 viewBox + currentColor 的约定，其余图标未动。 */
+export function VideoGlyphIcon() {
+  return (
+    <svg width={20} height={20} viewBox="0 0 20 20" fill="none" aria-hidden="true">
+      <rect x="2.25" y="5" width="11" height="10" rx="2" stroke="currentColor" strokeWidth="1.5" />
+      <path d="M13.25 8.6 17.75 5.9v8.2l-4.5-2.7V8.6Z" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+/** 声音：喇叭（视频工具栏「生成声音」开关）。 */
+export function AudioGlyphIcon() {
+  return (
+    <svg width={18} height={18} viewBox="0 0 18 18" fill="none" aria-hidden="true">
+      <path d="M8.25 3.4 5.2 6H3.25A1.25 1.25 0 0 0 2 7.25v3.5A1.25 1.25 0 0 0 3.25 12h1.95l3.05 2.6A.6.6 0 0 0 9.25 14.2V3.8a.6.6 0 0 0-1-.4Z" stroke="currentColor" strokeWidth="1.4" strokeLinejoin="round" />
+      <path d="M12.4 6.6a3.2 3.2 0 0 1 0 4.8M14.3 4.9a5.4 5.4 0 0 1 0 8.2" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+/** 下拉箭头：工具栏各下拉触发器尾部。 */export function ChevronGlyphIcon() {
   return (
     <svg width={16} height={16} viewBox="0 0 16 16" fill="none" aria-hidden="true">
       <path d="M12.3758 5.17582C12.6101 4.94151 12.99 4.94151 13.2243 5.17582C13.4586 5.41014 13.4586 5.78995 13.2243 6.02426L8.42427 10.8243C8.18995 11.0586 7.81014 11.0586 7.57583 10.8243L2.77583 6.02426C2.54151 5.78995 2.54151 5.41014 2.77583 5.17583C3.01014 4.94151 3.38995 4.94151 3.62426 5.17583L8.00005 9.55161L12.3758 5.17582Z" fill="currentColor" />
@@ -54,6 +93,17 @@ export function DrawGlyphIcon() {
   return (
     <svg width={20} height={20} viewBox="0 0 20 20" fill="none" aria-hidden="true">
       <path d="M7.12811 9.25C7.54212 9.25023 7.87809 9.58594 7.87811 10C7.87811 10.4141 7.54213 10.7498 7.12811 10.75H4.61444C4.03708 10.75 3.56856 11.2185 3.56854 11.7959C3.56877 12.3731 4.03721 12.8408 4.61444 12.8408H15.3869C16.7927 12.8408 17.9328 13.9809 17.9328 15.3867C17.9326 16.7924 16.7926 17.9316 15.3869 17.9316H7.84588C7.4317 17.9316 7.09588 17.5958 7.09588 17.1816C7.09605 16.7676 7.43181 16.4317 7.84588 16.4316H15.3869C15.9642 16.4316 16.4326 15.964 16.4328 15.3867C16.4328 14.8093 15.9643 14.3408 15.3869 14.3408H4.61444C3.20878 14.3408 2.06877 13.2015 2.06854 11.7959C2.06856 10.3901 3.20865 9.25004 4.61444 9.25H7.12811ZM14.9133 2.23633C15.2078 1.99616 15.6426 2.01353 15.9172 2.28809L17.7121 4.08398C18.0048 4.37689 18.0049 4.8517 17.7121 5.14453L12.3264 10.5303C12.1858 10.6707 11.9948 10.7499 11.7961 10.75H10.0002C9.58609 10.75 9.25033 10.4141 9.25018 10V8.20508C9.25018 8.00631 9.32945 7.81543 9.46991 7.6748L14.8566 2.28809L14.9133 2.23633ZM10.7502 8.51563V9.25H11.4855L16.1213 4.61328L15.3859 3.87891L10.7502 8.51563Z" fill="currentColor" />
+    </svg>
+  );
+}
+
+/** 扩图：向四边扩展画布范围。 */
+export function OutpaintGlyphIcon() {
+  return (
+    <svg width={18} height={18} viewBox="0 0 18 18" fill="none" aria-hidden="true">
+      <path d="M4.5 1.5v12.75h12.75" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M7.5 4.5h6v6" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M4.5 4.5H1.5M13.5 16.5v-2.25" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
     </svg>
   );
 }

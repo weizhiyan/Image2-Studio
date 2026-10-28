@@ -13,13 +13,14 @@
   pointer-events: auto;
   border: 1px solid var(--surface-popover-border);
   border-radius: var(--radius-full);
-  background: color-mix(in srgb, var(--control-bg) 88%, transparent);
+  background: var(--surface-popover-glass-bg);
   box-shadow: var(--shadow-sm);
-  backdrop-filter: blur(12px) saturate(130%);
-  -webkit-backdrop-filter: blur(12px) saturate(130%);
+  backdrop-filter: var(--surface-popover-glass-blur);
+  -webkit-backdrop-filter: var(--surface-popover-glass-blur);
 }
 
 .canvas-dock-btn {
+  position: relative;
   width: 26px;
   height: 26px;
   display: inline-flex;
@@ -133,13 +134,14 @@
   pointer-events: auto;
   border: 1px solid var(--surface-popover-border);
   border-radius: var(--radius-full);
-  background: color-mix(in srgb, var(--control-bg) 88%, transparent);
+  background: var(--surface-popover-glass-bg);
   box-shadow: var(--shadow-sm);
-  backdrop-filter: blur(12px) saturate(130%);
-  -webkit-backdrop-filter: blur(12px) saturate(130%);
+  backdrop-filter: var(--surface-popover-glass-blur);
+  -webkit-backdrop-filter: var(--surface-popover-glass-blur);
 }
 
 .canvas-rail-btn {
+  position: relative;
   width: 32px;
   height: 32px;
   display: inline-flex;
@@ -239,4 +241,66 @@
   background: color-mix(in srgb, var(--color-paper) 16%, transparent);
   color: var(--color-paper);
   box-shadow: 0 0 0 1px color-mix(in srgb, var(--color-paper) 20%, transparent);
+}
+
+/* 画布功能入口的悬停说明：文案直接复用按钮的可访问名称，避免原生 title
+   与自定义气泡重复出现。气泡只过渡 opacity / transform，不参与布局。 */
+.canvas-dock-btn::after,
+.canvas-rail-btn::after {
+  content: attr(aria-label);
+  position: absolute;
+  z-index: 130;
+  width: max-content;
+  max-width: min(260px, calc(100vw - 32px));
+  border: 1px solid var(--surface-popover-border);
+  border-radius: var(--radius-xs);
+  background: var(--surface-popover-glass-bg);
+  box-shadow: var(--surface-popover-glass-shadow);
+  color: var(--color-text-primary);
+  padding: 6px 8px;
+  font-family: var(--font-sans);
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-medium);
+  line-height: 1.4;
+  text-align: center;
+  white-space: normal;
+  pointer-events: none;
+  user-select: none;
+  opacity: 0;
+  transition:
+    opacity var(--motion-tooltip) var(--ease-tooltip),
+    transform var(--motion-tooltip) var(--ease-tooltip);
+  backdrop-filter: var(--surface-popover-glass-blur);
+  -webkit-backdrop-filter: var(--surface-popover-glass-blur);
+}
+
+.canvas-dock-btn::after {
+  bottom: calc(100% + var(--spacing-2));
+  left: 50%;
+  transform: translate(-50%, var(--spacing-1));
+}
+
+.canvas-rail-btn::after {
+  top: 50%;
+  left: calc(100% + var(--spacing-2));
+  transform: translate(calc(0px - var(--spacing-1)), -50%);
+}
+
+.canvas-dock-btn:hover::after,
+.canvas-dock-btn:focus-visible::after {
+  opacity: 1;
+  transform: translate(-50%, 0);
+}
+
+.canvas-rail-btn:hover::after,
+.canvas-rail-btn:focus-visible::after {
+  opacity: 1;
+  transform: translate(0, -50%);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .canvas-dock-btn::after,
+  .canvas-rail-btn::after {
+    transition: none;
+  }
 }
