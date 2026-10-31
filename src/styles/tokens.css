@@ -30,6 +30,8 @@
 
 :root,
 [data-theme="dark"] {
+  color-scheme: dark;
+
   /* ── 背景色 ── */
   --color-bg-base: #18181A;
   --color-bg-canvas: #0E0E0F;
@@ -72,6 +74,10 @@
   --surface-popover-glass-shadow: 0 18px 42px var(--shadow-ink-deep);
   --surface-section-bg: var(--color-ui-control-panel);
   --surface-section-border: var(--color-ui-border-subtle);
+  --surface-modal-bg: color-mix(in srgb, var(--surface-panel-bg) 92%, transparent);
+  --surface-image-preview-bg: color-mix(in srgb, var(--color-ui-panel) 86%, transparent);
+  --surface-image-preview-panel-bg: color-mix(in srgb, var(--color-ui-control) 82%, transparent);
+  --surface-image-preview-control-bg: var(--color-ui-control);
   /* Figma 861:794. Kept separate because this translucent surface uses
      different resolved values from the app's opaque base/hover tokens. */
   --work-dialog-bg: rgb(24 24 26 / 90%);
@@ -110,9 +116,23 @@
   --control-border: var(--color-ui-border-subtle);
   --control-border-hover: var(--color-ui-border);
   --control-border-focus: var(--color-border-focus);
+  --agent-connect-card-bg: var(--control-bg);
   --chat-fab-border: color-mix(in srgb, var(--color-shadow) 20%, transparent);
   --focus-ring: none;
   --divider-subtle: var(--color-ui-border-subtle);
+
+  /* 画布左侧功能轨：深色主题保持浅色操作层，浅色主题翻转为墨色。 */
+  --canvas-rail-action-bg: var(--color-paper);
+  --canvas-rail-action-hover-bg: color-mix(in srgb, var(--color-paper) 72%, transparent);
+  --canvas-rail-action-fg: var(--color-ink);
+  --canvas-rail-hover-bg: color-mix(in srgb, var(--color-paper) 12%, transparent);
+  --canvas-rail-active-bg: color-mix(in srgb, var(--color-paper) 88%, transparent);
+  --canvas-rail-active-fg: var(--color-ink);
+  --canvas-rail-active-ring: color-mix(in srgb, var(--color-paper) 26%, transparent);
+  --canvas-rail-tool-fg: var(--color-paper);
+  --canvas-rail-tool-hover-bg: color-mix(in srgb, var(--color-paper) 14%, transparent);
+  --canvas-rail-tool-active-bg: color-mix(in srgb, var(--color-paper) 16%, transparent);
+  --canvas-rail-tool-active-fg: var(--color-paper);
 
   /* ── 分段控件 Segmented ── */
   /* 轨道与滑块都是**相对量**：轨道用墨色压出凹槽，滑块用抬升面色 + 发丝描边 + 微阴影。
@@ -179,6 +199,7 @@
 
   /* ── 画布纹理 ── */
   --color-canvas-dot: #373745;
+  --color-edge-beam-highlight: var(--color-text-primary);
 
   /* ── 生成矩阵色盘（RunningMatrixField 的 readPalette 读取）──────────────
      对齐参考站 AnimShapeField：10 纯色 + 7 双色径向渐变，canvas 运行时读取，
@@ -315,6 +336,7 @@
   --motion-tooltip: var(--motion-normal); /* 悬停气泡统一时长 */
   --motion-slow: 220ms;      /* 弹窗、抽屉、面板入场 */
   --motion-slower: 360ms;    /* 大面积布局位移、画布切换 */
+  --motion-theme-switch: 480ms; /* 深浅主题圆形扩散 */
   --motion-stagger: 80ms;    /* 错相延迟：多段 transition / 逐条入场的 delay */
 
   /* 循环动画（spinner / 呼吸 / 流光）。与上面分开，避免把 1.4s 当"过渡"用。 */
@@ -404,8 +426,10 @@ html.floating-shell {
 }
 
 [data-theme="light"] {
+  color-scheme: light;
+
   --color-bg-base: #F5F5F7;
-  --color-bg-canvas: rgb(24 24 26 / 8%);
+  --color-bg-canvas: #F5F5F7;
   --color-bg-surface: #FFFFFF;
   --color-bg-overlay: rgb(242 243 245 / 96%);
   --color-bg-hover: rgb(24 24 26 / 4%);
@@ -432,14 +456,18 @@ html.floating-shell {
   --surface-panel-border: var(--color-ui-border-subtle);
   --surface-popover-bg: var(--color-bg-surface);
   --surface-popover-border: var(--color-ui-border-subtle);
-  /* 与深色块同值：color-mix 内的 --color-ui-control 在浅色下自动变浅，玻璃仍是浅色半透明 */
-  --surface-popover-glass-bg: color-mix(in srgb, var(--color-ui-control) 88%, transparent);
+  /* 浅色弹层统一纯白；透明度会透出画布网点，白底反而发灰。 */
+  --surface-popover-glass-bg: var(--color-paper);
   --surface-popover-glass-blur: blur(56px) saturate(148%);
   --surface-modal-backdrop-blur: blur(16px) saturate(128%);
   --chat-composer-glass-bg: color-mix(in srgb, var(--color-bg-canvas) 60%, transparent);
   --surface-popover-glass-shadow: 0 18px 42px var(--shadow-ink-deep);
   --surface-section-bg: var(--color-ui-control-panel);
   --surface-section-border: var(--color-ui-border-subtle);
+  --surface-modal-bg: var(--color-paper);
+  --surface-image-preview-bg: var(--color-paper);
+  --surface-image-preview-panel-bg: var(--color-ui-control-panel);
+  --surface-image-preview-control-bg: var(--color-ui-control-panel);
   /* 浅色下这个悬浮对话是纯白面，不是半透明玻璃：原来的 rgb(245 245 247 / 90%)
      叠 60px backdrop-blur 会透出底下的内容而发灰，用户气泡（同为白）也就和底面
      糊在一起。面改纯白，气泡改成浅灰，靠明度差分层。 */
@@ -470,9 +498,22 @@ html.floating-shell {
   --control-border: var(--color-ui-border-subtle);
   --control-border-hover: var(--color-ui-border);
   --control-border-focus: var(--color-border-focus);
-  --chat-fab-border: color-mix(in srgb, var(--color-shadow) 20%, transparent);
+  --agent-connect-card-bg: var(--color-ui-control-panel);
+  --chat-fab-border: color-mix(in srgb, var(--color-shadow) 10%, transparent);
   --focus-ring: none;
   --divider-subtle: var(--color-ui-border-subtle);
+
+  --canvas-rail-action-bg: var(--color-ink);
+  --canvas-rail-action-hover-bg: color-mix(in srgb, var(--color-ink) 82%, transparent);
+  --canvas-rail-action-fg: var(--color-paper);
+  --canvas-rail-hover-bg: color-mix(in srgb, var(--color-ink) 8%, transparent);
+  --canvas-rail-active-bg: color-mix(in srgb, var(--color-ink) 12%, transparent);
+  --canvas-rail-active-fg: var(--color-text-primary);
+  --canvas-rail-active-ring: color-mix(in srgb, var(--color-ink) 16%, transparent);
+  --canvas-rail-tool-fg: var(--color-text-secondary);
+  --canvas-rail-tool-hover-bg: color-mix(in srgb, var(--color-ink) 8%, transparent);
+  --canvas-rail-tool-active-bg: color-mix(in srgb, var(--color-ink) 12%, transparent);
+  --canvas-rail-tool-active-fg: var(--color-text-primary);
 
   /* 浅色滑块保持接近白（iOS 分段控件就是白滑块），关键是补上发丝描边 + 微阴影 ——
      原来那块 #FFFFFF 既无描边也无阴影，读起来像"一块纯白色"而不是"一个凸起的滑块"。 */
@@ -482,10 +523,10 @@ html.floating-shell {
   --segment-thumb-shadow: 0 1px 3px rgb(17 19 24 / 15%), 0 0 1px rgb(17 19 24 / 7%);
   --segment-ghost-active-bg: var(--color-interaction-default);
 
-  /* 浅色下轨道接近面板底色，填充回落到控件活动色；滑块改用深色以保持对比。 */
-  --parameter-slider-track-bg: var(--color-ui-control-panel);
-  --parameter-slider-fill-bg: var(--color-paper);
-  --parameter-slider-thumb-bg: var(--color-text-primary);
+  /* 浅色滑块：轨道最浅、已滑动段加深、滑块回到白色，靠明度差表达进度。 */
+  --parameter-slider-track-bg: var(--color-bg-base);
+  --parameter-slider-fill-bg: var(--color-ui-control-active);
+  --parameter-slider-thumb-bg: var(--color-paper);
   --parameter-slider-tick: color-mix(in srgb, var(--color-text-primary) 16%, transparent);
 
   --toast-bg: color-mix(in srgb, var(--color-bg-surface) 88%, transparent);
@@ -528,7 +569,8 @@ html.floating-shell {
   --color-feedback-error-text: color-mix(in srgb, var(--color-accent-red) 82%, var(--color-text-primary));
   --color-feedback-error-outline: color-mix(in srgb, var(--color-accent-red) 30%, transparent);
 
-  --color-canvas-dot: #C6CBD4;
+  --color-canvas-dot: rgb(0 0 0 / 16%);
+  --color-edge-beam-highlight: var(--color-paper);
 
   --color-shadow: #111318;
 

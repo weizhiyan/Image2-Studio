@@ -10,7 +10,7 @@ import { generateImages, normalizeImageSize } from './imageApi.js';
 import { detectReferenceUsage, directStyleNote, enhancePromptDetailed, fidelityForUsage, optimizeVideoPrompt, testTextProfile, usageForGenerateRequest } from './textApi.js';
 import { fetchProviderModels, fetchRemoteImage, testProviderConnection } from './providerApi.js';
 import { ackPendingLocate, addSseClient, countOpenTabs, peekPendingLocate, pushCanvasUpdated, pushImage, pushLocate, pushVideo } from './hub.js';
-import { ChatConflictError, clearChatThread, deleteChatThread, readChatThread, readChatThreads, updateChatMemory, writeClientThread } from './chat.js';
+import { ChatConflictError, clearChatThread, deleteChatThread, readChatThread, readChatThreads, removeChatMediaReferences, updateChatMemory, writeClientThread } from './chat.js';
 import { answerChatRun, buildAgentSystemSpec, confirmChatRun, getChatRunSnapshot, startChatRun, stopChatRun, stopThreadRuns, subscribeChatRun, waitChatRunReady, type StartRunRequest } from './runs.js';
 import { contentTypeOf, copyMediaFile, deleteMediaFile, imageExtensionOf, revealLocalFile, saveDataUrl, safeMediaPath } from './files.js';
 import { createVideoTask, describeVideoModel, downloadVideoUrl, encodeVideoImagesAsDataUrls, getMediaVideoPriceQuote, listVideoModels, normalizeVideoRatio, normalizeVideoResolution, probeVideoConnection, validateVideoConfig, validateVideoImageDataUrls, VideoConfigurationError, VideoImageInputError, VideoRequestError, videoImagesUseDataUrls, videoUploadSupportsInlineDataUrl } from './videoApi.js';
@@ -18,7 +18,7 @@ import { detectVideoProtocol, ensureVideoApiMode } from './videoProtocol.js';
 import { claimVideoDownload, completeVideoTask, confirmVideoSubmission, failVideoSubmission, findVideoTaskByNode, getVideoTaskRecord, markVideoSubmissionUnknown, releaseVideoDownload, removeVideoTask, removeVideoTaskByNode, removeVideoTasksByCanvas, reserveVideoTask } from './videoTasks.js';
 import { describeImageHostFailure, defaultImageHost, imageHostReady, isLegacyDefaultImageHost, readImageHost, resolveImageHost, uploadToImageHost, writeImageHost, EMPTY_IMAGE_HOST, IMAGE_HOST_PRESETS, type ImageHostConfig } from './imageHost.js';
 import { isAgentPresenceFresh, readAgentPresence } from './agentPresence.js';
-import { collectHistoryItems } from './history.js';
+import { collectHistoryItems, normalizeHistoryDeleteTargets, removeHistoryTargetFromCanvas } from './history.js';
 import { addAsset, createAssetFolder, deleteAsset, deleteAssetFolder, listAssets, moveAsset, renameAssetFolder } from './assets.js';
 import { deletePromptSkill, listPromptSkills, savePromptSkill } from './skills.js';
 
@@ -1713,6 +1713,63 @@ function readReferenceUrls(body: { referenceDataUrl?: unknown; referenceDataUrls
         const registry = await readRegistry();
         const docs = await readCanvasDocs();
         json(res, 200, { code: 0, data: collectHistoryItems(docs, registry), msg: 'ok' });
+        return;
+      }
+      if (pathname === '/api/history/delete' && req.method === 'POST') {
+        const body = await readBody(req) as { items?: unknown };
+        const targets = normalizeHistoryDeleteTargets(body.items);
+        if (targets.length === 0) {
+          json(res, 400, { code: 1, data: null, msg: '缺少要删除的历史记录' });
+          return;
+        }
+        try {
+          const changedThreadIds = await removeChatMediaReferences(targets);
+          const now = new Date().toISOString();
+          const changedCanvases: Array<{ canvasId: string; updatedAt: string }> = [];
+          const candidateFiles = new Set<string>();
+          await withCanvasWriteLock(async () => {
+            const docs = await readCanvasDocs();
+            for (const target of targets) {
+              if (target.fileName) candidateFiles.add(target.fileName);
+              const doc = docs[target.canvasId];
+              if (!doc) continue;
+              const result = removeHistoryTargetFromCanvas(doc, target, now);
+              for (const fileName of result.removedFileNames) {
+                if (fileName) candidateFiles.add(fileName);
+              }
+              if (!result.changed) continue;
+              docs[target.canvasId] = doc;
+              changedCanvases.push({ canvasId: target.canvasId, updatedAt: doc.updatedAt || now });
+            }
+            if (changedCanvases.length > 0) {
+              await backupCanvasDocs();
+              await atomicWriteJson(CANVAS_DOCS_FILE, docs);
+            }
+          });
+          for (const target of targets) {
+            if (target.mediaType === 'video') await removeVideoTaskByNode(target.nodeId);
+          }
+          const deletedFiles: string[] = [];
+          for (const fileName of candidateFiles) {
+            if (await mediaFileIsReferenced(fileName)) continue;
+            if (await deleteMediaFile(fileName)) deletedFiles.push(fileName);
+          }
+          for (const entry of changedCanvases) {
+            pushCanvasUpdated({ type: 'canvas-updated', canvasId: entry.canvasId, updatedAt: entry.updatedAt });
+          }
+          json(res, 200, {
+            code: 0,
+            data: {
+              deletedKeys: targets.map((target) => target.key),
+              changedCanvasIds: [...new Set(changedCanvases.map((entry) => entry.canvasId))],
+              changedThreadIds,
+              deletedFiles,
+            },
+            msg: 'ok',
+          });
+        } catch (error) {
+          json(res, 500, { code: 1, data: null, msg: error instanceof Error ? error.message : '删除历史记录失败' });
+        }
         return;
       }
       if (pathname === '/api/assets' && req.method === 'GET') {

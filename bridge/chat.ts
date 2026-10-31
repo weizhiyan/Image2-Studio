@@ -2,6 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { CHAT_DOCS_FILE } from './paths.js';
+import { stripChatMediaReferences, type HistoryDeleteTarget } from './history.js';
 import { normalizePromptRoleSnapshot } from './skills.js';
 
 /**
@@ -217,6 +218,7 @@ function sanitizeMemory(raw: unknown): Record<string, unknown> | undefined {
     };
     memory.visualWorkingSet = {
       base: cleanRef(workingSet.base) || undefined,
+      sourceAnchor: cleanRef(workingSet.sourceAnchor) || undefined,
       references: Array.isArray(workingSet.references) ? workingSet.references.map(cleanRef).filter((entry): entry is Record<string, unknown> => Boolean(entry)).slice(-MAX_MEMORY_LIST) : [],
       recentOutputs: Array.isArray(workingSet.recentOutputs) ? workingSet.recentOutputs.map(cleanRef).filter((entry): entry is Record<string, unknown> => Boolean(entry)).slice(-MAX_MEMORY_LIST) : [],
       inheritMode: workingSet.inheritMode === 'new' || workingSet.inheritMode === 'edit' ? workingSet.inheritMode : 'auto',
@@ -428,6 +430,28 @@ export async function readChatThreads(): Promise<ChatThreadRecord[]> {
 
 export async function readChatThread(threadId: string): Promise<ChatThreadRecord | null> {
   return (await readChatDocs()).threads[String(threadId || '').trim()] || null;
+}
+
+/** 删除生成历史时同步清掉线程里的结果图、引用图与视觉记忆，避免对话继续指向已删版本。 */
+export async function removeChatMediaReferences(targets: HistoryDeleteTarget[]): Promise<string[]> {
+  if (targets.length === 0) return [];
+  return withChatWriteLock(async () => {
+    const docs = await readChatDocs();
+    const changedIds: string[] = [];
+    const now = new Date().toISOString();
+    for (const [id, thread] of Object.entries(docs.threads)) {
+      const result = stripChatMediaReferences(thread, targets);
+      if (!result.changed) continue;
+      docs.threads[id] = {
+        ...result.thread,
+        revision: (thread.revision || 0) + 1,
+        updatedAt: now,
+      };
+      changedIds.push(id);
+    }
+    if (changedIds.length > 0) await writeChatDocs(docs);
+    return changedIds;
+  });
 }
 
 /** 对话文档写队列：与 canvas-docs 同理，读-改-写整份 JSON 必须串成一条链。 */

@@ -2134,6 +2134,7 @@ function CanvasWorkspace() {
     const canvasId = ref.canvasId || activeId;
     const go = () => {
       let frames = 0;
+      let pulledRemote = false;
       const focusWhenReady = () => {
         const node = nodesRef.current.find((item) => item.id === ref.nodeId);
         if (node) {
@@ -2149,7 +2150,41 @@ function CanvasWorkspace() {
           markFreshResultNode(ref.nodeId);
           return;
         }
-        if (frames++ < 90) window.requestAnimationFrame(focusWhenReady);
+        // 本地状态可能落后于 bridge（SSE 丢事件 / 标签页后台休眠）。
+        // 同画布内先补拉一次最新文档，再继续等 React Flow 同步，避免“对话里有图、画布没节点”。
+        if (!pulledRemote) {
+          pulledRemote = true;
+          void (async () => {
+            try {
+              const remote = (await getCanvases()).find((doc) => doc.id === canvasId);
+              if (remote) {
+                const store = useCanvasStore.getState();
+                if (!store.canvases.some((doc) => doc.id === canvasId)) {
+                  store.mergeCanvases([remote]);
+                } else {
+                  mergeCanvasNodes(canvasId, remote.nodes as CanvasNode[]);
+                }
+                // mergeCanvasNodes 只更新 store；当前画布的 nodesRef 由 hydrate 灌入，
+                // 少了这一步定位轮询仍会看不到刚补回来的节点。
+                if (useCanvasStore.getState().activeId === canvasId) {
+                  hydrateActiveCanvas({
+                    preserveSelection: true,
+                    preservePositions: new Map(nodesRef.current.map((node) => [node.id, node.position])),
+                  });
+                }
+              }
+            } catch {
+              // 离线时继续走本地轮询，不在这里打断定位。
+            }
+            window.requestAnimationFrame(focusWhenReady);
+          })();
+          return;
+        }
+        if (frames++ < 90) {
+          window.requestAnimationFrame(focusWhenReady);
+          return;
+        }
+        showToast('定位失败：画布上还没有这张图，请稍后重试');
       };
       focusWhenReady();
     };
@@ -2177,7 +2212,7 @@ function CanvasWorkspace() {
       }
       window.requestAnimationFrame(() => window.requestAnimationFrame(go));
     })();
-  }, [activeId, patchNode, revealResultNode, markFreshResultNode, mergeCanvasNodes, setActive, showToast]);
+  }, [activeId, patchNode, revealResultNode, markFreshResultNode, mergeCanvasNodes, hydrateActiveCanvas, setActive, showToast]);
   locateChatRefRef.current = locateChatRef;
 
   // 对话线程跟随画布：切画布 = 切到该画布最近更新的线程

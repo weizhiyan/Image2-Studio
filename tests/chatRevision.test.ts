@@ -38,12 +38,12 @@ describe('chat revisions and sanitized snapshots', () => {
   });
 
   it('roundtrips memory boundaries, stats, brief, status and strips unknown fields and giant visual data URLs', async () => {
-    const memory = { version: 1, memoryRevision: 3, summary: '摘要', summaryThroughMessageId: 'u1', clearedThroughMessageId: 'u0', windowMessageCount: 12, windowEstimatedTokens: 4500, compactionStatus: 'failed', warning: '保留原文', goal: { statement: '目标', preserve: ['背景'], rejected: ['改色'], unsafe: 'drop' }, visualWorkingSet: { base: { nodeId: 'n1', url: `data:image/png;base64,${'A'.repeat(70 * 1024)}` } }, unsafe: 'drop' };
+    const memory = { version: 1, memoryRevision: 3, summary: '摘要', summaryThroughMessageId: 'u1', clearedThroughMessageId: 'u0', windowMessageCount: 12, windowEstimatedTokens: 4500, compactionStatus: 'failed', warning: '保留原文', goal: { statement: '目标', preserve: ['背景'], rejected: ['改色'], unsafe: 'drop' }, visualWorkingSet: { base: { nodeId: 'n1', url: `data:image/png;base64,${'A'.repeat(70 * 1024)}` }, sourceAnchor: { nodeId: 'anchor', versionId: 'v1', url: '/api/files/anchor.png' } }, unsafe: 'drop' };
     await chat.putChatThread(thread({ memory }));
     const saved = await chat.readChatThread('t1');
     expect(saved?.memory).toMatchObject({ memoryRevision: 3, summaryThroughMessageId: 'u1', clearedThroughMessageId: 'u0', windowMessageCount: 12, windowEstimatedTokens: 4500, compactionStatus: 'failed', warning: '保留原文', goal: { preserve: ['背景'], rejected: ['改色'] } });
     expect(saved?.memory).not.toHaveProperty('unsafe');
-    expect(saved?.memory?.visualWorkingSet).toMatchObject({ base: { nodeId: 'n1' } });
+    expect(saved?.memory?.visualWorkingSet).toMatchObject({ base: { nodeId: 'n1' }, sourceAnchor: { nodeId: 'anchor', versionId: 'v1' } });
     expect((saved?.memory?.visualWorkingSet as any).base).not.toHaveProperty('url');
   });
 

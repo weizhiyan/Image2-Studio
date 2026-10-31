@@ -193,6 +193,37 @@ describe('buildMemoryContext', () => {
     expect(block).toContain('默认候选基准版本：v1');
   });
 
+  it('keeps the first explicit reference as the task anchor across follow-up turns', () => {
+    const context = buildMemoryContext([
+      msg('user', '按这张参考图继续调整', {
+        attachments: [{ canvasId: 'canvas-1', nodeId: 'ref-1', versionId: 'ref-v1', url: '/api/files/ref.png' }],
+      }),
+      msg('assistant', '已生成。', { media: [{ nodeId: 'out-1', versionId: 'out-v1', url: '/api/files/out.png' }] }),
+      msg('user', '继续把线条加粗'),
+    ]);
+
+    expect(context.visualWorkingSet.sourceAnchor).toMatchObject({
+      canvasId: 'canvas-1', nodeId: 'ref-1', versionId: 'ref-v1',
+    });
+    expect(context.visualWorkingSet.base?.versionId).toBe('out-v1');
+    expect(memoryPromptBlock(context)).toContain('当前任务原图锚点：ref-v1');
+  });
+
+  it('drops the task anchor when the user starts a new request without a reference', () => {
+    const context = buildMemoryContext([
+      msg('user', '按这张参考图继续调整', {
+        attachments: [{ canvasId: 'canvas-1', nodeId: 'ref-1', versionId: 'ref-v1' }],
+      }),
+      msg('assistant', '已生成。', { media: [{ nodeId: 'out-1', versionId: 'out-v1' }] }),
+      msg('user', '另外做一个全新的海报'),
+    ], {
+      visualWorkingSet: { sourceAnchor: { canvasId: 'canvas-1', nodeId: 'ref-1', versionId: 'ref-v1' } },
+    });
+
+    expect(context.visualWorkingSet.inheritMode).toBe('new');
+    expect(context.visualWorkingSet.sourceAnchor).toBeUndefined();
+  });
+
   it('只在当前回合断开继承，后续回合回到最近结果自动继承', () => {
     const messages = [
       msg('assistant', '已生成新方向。', { media: [{ nodeId: 'node-2', versionId: 'v2', url: '/api/files/new.png' }] }),

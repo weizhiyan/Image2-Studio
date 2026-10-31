@@ -174,21 +174,21 @@
   transition: background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out);
 }
 
-/* 悬停：白色 12% 背景才出现，加号同步旋转 45° */
+/* 悬停：轻交互背景才出现，加号同步旋转 45° */
 .canvas-rail-btn:hover:not(:disabled) {
-  background: color-mix(in srgb, var(--color-paper) 12%, transparent);
+  background: var(--canvas-rail-hover-bg);
   color: var(--color-text-primary);
 }
 
-/* + 按钮是主入口：默认实色白底 + 深色图标；悬停时白色降低不透明度 */
+/* + 按钮是主入口：深色主题浅底深图标，浅色主题反转为深底浅图标 */
 .canvas-rail-btn-add {
-  background: var(--color-paper);
-  color: var(--color-ink);
+  background: var(--canvas-rail-action-bg);
+  color: var(--canvas-rail-action-fg);
 }
 
 .canvas-rail-btn-add:hover:not(:disabled) {
-  background: color-mix(in srgb, var(--color-paper) 72%, transparent);
-  color: var(--color-ink);
+  background: var(--canvas-rail-action-hover-bg);
+  color: var(--canvas-rail-action-fg);
 }
 
 .canvas-rail-btn-add svg {
@@ -199,13 +199,12 @@
   transform: rotate(45deg);
 }
 
-/* 激活（如"拖动"工具开启）：近实色白底 + 深色图标 + 细环，与"+"主入口同重量级，
-   在深色画布上一眼能看出"手"已经按下；连同悬停一起覆盖，避免 :hover 抢 specificity */
+/* 激活：主题化实底 + 细环；连同悬停一起覆盖，避免 :hover 抢 specificity */
 .canvas-rail-btn.is-active,
 .canvas-rail-btn.is-active:hover:not(:disabled) {
-  background: color-mix(in srgb, var(--color-paper) 88%, transparent);
-  color: var(--color-ink);
-  box-shadow: 0 0 0 1px color-mix(in srgb, var(--color-paper) 26%, transparent);
+  background: var(--canvas-rail-active-bg);
+  color: var(--canvas-rail-active-fg);
+  box-shadow: 0 0 0 1px var(--canvas-rail-active-ring);
 }
 
 .canvas-rail-btn:disabled {
@@ -232,10 +231,10 @@
   cursor: grabbing;
 }
 
-/* 画布工具切换（选择 / 抓手）：图标常亮白色，激活态只做轻提示——
-   不再用近实色白底去抢「+」主入口的重量，用户要的是"看得出当前是哪个工具"而不是高亮块 */
+/* 画布工具切换（选择 / 抓手）：图标常亮，激活态只做轻提示——
+   不再用近实底去抢「+」主入口的重量，用户要的是"看得出当前是哪个工具"而不是高亮块 */
 .canvas-rail-tool {
-  color: var(--color-paper);
+  color: var(--canvas-rail-tool-fg);
 }
 
 .canvas-rail-tool svg {
@@ -249,15 +248,15 @@
 }
 
 .canvas-rail-tool:hover:not(:disabled) {
-  background: color-mix(in srgb, var(--color-paper) 14%, transparent);
-  color: var(--color-paper);
+  background: var(--canvas-rail-tool-hover-bg);
+  color: var(--canvas-rail-tool-active-fg);
 }
 
 .canvas-rail-tool.is-active,
 .canvas-rail-tool.is-active:hover:not(:disabled) {
-  background: color-mix(in srgb, var(--color-paper) 16%, transparent);
-  color: var(--color-paper);
-  box-shadow: 0 0 0 1px color-mix(in srgb, var(--color-paper) 20%, transparent);
+  background: var(--canvas-rail-tool-active-bg);
+  color: var(--canvas-rail-tool-active-fg);
+  box-shadow: none;
 }
 
 /* 画布功能入口的悬停说明：文案直接复用按钮的可访问名称，避免原生 title

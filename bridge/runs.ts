@@ -7,7 +7,7 @@ import { pushImage } from './hub.js';
 import { findProfile, readSettings, resolveTextModel, resolveTextProfile, normalizeChatRuntimeSettings, type ModelProfile } from './settings.js';
 import { generateImages, IMAGE_GENERATION_TIMEOUT_MESSAGE, IMAGE_GENERATION_TIMEOUT_MS } from './imageApi.js';
 import { detectReferenceUsage, enhancePromptDetailed, fidelityForUsage, buildVisualPromptRules, callTextModel, type EnhanceParams, type PromptEnhancementResult } from './textApi.js';
-import { applyMemoryCompaction, buildMemoryContext, memoryPromptBlock, type MemoryMessage, type PersistedMemory } from './chatMemory.js';
+import { applyMemoryCompaction, buildMemoryContext, memoryPromptBlock, type MemoryImageRef, type MemoryMessage, type PersistedMemory } from './chatMemory.js';
 import { appendCanvasImageNodes, readCanvasDoc, type CanvasNodeRecord } from './http.js';
 import { readChatThreads, readChatThread, writeClientThread, writeRunThread } from './chat.js';
 import { askUserToolDef, callAgentModel, generateImageToolDef, normalizeAskUserQuestions, type AgentMessage, type AgentToolCall, type AskUserQuestion } from './agent.js';
@@ -607,10 +607,13 @@ function boxesOverlap(a: CanvasBox, b: CanvasBox, padding: number): boolean {
     && a.y + a.height + padding > b.y;
 }
 
-/** 结果连线来源：显式引用优先；继续编辑上一版时补上上一版结果节点。 */
-export function chatResultConnectFrom(explicit: string[], usage: 'style' | 'edit', baseNodeId: string): string[] {
+/** 结果连线来源：本轮显式引用优先；没有重新选图时沿用任务原图，最后才退回上一版。 */
+export function chatResultConnectFrom(explicit: string[], usage: 'style' | 'edit', baseNodeId: string, sourceAnchorNodeId = ''): string[] {
   const list = [...new Set(explicit.map((id) => String(id || '').trim()).filter(Boolean))];
-  if (list.length === 0 && usage === 'edit' && baseNodeId) list.push(baseNodeId);
+  if (list.length === 0) {
+    if (sourceAnchorNodeId) list.push(sourceAnchorNodeId);
+    else if (usage === 'edit' && baseNodeId) list.push(baseNodeId);
+  }
   return list;
 }
 
@@ -723,6 +726,7 @@ async function executeGenerateImage(
     references: Array<{ canvasId?: string; nodeId: string; versionId?: string }>;
     previousVersionId?: string;
     previousCanvasId?: string;
+    sourceAnchor?: MemoryImageRef;
     textProfile: ModelProfile;
     imageProfile?: ModelProfile;
     imageModel?: string;
@@ -747,20 +751,49 @@ async function executeGenerateImage(
     .filter((ref) => !ref.canvasId || ref.canvasId === runContext.canvasId)
     .map((ref) => String(ref.nodeId || '').trim())
     .filter(Boolean))];
+  const sourceAnchor = runContext.sourceAnchor?.nodeId || runContext.sourceAnchor?.versionId || runContext.sourceAnchor?.url
+    ? runContext.sourceAnchor
+    : undefined;
+  const sourceAnchorCanvasId = String(sourceAnchor?.canvasId || runContext.canvasId).trim() || runContext.canvasId;
+  const sourceAnchorVersionId = String(sourceAnchor?.versionId || '').trim();
+  let sourceAnchorVersion: Record<string, unknown> | undefined;
+  let sourceAnchorNodeId = '';
+  if (sourceAnchorVersionId || sourceAnchor?.nodeId) {
+    const anchorDoc = await readCanvasDoc(sourceAnchorCanvasId).catch(() => null);
+    const anchorNodes = (Array.isArray(anchorDoc?.nodes) ? anchorDoc!.nodes : []) as CanvasNodeLike[];
+    const found = sourceAnchorVersionId ? findVersionOnCanvas(anchorNodes, sourceAnchorVersionId) : undefined;
+    const anchorNode = found?.node || (sourceAnchor?.nodeId
+      ? anchorNodes.find((node) => String(node.id || '') === String(sourceAnchor.nodeId))
+      : undefined);
+    if (anchorNode) {
+      const versions = Array.isArray(anchorNode.data?.versions) ? anchorNode.data!.versions as Array<Record<string, unknown>> : [];
+      sourceAnchorVersion = found?.version || versions[versions.length - 1];
+      if (!String(sourceAnchorVersion?.imageUrl || '').trim()) {
+        const imageUrl = String(anchorNode.data?.imageUrl || anchorNode.data?.referenceDataUrl || '').trim();
+        if (imageUrl) sourceAnchorVersion = { imageUrl };
+      }
+      if (sourceAnchorCanvasId === runContext.canvasId) sourceAnchorNodeId = String(anchorNode.id || '').trim();
+    }
+  }
   const explicitUsage = args.referenceUsage === 'edit' || args.referenceUsage === 'style';
   let usage: 'style' | 'edit' = explicitUsage ? (args.referenceUsage as 'style' | 'edit') : detectReferenceUsage(prompt);
   const resolved = await resolveReferenceDataUrls(picked, runContext.canvasId);
   if (picked.length > 0) emit(run, { type: 'tool_progress', callId, step: `正在准备 ${picked.length} 张参考图` });
   for (const note of resolved.notes) emit(run, { type: 'tool_progress', callId, step: note });
 
-  // 基准版本：模型显式指定 > 线程最后一张。只有 edit 语义才继承最近结果；
-  // style / 新需求会切断上一张图的 Responses 链，避免“另一个需求”被错误续接。
+  // 基准版本：模型显式指定 > 当前任务原图（本轮没有重新选图） > 线程最后一张。
+  // 只有 edit 语义才继承；style / 新需求会切断 Responses 链，避免错误续接。
   const explicitBaseId = String(args.baseVersionId || '').trim();
   if (explicitBaseId) usage = 'edit';
-  const chainId = explicitBaseId || (picked.length === 0 && usage === 'edit' ? String(runContext.previousVersionId || '').trim() : '');
-  const baseCanvasId = String(runContext.previousCanvasId || runContext.canvasId).trim() || runContext.canvasId;
+  const chainId = explicitBaseId || (picked.length === 0 && usage === 'edit'
+    ? String(sourceAnchorVersionId || runContext.previousVersionId || '').trim()
+    : '');
+  const chainUsesSourceAnchor = Boolean(chainId && chainId === sourceAnchorVersionId);
+  const baseCanvasId = chainUsesSourceAnchor
+    ? sourceAnchorCanvasId
+    : String(runContext.previousCanvasId || runContext.canvasId).trim() || runContext.canvasId;
   let baseVersion: Record<string, unknown> | undefined;
-  // 上一版结果所在节点：未显式引用时作为连线与摆放的参考锚点。
+  // 上一版结果所在节点：没有任务原图时，作为连线与摆放的兜底锚点。
   let baseNodeId = '';
   if (chainId) {
     const doc = await readCanvasDoc(baseCanvasId).catch(() => null);
@@ -769,12 +802,26 @@ async function executeGenerateImage(
     baseVersion = found?.version;
     if (found && baseCanvasId === runContext.canvasId) baseNodeId = String(found.node.id || '');
   }
-  // 显式引用优先；没有显式引用、且本轮是继续编辑上一版时，把上一版结果节点也连上。
-  const connectFrom = chatResultConnectFrom(explicitConnectFrom, usage, baseNodeId);
-  // 摆放锚点：显式引用的第一张图 > 上一版结果节点。
-  const anchorNodeId = explicitConnectFrom[0] || (usage === 'edit' ? baseNodeId : '');
+  // 结果连线：本轮显式引用 > 当前任务原图；都为空时，编辑语义才回退到上一版结果。
+  const connectFrom = chatResultConnectFrom(explicitConnectFrom, usage, baseNodeId, sourceAnchorNodeId);
+  // 摆放锚点：本轮显式引用 > 当前任务原图 > 上一版结果节点。
+  const anchorNodeId = explicitConnectFrom[0] || sourceAnchorNodeId || (usage === 'edit' ? baseNodeId : '');
   // 保留显式引用与编辑基准的来源，后续分别合并，避免把基准图重复传给提示词优化器。
   const explicitReferenceUrls = [...resolved.urls];
+  if (picked.length === 0 && sourceAnchor && (sourceAnchorVersion || sourceAnchor.url)) {
+    const anchorUrl = String(sourceAnchorVersion?.imageUrl || sourceAnchor.url || '').trim();
+    if (anchorUrl) {
+      try {
+        const anchorDataUrl = anchorUrl.startsWith('data:')
+          ? anchorUrl
+          : await mediaFileToDataUrl(anchorUrl.replace(/^\/api\/files\//, ''));
+        if (anchorDataUrl && !resolved.urls.includes(anchorDataUrl)) resolved.urls.unshift(anchorDataUrl);
+        emit(run, { type: 'tool_progress', callId, step: '已沿用当前任务原图作为参考' });
+      } catch {
+        emit(run, { type: 'tool_progress', callId, step: '当前任务原图读取失败，按现有上下文生成' });
+      }
+    }
+  }
   let baseDataUrl = '';
   if (baseVersion && usage === 'edit') {
     const baseUrl = String(baseVersion.imageUrl || '').trim();
@@ -828,7 +875,7 @@ async function executeGenerateImage(
   const runContextState: ChatRunContext = {
     baseVersionId: baseVersion?.id ? String(baseVersion.id) : undefined,
     responseId: String(images[0]?.responseId || previousResponseId || '') || undefined,
-    referenceCount: picked.length,
+    referenceCount: resolved.urls.length,
     resetReason: baseVersion && !previousResponseId
       ? (sameProfile && sameModel
         ? '本轮使用了新的参考图或全新需求，上下文从这里重新开始'
@@ -1349,6 +1396,7 @@ async function executeRun(run: ChatRun, request: StartRunRequest): Promise<void>
             references: request.references,
             previousVersionId: chainVersionId,
             previousCanvasId: request.previousCanvasId,
+            sourceAnchor: memory.visualWorkingSet.sourceAnchor,
             textProfile: agentTextProfile,
             imageProfile: imageProfile as ModelProfile | undefined,
             imageModel,

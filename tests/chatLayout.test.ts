@@ -9,6 +9,12 @@ describe('聊天结果与参考图的关系', () => {
     expect(chatResultConnectFrom(['ref-1', 'ref-1'], 'edit', 'base-1')).toEqual(['ref-1']);
   });
 
+  it('没有显式引用时优先沿用当前任务原图锚点', () => {
+    expect(chatResultConnectFrom([], 'edit', 'base-1', 'anchor-1')).toEqual(['anchor-1']);
+    expect(chatResultConnectFrom([], 'style', 'base-1', 'anchor-1')).toEqual(['anchor-1']);
+    expect(chatResultConnectFrom(['ref-1'], 'edit', 'base-1', 'anchor-1')).toEqual(['ref-1']);
+  });
+
   it('新结果放在参考图右侧一列，多张向下排', () => {
     const anchor = { x: 100, y: 100, width: 320, height: 320 };
     const positions = layoutChatResultPositions({ anchor, count: 2, size: '1024x1024', existing: [anchor] });

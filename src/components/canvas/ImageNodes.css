@@ -253,13 +253,13 @@
   transform: none;
 }
 
-/* 悬停：内容外一圈 20% 纯白描边，比内容大一圈并稍粗，密集画布上也能看清 */
+/* 悬停：内容外一圈低对比主题描边，比内容大一圈并稍粗，密集画布上也能看清 */
 .image-flow-node:hover:not(.selected) .image-node-media,
 
 .image-flow-node:hover:not(.selected) .image-node-placeholder,
 
 .image-flow-node:hover:not(.selected) .image-node-composer-shell {
-  outline: 2px solid color-mix(in srgb, var(--color-paper) 20%, transparent);
+  outline: 2px solid color-mix(in srgb, var(--control-fg-selected) 20%, transparent);
   outline-offset: 4px;
 }
 
@@ -268,7 +268,7 @@
   z-index: 96 !important;
 }
 
-/* 选中：描边变为 80% 纯白（避免满白在深色底上过曝），同时节点放大一档作为"放大效果" */
+/* 选中：描边跟随主题选中前景色；深色不过曝，浅色也不会消失在白底上 */
 .image-flow-node.selected {
   filter: none;
   transform: none;
@@ -279,7 +279,7 @@
 .image-flow-node.selected .image-node-placeholder,
 
 .image-flow-node.selected .image-node-composer-shell {
-  outline: 2px solid color-mix(in srgb, var(--color-paper) 80%, transparent);
+  outline: 2px solid color-mix(in srgb, var(--control-fg-selected) 80%, transparent);
   outline-offset: 4px;
 }
 
@@ -2314,9 +2314,9 @@
   translate: 0 -1px;
 }
 
-/* 主图（当前版本）卡：选中描边与灵枢节点选中同一语言——80% 纸色 2px 外描边 + 4px 外延 */
+/* 主图（当前版本）卡：选中描边与节点选中同一语言——主题选中前景色 2px 外描边 + 4px 外延 */
 .image-node-version.is-active {
-  outline: 2px solid color-mix(in srgb, var(--color-paper) 80%, transparent);
+  outline: 2px solid color-mix(in srgb, var(--control-fg-selected) 80%, transparent);
   outline-offset: 4px;
 }
 

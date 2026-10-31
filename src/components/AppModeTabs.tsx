@@ -1,4 +1,5 @@
 import { useEffect, useId, useRef, useState, type MouseEvent } from 'react';
+import { applyTheme, readStoredTheme, type AppTheme } from '@/lib/theme';
 import './AppModeTabs.css';
 
 export type AppMode = 'canvas' | 'workbench';
@@ -48,8 +49,33 @@ function ModeIcon({ mode }: { mode: AppMode }) {
   );
 }
 
+function ThemeIcon({ theme }: { theme: AppTheme }) {
+  if (theme === 'system') {
+    return (
+      <svg className="app-mode-tabs__theme-icon" viewBox="0 0 20 20" fill="none" aria-hidden="true" focusable="false">
+        <rect x="2.75" y="3.25" width="14.5" height="10.5" rx="2" stroke="currentColor" strokeWidth="1.5" />
+        <path d="M7 16.75h6M10 13.75v3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+      </svg>
+    );
+  }
+  if (theme === 'light') {
+    return (
+      <svg className="app-mode-tabs__theme-icon" viewBox="0 0 20 20" fill="none" aria-hidden="true" focusable="false">
+        <circle cx="10" cy="10" r="3.25" stroke="currentColor" strokeWidth="1.5" />
+        <path d="M10 2.25v1.5M10 16.25v1.5M2.25 10h1.5M16.25 10h1.5M4.52 4.52l1.06 1.06M14.42 14.42l1.06 1.06M15.48 4.52l-1.06 1.06M5.58 14.42l-1.06 1.06" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+      </svg>
+    );
+  }
+  return (
+    <svg className="app-mode-tabs__theme-icon" viewBox="0 0 20 20" fill="none" aria-hidden="true" focusable="false">
+      <path d="M16.3 12.35A6.75 6.75 0 0 1 7.65 3.7a6.75 6.75 0 1 0 8.65 8.65Z" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
 export default function AppModeTabs({ mode }: AppModeTabsProps) {
   const [open, setOpen] = useState(false);
+  const [theme, setTheme] = useState<AppTheme>(readStoredTheme);
   const rootRef = useRef<HTMLElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const menuItemRef = useRef<HTMLAnchorElement>(null);
@@ -107,14 +133,24 @@ export default function AppModeTabs({ mode }: AppModeTabsProps) {
     window.dispatchEvent(new PopStateEvent('popstate'));
   };
 
+  const chooseTheme = (nextTheme: AppTheme) => {
+    setTheme(nextTheme);
+    const rect = triggerRef.current?.getBoundingClientRect();
+    applyTheme(nextTheme, {
+      origin: rect
+        ? { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 }
+        : undefined,
+    });
+  };
+
   return (
-    <nav className="app-mode-tabs" aria-label="工作模式" ref={rootRef}>
+    <nav className="app-mode-tabs" aria-label="绘板菜单" ref={rootRef}>
       <button
         ref={triggerRef}
         type="button"
         className="app-mode-tabs__trigger"
-        aria-label={`当前为${current.label}，切换工作模式`}
-        title={`当前为${current.label}，点击切换工作模式`}
+        aria-label={`当前为${current.label}，打开菜单`}
+        title={`当前为${current.label}，打开菜单`}
         aria-haspopup="menu"
         aria-expanded={open}
         aria-controls={menuId}
@@ -131,7 +167,7 @@ export default function AppModeTabs({ mode }: AppModeTabsProps) {
         id={menuId}
         className="app-mode-tabs__menu"
         role="menu"
-        aria-label="切换工作模式"
+        aria-label="绘板菜单"
         hidden={!open}
       >
         <a
@@ -144,6 +180,39 @@ export default function AppModeTabs({ mode }: AppModeTabsProps) {
           <ModeIcon mode={target.id} />
           <span>{target.actionLabel}</span>
         </a>
+        <div className="app-mode-tabs__separator" role="separator" />
+        <div className="app-mode-tabs__appearance" role="group" aria-label="外观">
+          <button
+            type="button"
+            className="app-mode-tabs__theme-option"
+            role="menuitemradio"
+            aria-checked={theme === 'system'}
+            onClick={() => chooseTheme('system')}
+          >
+            <ThemeIcon theme="system" />
+            <span>跟随系统</span>
+          </button>
+          <button
+            type="button"
+            className="app-mode-tabs__theme-option"
+            role="menuitemradio"
+            aria-checked={theme === 'light'}
+            onClick={() => chooseTheme('light')}
+          >
+            <ThemeIcon theme="light" />
+            <span>浅色</span>
+          </button>
+          <button
+            type="button"
+            className="app-mode-tabs__theme-option"
+            role="menuitemradio"
+            aria-checked={theme === 'dark'}
+            onClick={() => chooseTheme('dark')}
+          >
+            <ThemeIcon theme="dark" />
+            <span>深色</span>
+          </button>
+        </div>
       </div>
     </nav>
   );

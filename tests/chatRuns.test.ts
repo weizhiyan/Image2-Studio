@@ -193,6 +193,64 @@ describe('chat run image delivery', () => {
     await vi.waitFor(() => expect(mocks.writeRunThread).toHaveBeenCalled());
   });
 
+  it('第二轮没有重新选图时沿用任务原图锚点，连线和摆放都不漂移', async () => {
+    const anchorImage = 'data:image/png;base64,dGVzdC1hbmNob3I=';
+    const previousImage = 'data:image/png;base64,dGVzdC1wcmV2aW91cw==';
+    mocks.readCanvasDoc.mockResolvedValue({
+      nodes: [
+        {
+          id: 'anchor-node', type: 'flow-image', position: { x: 100, y: 100 },
+          data: { kind: 'image', size: '1024x1024', imageUrl: anchorImage, versions: [{ id: 'ver-anchor', imageUrl: anchorImage }] },
+        },
+        {
+          id: 'previous-node', type: 'flow-image', position: { x: 540, y: 100 },
+          data: { kind: 'image', size: '1024x1024', imageUrl: previousImage, versions: [{ id: 'ver-previous', imageUrl: previousImage }] },
+        },
+      ],
+    });
+    mocks.generateImages.mockReset().mockResolvedValue([{ url: '/api/files/second.png', fileName: 'second.png' }]);
+    mocks.callAgentModel.mockReset()
+      .mockResolvedValueOnce({
+        text: '', protocol: 'tools',
+        toolCalls: [{ id: 'call-anchor', name: 'generate_image', args: { prompt: '继续把线条加粗', referenceUsage: 'edit', count: 1 } }],
+      })
+      .mockResolvedValueOnce({ text: '已完成。', toolCalls: [], protocol: 'tools' });
+    const now = new Date().toISOString();
+    startChatRun({
+      threadId: 'thread-anchor', canvasId: 'canvas-anchor', assistantMessageId: 'assistant-anchor',
+      references: [], previousVersionId: 'ver-previous', previousCanvasId: 'canvas-anchor',
+      thread: {
+        id: 'thread-anchor', canvasId: 'canvas-anchor', title: '原图锚点', createdAt: now, updatedAt: now,
+        memory: {
+          visualWorkingSet: {
+            sourceAnchor: { canvasId: 'canvas-anchor', nodeId: 'anchor-node', versionId: 'ver-anchor' },
+          },
+        },
+        messages: [
+          {
+            id: 'user-anchor-first', role: 'user', content: '按这张参考图继续调整', createdAt: now,
+            attachments: [{ canvasId: 'canvas-anchor', nodeId: 'anchor-node', versionId: 'ver-anchor' }],
+          },
+          {
+            id: 'assistant-anchor-previous', role: 'assistant', content: '已生成。', status: 'done', createdAt: now,
+            media: [{ canvasId: 'canvas-anchor', nodeId: 'previous-node', versionId: 'ver-previous', url: previousImage }],
+          },
+          { id: 'user-anchor-current', role: 'user', content: '继续把线条加粗', createdAt: now },
+          { id: 'assistant-anchor', role: 'assistant', content: '', status: 'running', createdAt: now },
+        ],
+      },
+    });
+
+    await vi.waitFor(() => expect(mocks.appendCanvasImageNodes).toHaveBeenCalled());
+    const [, nodes, options] = mocks.appendCanvasImageNodes.mock.calls[0] as unknown as [string, Array<{ position: { x: number; y: number } }>, { connectFrom: string[] }];
+    expect(options.connectFrom).toEqual(['anchor-node']);
+    expect(nodes[0].position).toEqual({ x: 540, y: 468 });
+    expect(mocks.generateImages).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      referenceDataUrls: expect.arrayContaining([anchorImage]),
+    }));
+    await vi.waitFor(() => expect(mocks.writeRunThread).toHaveBeenCalled());
+  });
+
   it('把当前轮次引用的图片作为 Agent 视觉上下文传入', async () => {
     mocks.callAgentModel.mockReset().mockResolvedValueOnce({
       text: '我看到了引用图片。', toolCalls: [], protocol: 'json',

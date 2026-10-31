@@ -41,6 +41,8 @@ export interface CurrentWorkGoal {
 
 export interface VisualWorkingSet {
   base?: MemoryImageRef;
+  /** 当前任务首次明确引用的原图；后续轮次没有重新选图时继续沿用它。 */
+  sourceAnchor?: MemoryImageRef;
   references: MemoryImageRef[];
   recentOutputs: MemoryImageRef[];
   inheritMode: 'auto' | 'edit' | 'new';
@@ -307,11 +309,28 @@ function inferVisualWorkingSet(messages: MemoryMessage[], previous?: Partial<Vis
   // 继承判断只看当前用户这句话：上一轮是新需求不能把“断开”粘到后续回合。
   // 没有明确编辑或新需求时回到 auto，由最近生成结果作为默认候选基准。
   const inheritMode: VisualWorkingSet['inheritMode'] = explicitNewRequest ? 'new' : explicitEdit ? 'edit' : 'auto';
+  // 原图锚点取当前任务里最近一次用户明确选中的第一张图；后续只说“继续改”时
+  // 仍沿用它，避免第二轮开始只能拿上一张生成结果作为基准。
+  let sourceAnchor: MemoryImageRef | undefined;
+  for (let index = messages.length - 1; index >= Math.max(0, resetIndex); index -= 1) {
+    const message = messages[index];
+    if (message.role !== 'user') continue;
+    const first = (message.attachments || [])
+      .map((item) => refFrom(item, 'attachment'))
+      .find((item): item is MemoryImageRef => Boolean(item));
+    if (first) {
+      sourceAnchor = first;
+      break;
+    }
+  }
+  if (!sourceAnchor && inheritMode !== 'new' && previous?.sourceAnchor && typeof previous.sourceAnchor === 'object') {
+    sourceAnchor = { ...previous.sourceAnchor, source: 'attachment' };
+  }
   const previousBase = resetIndex < 0 && previous?.base && typeof previous.base === 'object' ? previous.base : undefined;
   const base = inheritMode === 'new'
     ? undefined
     : (recentOutputs.at(-1) || previousBase ? { ...(recentOutputs.at(-1) || previousBase), source: 'base' as const } : undefined);
-  return { base, references, recentOutputs, inheritMode, explicitNewRequest };
+  return { base, sourceAnchor, references, recentOutputs, inheritMode, explicitNewRequest };
 }
 
 function fallbackSummary(messages: MemoryMessage[], previousSummary: string, goal: CurrentWorkGoal, targetTokens: number): string {
@@ -455,6 +474,9 @@ export function memoryPromptBlock(context: MemoryContext): string {
     context.goal.change.length > 0 ? `本轮关注：${context.goal.change.join('；')}` : '',
     context.goal.rejected.length > 0 ? `已否决方向：${context.goal.rejected.join('；')}` : '',
     context.visualWorkingSet.base?.versionId ? `默认候选基准版本：${context.visualWorkingSet.base.versionId}` : '默认候选基准版本：无',
+    context.visualWorkingSet.sourceAnchor?.versionId || context.visualWorkingSet.sourceAnchor?.nodeId
+      ? `当前任务原图锚点：${context.visualWorkingSet.sourceAnchor.versionId || context.visualWorkingSet.sourceAnchor.nodeId}`
+      : '',
     context.visualWorkingSet.inheritMode === 'new' ? '本轮判定：用户表达了全新需求，不继承上一张图。' : '',
   ].filter(Boolean);
   return lines.join('\n');

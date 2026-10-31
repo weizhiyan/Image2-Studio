@@ -37,6 +37,35 @@ export async function getHistory(): Promise<HistoryItem[]> {
   return body.data || [];
 }
 
+export interface HistoryDeleteInput {
+  key: string;
+  canvasId: string;
+  nodeId: string;
+  versionId?: string;
+  mediaType?: string;
+  fileName?: string;
+  url?: string;
+}
+
+export interface HistoryDeleteResult {
+  deletedKeys: string[];
+  changedCanvasIds: string[];
+  changedThreadIds: string[];
+  deletedFiles: string[];
+}
+
+/** 删除生成历史：bridge 会同步清掉画布版本/节点与对话引用，再回收无人引用的媒体文件。 */
+export async function deleteHistoryItems(items: HistoryDeleteInput[]): Promise<HistoryDeleteResult> {
+  const res = await fetch('/api/history/delete', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ items }),
+  });
+  const body = await res.json().catch(() => null) as { data?: HistoryDeleteResult; msg?: string } | null;
+  if (!res.ok || !body?.data) throw new Error(body?.msg || `删除历史记录失败（HTTP ${res.status}）`);
+  return body.data;
+}
+
 export interface AssetFolder {
   id: string;
   name: string;

@@ -3,7 +3,10 @@ import ReactDOM from 'react-dom/client';
 import App from './App';
 import StartupStatus from './components/StartupStatus';
 import { getServiceHealth, type ServiceHealth } from './lib/bridge';
+import { applyTheme, readStoredTheme } from './lib/theme';
 import './styles/global.css';
+
+applyTheme(readStoredTheme());
 
 function Bootstrap() {
   const [health, setHealth] = useState<ServiceHealth | null>(null);

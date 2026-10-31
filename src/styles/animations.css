@@ -107,3 +107,33 @@
   from { transform: translateX(var(--slide-from, 100%)); }
   to { transform: translateX(0); }
 }
+
+/* ── 主题切换：从触发点圆形扩散（View Transition API） ── */
+::view-transition-old(root) {
+  animation: none;
+}
+
+::view-transition-new(root) {
+  animation: theme-reveal var(--motion-theme-switch) var(--ease-out) both;
+}
+
+@keyframes theme-reveal {
+  from {
+    clip-path: circle(
+      0px at var(--theme-reveal-x, 0px) var(--theme-reveal-y, 0px)
+    );
+  }
+  to {
+    clip-path: circle(
+      var(--theme-reveal-radius, 0px) at var(--theme-reveal-x, 0px) var(--theme-reveal-y, 0px)
+    );
+  }
+}
+
+/* 快照必须拿到主题切换后的最终颜色，不能先拍下逐属性 transition 的中间帧。 */
+html.is-theme-transitioning,
+html.is-theme-transitioning *,
+html.is-theme-transitioning *::before,
+html.is-theme-transitioning *::after {
+  transition: none !important;
+}

@@ -14,9 +14,9 @@ const GRID_MEDIA_MAX = 136;
 /** 聊天结果图使用固定上限，容器按生成尺寸比例收缩，不跟随对话面板宽度拉伸。 */
 function mediaBox(size: string, maxDimension: number): { width: number; height: number } {
   const ratio = parseSizeRatioOrZero(size) || 1;
-  return ratio >= 1
-    ? { width: maxDimension, height: Math.round(maxDimension / ratio) }
-    : { width: Math.round(maxDimension * ratio), height: maxDimension };
+  return ratio <= 1
+    ? { width: maxDimension, height: Math.round(maxDimension * ratio) }
+    : { width: Math.round(maxDimension / ratio), height: maxDimension };
 }
 
 /* ── 基础 Markdown（段落 / 列表 / 引用 / 代码块 / 行内代码与加粗）── */

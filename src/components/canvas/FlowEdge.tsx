@@ -262,7 +262,7 @@ export default function FlowEdge({
         >
           <stop offset="0%" stopColor="var(--color-text-secondary)" stopOpacity="0" />
           <stop offset="38%" stopColor="var(--color-text-secondary)" stopOpacity="0.18" />
-          <stop offset="50%" stopColor="var(--color-text-primary)" stopOpacity="1" />
+          <stop offset="50%" stopColor="var(--color-edge-beam-highlight)" stopOpacity="1" />
           <stop offset="62%" stopColor="var(--color-text-secondary)" stopOpacity="0.18" />
           <stop offset="100%" stopColor="var(--color-text-secondary)" stopOpacity="0" />
           <animate attributeName="x1" values={`${startX1};${endX1}`} dur={durationValue} begin={beginValue} repeatCount="indefinite" />

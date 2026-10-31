@@ -492,6 +492,7 @@ export interface ChatThreadMemory {
   };
   visualWorkingSet?: {
     base?: Record<string, unknown>;
+    sourceAnchor?: Record<string, unknown>;
     references?: Array<Record<string, unknown>>;
     recentOutputs?: Array<Record<string, unknown>>;
     inheritMode?: 'auto' | 'edit' | 'new';

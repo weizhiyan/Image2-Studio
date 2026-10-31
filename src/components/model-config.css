@@ -32,7 +32,7 @@
   border: 1px solid var(--surface-panel-border);
   border-radius: var(--radius-lg);
   corner-shape: var(--corner-smooth);
-  background: color-mix(in srgb, var(--surface-panel-bg) 92%, transparent);
+  background: var(--surface-modal-bg);
   box-shadow: var(--shadow-lg);
   --enter-y: 0px;
   --enter-scale: 0.4;

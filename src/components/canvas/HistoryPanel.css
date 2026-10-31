@@ -456,15 +456,14 @@
   height: var(--icon-glyph-sm);
 }
 
-.image-history-bulk-actions .image-history-delete:hover:not(:disabled) {
-  background: var(--color-accent-red-subtle);
-  color: var(--color-accent-red);
+.image-history-bulk-actions .image-history-delete {
+  color: var(--color-feedback-error-text);
 }
 
-.image-history-bulk-actions .image-history-delete.is-armed,
-.image-history-bulk-actions .image-history-delete.is-armed:hover:not(:disabled) {
-  background: var(--color-accent-red);
-  color: var(--color-on-accent);
+.image-history-bulk-actions .image-history-delete:hover:not(:disabled),
+.image-history-bulk-actions .image-history-delete:focus-visible {
+  background: var(--color-feedback-error-bg-hover);
+  color: var(--color-feedback-error-text);
 }
 
 .image-history-filter-btn {

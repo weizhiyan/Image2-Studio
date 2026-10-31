@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import CanvasImage from './CanvasImage';
 import { useNearViewport } from './useNearViewport';
 import type { HistoryItem } from '@/types';
-import { deleteImageIfUnused, revealLocalFile } from '@/lib/bridge';
+import { deleteHistoryItems, revealLocalFile } from '@/lib/bridge';
 import './HistoryPanel.css';
 
 /**
@@ -120,7 +120,6 @@ export default function HistoryPanel({
   const [multi, setMulti] = useState(false);
   const [selected, setSelected] = useState<Set<string>>(() => new Set<string>());
   const [deleting, setDeleting] = useState(false);
-  const [confirming, setConfirming] = useState(false);
   const [deleteError, setDeleteError] = useState('');
   const selectedItems = useMemo(
     () => visibleList.filter((item) => selected.has(historyKeyOf(item))),
@@ -151,13 +150,6 @@ export default function HistoryPanel({
     return () => window.clearTimeout(timer);
   }, [deleteError]);
 
-  /* 「再点一次确认」只给 2 秒：超时没再点就当作误触，按钮退回普通删除态 */
-  useEffect(() => {
-    if (!confirming) return undefined;
-    const timer = window.setTimeout(() => setConfirming(false), 2000);
-    return () => window.clearTimeout(timer);
-  }, [confirming]);
-
   /* Esc 收起：右上角不再放关闭按钮，键盘仍是关掉的通道 */
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -184,7 +176,6 @@ export default function HistoryPanel({
     setMulti(next);
     if (!next) {
       setSelected(new Set());
-      setConfirming(false);
       setDeleteError('');
     }
   };
@@ -204,57 +195,36 @@ export default function HistoryPanel({
     });
   };
 
-  /** 删除按钮：第一下只是「上膛」，2 秒内第二下才真删，避免误删 */
+  /** 删除按钮：点击即执行，不再需要第二次确认。 */
   const onDeleteClick = () => {
     if (deleting || selectedCount === 0) return;
-    if (!confirming) {
-      setConfirming(true);
-      return;
-    }
     void runDelete();
   };
 
-  /** 批量下载选中的原文件：逐个触发，间隔一拍，避免浏览器把连续下载合并或拦截。 */
-  const downloadSelected = () => {
-    if (selectedCount === 0) return;
-    selectedItems.forEach((item, index) => {
-      window.setTimeout(() => {
-        const link = document.createElement('a');
-        link.href = item.url;
-        link.download = item.fileName || `${item.mediaType || 'image'}-${item.createdAt || Date.now()}`;
-        link.rel = 'noopener';
-        document.body.appendChild(link);
-        link.click();
-        link.remove();
-      }, index * 80);
-    });
-  };
-
-  /** 真删：逐条 DELETE /api/files/:name（bridge 路由），成功的记进模块级隐藏表 */
+  /** 真删：bridge 同步清画布版本/节点与对话引用，再回收文件；成功后记进模块级隐藏表。 */
   const runDelete = async () => {
     const targets = selectedItems;
     if (targets.length === 0) return;
     setDeleting(true);
     setDeleteError('');
-    const failed: string[] = [];
-    await Promise.all(targets.map(async (item) => {
-      try {
-        const deleted = await deleteImageIfUnused(item.fileName);
-        if (!deleted) throw new Error('文件仍被画布或对话引用');
-        hiddenKeys.add(historyKeyOf(item));
-      } catch {
-        failed.push(item.fileName);
-      }
-    }));
-    setHidden(new Set(hiddenKeys));
-    setSelected(new Set());
-    setConfirming(false);
-    setDeleting(false);
-    if (failed.length > 0) {
-      setDeleteError(`删除失败：${failed.length} 个文件没删掉，请重试`);
-    } else {
-      // 一轮删除完成后退出选择态，底部操作栏不会留下“已选 0 个”。
+    try {
+      const result = await deleteHistoryItems(targets.map((item) => ({
+        key: historyKeyOf(item),
+        canvasId: item.canvasId,
+        nodeId: item.nodeId || '',
+        versionId: item.versionId,
+        mediaType: item.mediaType || 'image',
+        fileName: item.fileName,
+        url: item.url,
+      })));
+      for (const key of result.deletedKeys) hiddenKeys.add(key);
+      setHidden(new Set(hiddenKeys));
+      setSelected(new Set());
       setMulti(false);
+    } catch (error) {
+      setDeleteError(error instanceof Error ? error.message : '删除失败，请重试');
+    } finally {
+      setDeleting(false);
     }
   };
 
@@ -390,7 +360,6 @@ export default function HistoryPanel({
               onClick={() => {
                 setMediaFilter(filter);
                 setSelected(new Set());
-                setConfirming(false);
               }}
             >
               {label}<span>{count}</span>
@@ -445,20 +414,11 @@ export default function HistoryPanel({
           <div className="image-history-bulk-actions">
             <button
               type="button"
-              onClick={downloadSelected}
-              disabled={selectedCount === 0}
-              aria-label="下载选中文件"
-              title="下载选中文件"
-            >
-              <DownloadIcon />
-            </button>
-            <button
-              type="button"
-              className={`image-history-delete${confirming ? ' is-armed' : ''}`}
+              className="image-history-delete"
               onClick={onDeleteClick}
               disabled={deleting || selectedCount === 0}
-              aria-label={confirming ? '再点一次确认删除' : '删除选中的媒体文件'}
-              title={confirming ? '再点一次确认删除' : '删除选中的媒体文件'}
+              aria-label="删除选中的媒体文件"
+              title="删除选中的媒体文件"
             >
               <TrashIcon />
             </button>
@@ -523,14 +483,6 @@ function ListIcon() {
       <circle cx="4.2" cy="6.5" r="1.3" fill="currentColor" />
       <circle cx="4.2" cy="12" r="1.3" fill="currentColor" />
       <circle cx="4.2" cy="17.5" r="1.3" fill="currentColor" />
-    </svg>
-  );
-}
-
-function DownloadIcon() {
-  return (
-    <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
-      <path d="M12 3.5v11M7.8 10.6 12 14.8l4.2-4.2M5 19.5h14" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" />
     </svg>
   );
 }

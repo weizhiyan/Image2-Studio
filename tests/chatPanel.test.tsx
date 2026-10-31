@@ -324,6 +324,21 @@ describe('ChatMessageList', () => {
     expect(CHAT_MESSAGE_LIST_SOURCE).toContain('const GRID_MEDIA_MAX = 136;');
   });
 
+  it('横图按宽高比收窄高度，竖图按宽高比收窄宽度', () => {
+    useChatStore.getState().appendMessage('thread-1', { role: 'user', content: '生成横图和竖图' });
+    useChatStore.getState().appendMessage('thread-1', {
+      role: 'assistant',
+      content: '',
+      media: [
+        { url: '/api/files/wide.png', fileName: 'wide.png', nodeId: 'image-wide', versionId: 'v-wide', prompt: '横图', model: 'm', size: '1536x864' },
+        { url: '/api/files/tall.png', fileName: 'tall.png', nodeId: 'image-tall', versionId: 'v-tall', prompt: '竖图', model: 'm', size: '864x1536' },
+      ],
+    });
+    const html = renderToStaticMarkup(<ChatMessageList {...handlers} />);
+    expect(html).toContain('style="width:136px;height:77px"');
+    expect(html).toContain('style="width:77px;height:136px"');
+  });
+
   it('行内引用默认无背景，悬停或聚焦时展示大图预览', () => {
     expect(CHAT_CSS).toMatch(/\.hb-chat-msg-inline-ref\s*\{[^}]*background:\s*transparent/s);
     expect(CHAT_CSS).toMatch(/\.hb-chat-msg-inline-ref:hover\s*\{[^}]*background:\s*var\(--color-ui-control-hover\)/s);
