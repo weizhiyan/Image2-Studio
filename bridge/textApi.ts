@@ -9,6 +9,24 @@ const FORMAT_ORDER: Record<TextApiFormat, TextApiFormat[]> = {
   responses: ['responses'],
 };
 
+/** 角色温度统一收口到 0-1。 */
+function normalizeTemperature(value: number | undefined): number | undefined {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return undefined;
+  return Math.min(1, Math.max(0, value));
+}
+
+/** 只识别明确的温度兼容性拒绝；提到 temperature 的其它参数错误不得触发重试。 */
+export function isUnsupportedTemperatureError(detail: string): boolean {
+  let message = detail;
+  try {
+    const payload = JSON.parse(detail) as { error?: { message?: string; param?: string; code?: string } };
+    const error = payload.error;
+    if (error?.param === 'temperature' && /unsupported|not_supported/i.test(error.code || '')) return true;
+    message = error?.message || detail;
+  } catch { /* 非 JSON 网关错误仍按明确文案判断。 */ }
+  return /\btemperature\b[\s'":=-]*(?:is\s+)?(?:not supported|unsupported|not allowed|does not support|only supports)|(?:unsupported|unrecognized|unknown)\s+(?:parameter|argument|field|value)\s*:?\s*['"]?temperature\b|(?:does not support|not support)\s+(?:the\s+)?['"]?temperature\b/i.test(message);
+}
+
 /** 带状态码的调用失败：回落策略和报错文案都靠它判断。 */
 class TextCallError extends Error {
   constructor(readonly status: number, readonly detail: string, readonly format: TextApiFormat) {
@@ -78,16 +96,9 @@ function aspectHint(size: string): string {
  *  说"要什么"而非"不要什么"）+ ChatGPT 网页版生图的编排层行为（理解意图 →
  *  补齐缺失视觉维度 → 输出单段详细提示词 → 内容安全红线）。
  */
-export function buildSystemSpec(size: string, level: EnhanceLevel): string {
+export function buildVisualPromptRules(size: string, level: EnhanceLevel): string {
   const spec = LEVEL_SPECS[level];
   return [
-    '你是图像生成模型的提示词工程师。用户会给一句想画的内容（可能很短、很口语），也可能是中文。',
-    '你的唯一任务：把它改写成一段高质量的生图提示词，原文语义一个不丢。',
-    '',
-    '【输出格式】',
-    '- 只输出一个 JSON 对象，不要 Markdown 代码块、解释、道歉或额外文字',
-    '- JSON 必须包含 prompt（最终给生图模型的一段自然语言提示词）和 usage（style 或 edit）',
-    '- 可选字段 referenceRoles：数组元素为 {"index": number, "role": "style|identity|layout|object|background"}',
     '- prompt 使用用户描述的主要语言；用户要求图中文字时按原语言用英文引号 "..." 精确保留，一字不改',
     '- prompt 是一段连贯的自然语言，完整句子；不要关键词堆砌、标签列表或分点',
     '- 图中的文字内容用英文引号包裹，例如：a neon sign reading "OPEN 24H"',
@@ -110,7 +121,7 @@ export function buildSystemSpec(size: string, level: EnhanceLevel): string {
     '【忠实性红线】',
     '- 用户明确要的元素一个不少；用户没提的重要元素一个不加（没说人就不加人，没说文字就不加文字）',
     '- 用户输入已足够详细（超过 40 词，或已含镜头 / 媒介 / 风格描述）时只做轻度整理：补光线与构图，保留原有措辞与细节',
-    '- 描述"要什么"而不是"不要什么"；最多保留一处关键排除（如 "no text, no watermark"）',
+    '- 优先正面描述画面，但用户明确的否定约束、禁止修改项与必须保留项必须完整保留，不得为缩短提示词而丢弃（如“不要改背景”必须落实为背景保持原样）',
     '- 用户明确提供的本人品牌 Logo / 标识应按原样保留，不擅自改写；要求复制未提供的第三方受保护角色或标识时，改写成气质相近的原创元素',
     '- 不使用在世艺术家的姓名作为风格词；用流派或视觉特征描述替代',
     '',
@@ -121,6 +132,20 @@ export function buildSystemSpec(size: string, level: EnhanceLevel): string {
     '【现实约束】',
     '- 生图模型内部还会再润色一次提示词，所以不要写过度精细到互相冲突的细节',
     `- ${aspectHint(size)}`,
+  ].join('\n');
+}
+
+export function buildSystemSpec(size: string, level: EnhanceLevel): string {
+  return [
+    '你是图像生成模型的提示词工程师。用户会给一句想画的内容（可能很短、很口语），也可能是中文。',
+    '你的唯一任务：把它改写成一段高质量的生图提示词，原文语义一个不丢。',
+    '',
+    '【输出格式】',
+    '- 只输出一个 JSON 对象，不要 Markdown 代码块、解释、道歉或额外文字',
+    '- JSON 必须包含 prompt（最终给生图模型的一段自然语言提示词）和 usage（style 或 edit）',
+    '- 可选字段 referenceRoles：数组元素为 {"index": number, "role": "style|identity|layout|object|background"}',
+    '',
+    buildVisualPromptRules(size, level),
   ].join('\n');
 }
 
@@ -260,7 +285,8 @@ function shouldRetryOtherBase(status: number, contentType: string): boolean {
 }
 
 /** OpenAI 兼容 /chat/completions：messages 形式，参考图走 image_url 分段。 */
-function chatRequest(base: string, model: string, systemSpec: string, userText: string, imageUrls: string[], maxTokens: number): TextRequest {
+function chatRequest(base: string, model: string, systemSpec: string, userText: string, imageUrls: string[], maxTokens: number, temperature?: number): TextRequest {
+  const normalizedTemperature = normalizeTemperature(temperature);
   const userContent: unknown = imageUrls.length > 0
     ? [
       { type: 'text', text: userText },
@@ -275,7 +301,7 @@ function chatRequest(base: string, model: string, systemSpec: string, userText: 
         { role: 'system', content: systemSpec },
         { role: 'user', content: userContent },
       ],
-      temperature: 0.6,
+      temperature: normalizedTemperature ?? 0.6,
       max_tokens: maxTokens,
     },
   };
@@ -285,7 +311,8 @@ function chatRequest(base: string, model: string, systemSpec: string, userText: 
  * OpenAI /responses：instructions 放系统规范，input 是分段数组，
  * 参考图走 input_image。Codex 系路由器（只开放 Responses 的网关）只能走这条。
  */
-function responsesRequest(base: string, model: string, systemSpec: string, userText: string, imageUrls: string[], maxTokens: number): TextRequest {
+function responsesRequest(base: string, model: string, systemSpec: string, userText: string, imageUrls: string[], maxTokens: number, temperature?: number): TextRequest {
+  const normalizedTemperature = normalizeTemperature(temperature);
   const content: unknown[] = [{ type: 'input_text', text: userText }];
   imageUrls.forEach((url) => content.push({ type: 'input_image', image_url: url }));
   return {
@@ -295,16 +322,24 @@ function responsesRequest(base: string, model: string, systemSpec: string, userT
       instructions: systemSpec,
       input: [{ role: 'user', content }],
       max_output_tokens: maxTokens,
+      ...(typeof normalizedTemperature === 'number' ? { temperature: normalizedTemperature } : {}),
     },
   };
 }
 
 function readChatText(body: unknown): string {
-  const choices = (body as { choices?: Array<{ message?: { content?: unknown } }> })?.choices;
+  const choices = (body as { choices?: Array<{ message?: { content?: unknown }; finish_reason?: string }> })?.choices;
+  const finishReason = choices?.[0]?.finish_reason;
+  if (finishReason === 'length' || finishReason === 'content_filter') {
+    throw new TextCallError(200, `Chat 输出不完整或被过滤（finish_reason=${finishReason}），本次输出不可用`, 'chat');
+  }
   return stripFences(readContent(choices?.[0]?.message?.content));
 }
 
 function readResponsesText(body: unknown): string {
+  if ((body as { status?: unknown })?.status === 'incomplete') {
+    throw new TextCallError(200, 'Responses 返回 status=incomplete，输出被截断，没有生成完整最终回答', 'responses');
+  }
   const payload = body as {
     output_text?: unknown;
     output?: Array<{
@@ -349,6 +384,8 @@ interface TextCallParams {
   userText: string;
   imageUrls: string[];
   maxTokens: number;
+  /** 角色温度；chat 缺省 0.6，responses 仅在显式设置时发送。 */
+  temperature?: number;
   signal?: AbortSignal;
 }
 
@@ -364,22 +401,43 @@ async function callTextOnce(profile: ModelProfile, format: TextApiFormat, params
   if (!model) throw new Error(`语言模型「${profile.name}」还没填模型名`);
   const bases = baseCandidates(base);
   for (let index = 0; index < bases.length; index += 1) {
-    const { url, body } = format === 'responses'
-      ? responsesRequest(bases[index], model, params.systemSpec, params.userText, params.imageUrls, params.maxTokens)
-      : chatRequest(bases[index], model, params.systemSpec, params.userText, params.imageUrls, params.maxTokens);
-    const response = await fetch(url, {
+    const buildRequest = (includeTemperature: boolean): TextRequest => {
+      const request = format === 'responses'
+        ? responsesRequest(bases[index], model, params.systemSpec, params.userText, params.imageUrls, params.maxTokens, params.temperature)
+        : chatRequest(bases[index], model, params.systemSpec, params.userText, params.imageUrls, params.maxTokens, params.temperature);
+      if (!includeTemperature) delete (request.body as Record<string, unknown>).temperature;
+      return request;
+    };
+    const signal = requestSignal(params.signal, format === 'responses' ? 120_000 : 90_000);
+    const request = buildRequest(true);
+    let response = await fetch(request.url, {
       method: 'POST',
       headers: { Authorization: `Bearer ${profile.apiKey}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-      signal: requestSignal(params.signal, format === 'responses' ? 120_000 : 90_000),
+      body: JSON.stringify(request.body),
+      signal,
     });
+    let detail = '';
     if (!response.ok) {
-      const detail = await response.text().catch(() => '');
+      detail = await response.text().catch(() => '');
+      // 推理模型可能拒绝 temperature：去掉后重试一次。
+      if (response.status === 400 && Object.hasOwn(request.body as object, 'temperature') && isUnsupportedTemperatureError(detail)) {
+        const retry = buildRequest(false);
+        response = await fetch(retry.url, {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${profile.apiKey}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify(retry.body),
+          signal,
+        });
+        detail = '';
+      }
+    }
+    if (!response.ok) {
+      const finalDetail = detail || await response.text().catch(() => '');
       const contentType = response.headers.get('content-type') || '';
       const hasNextBase = index < bases.length - 1;
       // 根路径被拦 / 路由不存在时才换 /v1 重试；鉴权失败原样抛出
       if (hasNextBase && shouldRetryOtherBase(response.status, contentType)) continue;
-      throw new TextCallError(response.status, detail, format);
+      throw new TextCallError(response.status, finalDetail, format);
     }
     const parsed = await response.json().catch(() => null) as unknown;
     const text = format === 'responses' ? readResponsesText(parsed) : readChatText(parsed);
@@ -527,7 +585,7 @@ export function buildVideoPromptSpec(input: {
     '完整保留用户指定的主体、动作、场景、风格和因果关系；不能替换主体，不能擅自增加角色、道具、剧情或场景。',
     '把描述整理为清楚的时间推进：开场状态、主要动作、镜头运动、结束状态。用户未指定的运动和节奏只做克制补充，不要堆叠多个互相冲突的运镜。',
     `目标参数：画幅 ${input.ratio || '16:9'}，时长 ${Number(input.seconds) || 5} 秒，清晰度 ${input.resolution || '480p'}。这些是生成参数，不要把它们变成画面中的文字。`,
-    `如有连接图片，按「${referenceLabel}」理解用户希望的用途。不要声称看到了图片内容；只依据用户文本描述整理动作与镜头。`,
+    `本次如提供参考图片，按「${referenceLabel}」理解其用途。不要声称识别或看到了图片的具体内容；仅依据用户文字描述整理动作与镜头。`,
   ].join('\n');
 }
 

@@ -6,7 +6,8 @@
   display: grid;
   place-items: center;
   padding: 28px;
-  background: var(--media-scrim);
+  /* 弹窗遮罩统一跟随 Agent 弹窗，不再单独加深成媒体 scrim。 */
+  background: var(--dialog-scrim);
   backdrop-filter: var(--surface-modal-backdrop-blur);
   -webkit-backdrop-filter: var(--surface-modal-backdrop-blur);
 }
@@ -64,8 +65,13 @@
   object-fit: contain;
   border-radius: var(--radius-xs);
   transform-origin: center;
-  transition: transform var(--motion-normal) var(--ease-out);
   will-change: transform;
+}
+
+/* 只在舞台点击切换 1× / 1.6× 时补一段过渡；滚轮 / 拖拽 / 按钮一律即时跟手，
+   否则每个 wheel tick 都重启动画，表现就是卡顿。 */
+.image-generation-preview-stage img.is-smooth-zoom {
+  transition: transform var(--motion-normal) var(--ease-out);
 }
 
 .image-generation-preview-stage video {
@@ -292,6 +298,42 @@
 
 .image-generation-preview-prompt {
   padding-right: 12px;
+  padding-bottom: 4px;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+}
+
+.image-generation-preview-prompt > p {
+  max-height: none;
+  min-height: 0;
+  overflow: auto;
+}
+
+.image-generation-preview-prompt-resize {
+  height: 12px;
+  margin: 0 -10px -4px;
+  padding-right: 0;
+  display: grid;
+  place-items: center;
+  border-radius: var(--radius-2xs);
+  cursor: ns-resize;
+  touch-action: none;
+  outline: none;
+}
+
+.image-generation-preview-prompt-resize::after {
+  content: "";
+  width: 28px;
+  height: 2px;
+  border-radius: var(--radius-2xs);
+  background: var(--color-ui-border-strong);
+  opacity: 0.7;
+  transition: background var(--motion-fast) var(--ease-out), opacity var(--motion-fast) var(--ease-out);
+}
+
+.image-generation-preview-prompt-resize:hover::after,
+.image-generation-preview-prompt-resize:focus-visible::after {
+  background: var(--color-text-tertiary);
+  opacity: 1;
 }
 
 .image-generation-preview-prompt button {
@@ -478,14 +520,20 @@
 .image-generation-preview-panel.is-revised > span {
   color: var(--color-accent-teal);
 }
-/* 喜欢：生成信息面板底部，线框 → 实心红心，再点一次取消 */
-.image-generation-preview-like {
-  display: inline-flex;
+/* 添加到资产库：文件夹选择是独立玻璃浮层，不占生成信息面板高度。 */
+.image-generation-preview-asset {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-1);
+  margin-top: var(--spacing-3);
+}
+
+.image-generation-preview-asset-add {
+  min-height: var(--control-height-compact);
+  display: flex;
   align-items: center;
-  justify-content: center;
   gap: 6px;
-  height: 28px;
-  margin-top: 2px;
+  padding: 0 var(--spacing-2);
   border: 1px solid color-mix(in srgb, var(--color-ui-border-subtle) 56%, transparent);
   border-radius: var(--radius-sm);
   background: color-mix(in srgb, var(--color-ui-control) 82%, transparent);
@@ -496,32 +544,152 @@
   transition: background var(--motion-normal) var(--ease-out), border-color var(--motion-normal) var(--ease-out), color var(--motion-normal) var(--ease-out);
 }
 
-.image-generation-preview-like > svg {
-  width: 14px;
-  height: 14px;
+.image-generation-preview-asset-add > span {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.image-generation-preview-asset-add svg {
+  width: var(--icon-glyph-sm);
+  height: var(--icon-glyph-sm);
+  flex: none;
   fill: none;
   stroke: currentColor;
   stroke-width: 1.6;
-  transition: transform var(--motion-fast) var(--ease-out), fill var(--motion-normal) var(--ease-out);
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 
-.image-generation-preview-like:hover:not(:disabled) {
+.image-generation-preview-asset-add svg:last-child {
+  transition: transform var(--motion-fast) var(--ease-out);
+}
+
+.image-generation-preview-asset-add[aria-expanded='true'] svg:last-child {
+  transform: rotate(180deg);
+}
+
+.image-generation-preview-asset-add:hover:not(:disabled),
+.image-generation-preview-asset-add[aria-expanded='true'] {
   border-color: var(--control-border-hover);
   background: var(--control-bg-hover);
   color: var(--color-text-primary);
 }
 
-.image-generation-preview-like:disabled {
+.image-generation-preview-asset-add.is-saved {
+  border-color: color-mix(in srgb, var(--color-accent-green) 32%, var(--surface-panel-border));
+  color: var(--color-text-primary);
+}
+
+.image-generation-preview-asset-add:disabled {
   cursor: not-allowed;
   opacity: 0.55;
 }
 
-.image-generation-preview-like.is-liked {
-  border-color: var(--color-accent-red);
-  color: var(--color-accent-red);
+.image-generation-preview-asset-picker {
+  position: fixed;
+  z-index: 280;
+  max-height: 190px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  overflow-y: auto;
+  padding: var(--spacing-2);
+  border: 1px solid var(--surface-popover-border);
+  border-radius: var(--radius-md);
+  background: var(--surface-popover-glass-bg);
+  box-shadow: var(--surface-popover-glass-shadow);
+  backdrop-filter: var(--surface-popover-glass-blur);
+  -webkit-backdrop-filter: var(--surface-popover-glass-blur);
+  animation: image-preview-asset-picker-in var(--motion-fast) var(--ease-out) both;
 }
 
-.image-generation-preview-like.is-liked > svg {
-  fill: currentColor;
-  transform: scale(1.12);
+@keyframes image-preview-asset-picker-in {
+  from {
+    opacity: 0;
+    transform: translateY(3px) scale(0.98);
+  }
+}
+
+.image-generation-preview-asset-picker-title {
+  padding: 2px var(--spacing-2) var(--spacing-1);
+  color: var(--color-text-tertiary);
+  font-size: var(--font-size-2xs);
+  font-weight: var(--font-weight-semibold);
+}
+
+.image-generation-preview-asset-picker-note {
+  margin: 0;
+  padding: var(--spacing-2);
+  color: var(--color-text-tertiary);
+  font-size: var(--font-size-xs);
+  text-align: center;
+}
+
+.image-generation-preview-asset-folder {
+  min-height: var(--control-height-compact);
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-2);
+  padding: 0 var(--spacing-2);
+  border: 0;
+  border-radius: var(--radius-xs);
+  background: transparent;
+  color: var(--color-text-secondary);
+  font-family: var(--font-sans);
+  font-size: var(--font-size-xs);
+  text-align: left;
+  cursor: pointer;
+}
+
+.image-generation-preview-asset-folder:hover:not(:disabled) {
+  background: var(--control-bg-hover);
+  color: var(--color-text-primary);
+}
+
+.image-generation-preview-asset-folder:disabled {
+  cursor: wait;
+  opacity: 0.6;
+}
+
+.image-generation-preview-asset-folder svg {
+  width: var(--icon-glyph-md);
+  height: var(--icon-glyph-md);
+  flex: none;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  stroke-linejoin: round;
+}
+
+.image-generation-preview-asset-folder > span:nth-child(2) {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.image-generation-preview-asset-count {
+  flex: none;
+  color: var(--color-text-tertiary);
+  font-size: var(--font-size-2xs);
+  font-variant-numeric: tabular-nums;
+}
+
+.image-generation-preview-asset-error {
+  margin: 0;
+  padding: var(--spacing-1) var(--spacing-2) 2px;
+  color: var(--color-accent-red);
+  font-size: var(--font-size-2xs);
+  line-height: var(--line-height-normal);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .image-generation-preview-asset-picker {
+    animation: none;
+  }
 }

@@ -6,7 +6,13 @@
  * 由本测试覆盖，store 自身逻辑由 chatStore.test.ts 覆盖。
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { readFileSync } from 'node:fs';
 import { renderToStaticMarkup } from 'react-dom/server';
+
+const CHAT_CSS = readFileSync(new URL('../src/components/chat/ChatPanel.css', import.meta.url), 'utf8');
+const GLOBAL_CSS = readFileSync(new URL('../src/styles/global.css', import.meta.url), 'utf8');
+const CHAT_PANEL_SOURCE = readFileSync(new URL('../src/components/chat/ChatPanel.tsx', import.meta.url), 'utf8');
+const CHAT_MESSAGE_LIST_SOURCE = readFileSync(new URL('../src/components/chat/ChatMessageList.tsx', import.meta.url), 'utf8');
 
 interface MockState {
   threads: Array<Record<string, unknown>>;
@@ -17,6 +23,7 @@ interface MockState {
   draftAttachments: Array<Record<string, unknown>>;
   draftBase: Record<string, unknown> | null;
   activeRun: { runId: string; threadId: string; messageId: string } | null;
+  activeRoleId: string;
   unread: boolean;
   messageScrollTop: number;
 }
@@ -31,6 +38,7 @@ const { state } = vi.hoisted(() => {
     draftAttachments: [],
     draftBase: null,
     activeRun: null,
+    activeRoleId: '',
     unread: false,
     messageScrollTop: 0,
   };
@@ -103,6 +111,43 @@ beforeEach(() => {
   state.draftBase = null;
   state.activeRun = null;
   state.messageScrollTop = 0;
+  state.activeRoleId = '';
+});
+
+describe('clarification and cost controls', () => {
+  it('keeps memory automatic while displaying restored image confirmation with unknown cost', async () => {
+    const { default: Panel } = await import('@/components/chat/ChatPanel');
+    useChatStore.getState().appendMessage('thread-1', { role: 'user', content: 'request' });
+    (state as any).activeRun = { runId: 'r', threadId: 'thread-1', messageId: 'a', pendingConfirmation: { callId: 'c', prompt: 'image prompt', model: 'image-model', size: '1024x1024', count: 3, totalCount: 4, cost: 'unknown', expiresAt: '2099-01-01T00:00:00Z' } };
+    const html = renderToStaticMarkup(<Panel onSend={noop} onStop={noop} onLocate={noop} onPreview={noop} onRetry={noop} onAnswerClarification={async () => true} />);
+    expect(html).not.toContain('对话记忆');
+    expect(html).toContain('本次 3 张');
+    expect(html).toContain('累计 4 张');
+    expect(html).toContain('费用未知');
+    expect(html).toContain('确认生成');
+    expect(html).toContain('取消生成');
+  });
+  it('renders an open text question without forced choices and distinguishes optional skip from cancelling run', async () => {
+    const { default: Modal } = await import('@/components/chat/ClarificationModal');
+    const html = renderToStaticMarkup(<Modal request={{ callId: 'ask', questions: [{ id: 'q', title: '精确文字', type: 'text', optional: true, multiple: false, options: [] }] }} onSubmit={async () => true} onCancel={async () => true} />);
+    expect(html).toContain('<textarea');
+    expect(html).not.toContain('radiogroup');
+    expect(html).toContain('跳过此题');
+    expect(html).toContain('取消任务');
+  });
+  it('serializes text and optional empty answers without adding phantom options', async () => {
+    const { serializeClarificationAnswers } = await import('@/components/chat/ClarificationModal');
+    expect(serializeClarificationAnswers([
+      { id: 'text', title: 'text', type: 'text', multiple: false, options: [] },
+      { id: 'skip', title: 'skip', optional: true, multiple: false, options: [] },
+    ], {}, { text: '  exact words  ' })).toEqual({ text: ['exact words'], skip: [] });
+  });
+  it('renders single/multiple explicit types and recommended choices', async () => {
+    const { default: Modal } = await import('@/components/chat/ClarificationModal');
+    const html = renderToStaticMarkup(<Modal request={{ callId: 'ask', questions: [{ id: 'q', title: '风格', type: 'multiple', multiple: false, options: [{ value: 'v', label: '推荐风格', recommended: true }] }] }} onSubmit={async () => true} onCancel={async () => true} />);
+    expect(html).toContain('type="checkbox"');
+    expect(html).toContain('推荐');
+  });
 });
 
 describe('ChatMessageList', () => {
@@ -112,14 +157,74 @@ describe('ChatMessageList', () => {
     expect(html).toContain('点击画布图片即可引用');
   });
 
-  it('完成的 AI 回复提供应用为视频节点入口', () => {
+  it('角色名称与头像随消息悬停一起出现，不要求再悬停头像', () => {
+    expect(CHAT_CSS).toMatch(/\.hb-chat-msg-role-name\s*\{[^}]*white-space:\s*nowrap/s);
+    expect(CHAT_CSS).not.toMatch(/\.hb-chat-msg-role:hover \.hb-chat-msg-role-name/);
+    expect(CHAT_CSS).not.toMatch(/\.hb-chat-msg-role-name\s*\{[^}]*opacity:\s*0/s);
+  });
+
+  it('助手消息带 reasoning 时渲染可折叠的思考过程，且与正文分开', () => {
+    useChatStore.getState().appendMessage('thread-1', { role: 'user', content: '生成一张海报' });
     useChatStore.getState().appendMessage('thread-1', {
       role: 'assistant',
-      content: '镜头缓慢推进，一只纸船顺着河面漂远。',
+      content: '海报已经生成。',
+      reasoning: '先确认画幅和主色，再整理提示词。',
       status: 'done',
     });
     const html = renderToStaticMarkup(<ChatMessageList {...handlers} />);
-    expect(html).toContain('应用为视频节点');
+    expect(html).toContain('hb-chat-reasoning');
+    expect(html).toContain('思考过程');
+    expect(html).toContain('先确认画幅和主色');
+    expect(html).toContain('海报已经生成。');
+    expect(html.indexOf('先确认画幅和主色')).toBeLessThan(html.indexOf('海报已经生成。'));
+  });
+
+  it('哪一条回答用了角色，就在该条消息的操作排标出对应角色', () => {
+    useChatStore.getState().appendMessage('thread-1', {
+      role: 'user',
+      content: '帮我做一个界面概念图',
+      agentRole: {
+        id: 'role-1',
+        name: '创意发散',
+        avatarUrl: '/avatars/dog.png',
+        systemPrompt: '',
+        skills: [],
+      },
+    });
+    useChatStore.getState().appendMessage('thread-1', {
+      role: 'assistant',
+      content: '概念图已经生成。',
+      status: 'done',
+    });
+    const html = renderToStaticMarkup(<ChatMessageList {...handlers} />);
+    expect(html).toContain('hb-chat-msg-role');
+    expect(html).toContain('创意发散');
+    expect(html.indexOf('hb-chat-text-actions')).toBeLessThan(html.indexOf('hb-chat-msg-role'));
+  });
+
+  it('助手自身角色快照优先于最近用户，澄清摘要不串角色', () => {
+    useChatStore.getState().appendMessage('thread-1', { role: 'user', content: '需求', agentRole: { id: 'old', name: '错误的最近角色', systemPrompt: '', skills: [] } });
+    useChatStore.getState().appendMessage('thread-1', { role: 'user', content: '已回答', askResponse: { title: '补充', questions: [] } });
+    useChatStore.getState().appendMessage('thread-1', { role: 'assistant', content: '续答', status: 'done', agentRole: { id: 'own', name: '实际运行角色', systemPrompt: '', skills: [] } });
+    const html = renderToStaticMarkup(<ChatMessageList {...handlers} />);
+    expect(html).toContain('实际运行角色');
+    expect(html).not.toContain('错误的最近角色');
+  });
+
+  it('之后点击角色不会追溯改变旧回复的归属', () => {
+    useChatStore.getState().appendMessage('thread-1', {
+      role: 'user',
+      content: '帮我做一个界面概念图',
+    });
+    useChatStore.getState().appendMessage('thread-1', {
+      role: 'assistant',
+      content: '概念图已经生成。',
+      status: 'done',
+    });
+    useChatStore.setState({ activeRoleId: 'role-1' });
+    const html = renderToStaticMarkup(<ChatMessageList {...handlers} />);
+    expect(html).not.toContain('hb-chat-msg-role');
+    expect(html).not.toContain('应用为视频节点');
   });
 
   it('隐藏旧版 AI 回复中的 DSML 工具源码，保留普通文字', () => {
@@ -207,6 +312,64 @@ describe('ChatMessageList', () => {
     expect(html).not.toContain('aria-label="以第 1 张图为基准继续编辑"');
     expect(html).not.toContain('aria-label="预览第 1 张图"');
     expect(html).toContain('alt="画一个咖啡杯"');
+    expect(html).toContain('style="width:240px;height:240px"');
+  });
+
+  it('单图按生成比例固定尺寸并靠左，不再跟随面板拉伸', () => {
+    expect(CHAT_CSS).not.toContain('aspect-ratio: 16 / 10');
+    expect(CHAT_CSS).toMatch(/\.hb-chat-media\s*\{[^}]*justify-content:\s*start/s);
+    expect(CHAT_CSS).toMatch(/\.hb-chat-media\.is-single\s*\{[^}]*display:\s*flex/s);
+    expect(CHAT_CSS).toMatch(/\.hb-chat-media-cell img\s*\{[^}]*object-fit:\s*contain/s);
+    expect(CHAT_MESSAGE_LIST_SOURCE).toContain('const SINGLE_MEDIA_MAX = 240;');
+    expect(CHAT_MESSAGE_LIST_SOURCE).toContain('const GRID_MEDIA_MAX = 136;');
+  });
+
+  it('行内引用默认无背景，悬停或聚焦时展示大图预览', () => {
+    expect(CHAT_CSS).toMatch(/\.hb-chat-msg-inline-ref\s*\{[^}]*background:\s*transparent/s);
+    expect(CHAT_CSS).toMatch(/\.hb-chat-msg-inline-ref:hover\s*\{[^}]*background:\s*var\(--color-ui-control-hover\)/s);
+    expect(CHAT_CSS).toMatch(/\.hb-chat-msg-inline-ref-preview\s*\{[^}]*opacity:\s*0/s);
+    expect(CHAT_CSS).toMatch(/\.hb-chat-msg-inline-ref:hover \.hb-chat-msg-inline-ref-preview,[^{]*\.hb-chat-msg-inline-ref:focus-visible \.hb-chat-msg-inline-ref-preview\s*\{[^}]*opacity:\s*1/s);
+    expect(CHAT_MESSAGE_LIST_SOURCE).toContain('className="hb-chat-msg-inline-ref-preview"');
+  });
+
+  it('对话标题复用画布选择器结构：标题重命名、箭头切换、顶部新建', () => {
+    expect(CHAT_PANEL_SOURCE).toContain('className="hb-chat-title-control"');
+    expect(CHAT_PANEL_SOURCE).toContain('className="hb-chat-title-name"');
+    expect(CHAT_PANEL_SOURCE).toContain('className={`hb-chat-title-menu-btn');
+    expect(CHAT_PANEL_SOURCE).toContain('useChatStore.getState().renameThread(thread.id, title);');
+    expect(CHAT_PANEL_SOURCE).toContain('className="hb-chat-thread-new"');
+    expect(CHAT_PANEL_SOURCE).not.toContain('PencilGlyphIcon');
+    expect(CHAT_PANEL_SOURCE).not.toContain('hb-chat-thread-rename');
+    expect(CHAT_PANEL_SOURCE).toContain('<CollapseRightGlyphIcon />');
+    expect(CHAT_CSS).toMatch(/\.hb-chat-thread-new\s*\{[^}]*justify-content:\s*center/s);
+    expect(CHAT_CSS).toMatch(/\.hb-chat-thread-menu\s*\{[^}]*animation:\s*fade-in var\(--motion-slow\) var\(--ease-out\)/s);
+    expect(CHAT_CSS).not.toMatch(/\.hb-chat-thread-menu\s*\{[^}]*grid-template-rows/s);
+    expect(CHAT_CSS).toMatch(/\.hb-chat-thread-list\s*\{[^}]*max-height:\s*min\(298px/s);
+    expect(CHAT_PANEL_SOURCE).not.toContain('className="hb-chat-thread-reveal"');
+    expect(CHAT_CSS).toMatch(/\.hb-chat-title-control\s*\{[^}]*border:\s*0/s);
+  });
+
+  it('点击标题区外任意位置关闭历史菜单，标题左右 hover 联动与画布选择器一致', () => {
+    expect(CHAT_PANEL_SOURCE).toContain('const titleWrapRef = useRef<HTMLDivElement>(null);');
+    expect(CHAT_PANEL_SOURCE).toContain('<div className="hb-chat-title-wrap" ref={titleWrapRef}>');
+    expect(CHAT_PANEL_SOURCE).toContain("document.addEventListener('pointerdown', onPointerDown, true);");
+    expect(CHAT_PANEL_SOURCE).toContain('titleWrapRef.current?.contains(event.target as Node)');
+    expect(CHAT_CSS).toMatch(
+      /\.hb-chat-title-control:has\(\.hb-chat-title-name:hover\) \.hb-chat-title-menu-btn,[\s\S]*?background:\s*var\(--color-interaction-subtle\)/s,
+    );
+  });
+
+  it('拖拽收起与展开动画时长可分别调整', () => {
+    expect(CHAT_CSS).toMatch(/--hb-chat-drag-collapse-duration:\s*var\(--motion-fast\)/);
+    expect(CHAT_CSS).toMatch(/--hb-chat-drag-expand-duration:\s*var\(--motion-fast\)/);
+    expect(CHAT_CSS).toMatch(/\.hb-chat-panel\.is-drag-collapsing\s*\{[^}]*animation:\s*hb-chat-panel-leave var\(--hb-chat-drag-collapse-duration\)/s);
+    expect(CHAT_CSS).toMatch(/\.hb-chat-panel\.is-drag-expanding\s*\{[^}]*animation:\s*hb-chat-panel-enter var\(--hb-chat-drag-expand-duration\)/s);
+  });
+
+  it('拖拽调宽时顶栏右侧控件取消缓动并逐帧跟随', () => {
+    expect(GLOBAL_CSS).toMatch(
+      /\.image-canvas-page:has\(\.hb-chat-panel\.is-resizing\) \.hb-topbar\s*\{[^}]*transition:\s*none/s,
+    );
   });
 
   it('工具过程卡：折叠态显示摘要，展开看参数与步骤', () => {

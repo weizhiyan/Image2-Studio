@@ -140,7 +140,7 @@ describe('视频节点的三态', () => {
     expect(html).toContain('image-node-media');
     expect(html).toContain('image-node-video-player');
     expect(html).toContain('class="image-node-kind-label"');
-    expect(html).toContain('>视频</span>');
+    expect(html).toContain('<span class="image-node-kind-text">一只蓝色纸船漂浮在水面</span>');
     expect(html).toContain('class="image-node-video-seek nodrag nowheel nopan"');
     expect(html).toContain('preload="none"');
     expect(html).toContain('aria-label="视频时间进度条"');
@@ -166,6 +166,7 @@ describe('视频节点的三态', () => {
     const html = renderNode(videoNode({ videoStatus: 'error', videoError: '内容审核未通过' }));
     expect(html).toContain('内容审核未通过');
     expect(html).toContain('is-error');
+    expect(html).toContain('image-node-composer-error is-video');
   });
 
   it('提交结果未知时明确要求核查，提供确认后重试入口', () => {

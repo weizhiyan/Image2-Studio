@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import CanvasImage from './CanvasImage';
 import { useNearViewport } from './useNearViewport';
 import type { HistoryItem } from '@/types';
@@ -19,7 +19,7 @@ function historyKeyOf(item: HistoryItem): string {
 
 /** 展示形式：宫格（只放图）/ 列表（按天分组 + 小图 + 两行文字）。 */
 type HistoryView = 'grid' | 'list';
-type HistoryMediaFilter = 'all' | 'image' | 'video';
+type HistoryMediaFilter = 'image' | 'video';
 
 /** 列表视图的一“天”：组标题日期 + 当天条目（进组前 list 已按时间排好序）。 */
 type HistoryDayGroup = { key: string; label: string; items: HistoryItem[] };
@@ -51,7 +51,6 @@ export default function HistoryPanel({
   onRequestClose,
   onClosed,
   closing,
-  anchorRect,
   inline = false,
 }: {
   items: HistoryItem[];
@@ -69,8 +68,6 @@ export default function HistoryPanel({
   onClosed?: () => void;
   /** 收起动画播放中：面板挂 is-leaving 并屏蔽指针。 */
   closing?: boolean;
-  /** 触发按钮的屏幕锚点：面板贴着它右侧展开。 */
-  anchorRect?: { x: number; y: number } | null;
   /** 工作台内联展开：跟随结果区排版，不使用画布的固定浮层定位。 */
   inline?: boolean;
 }) {
@@ -83,13 +80,11 @@ export default function HistoryPanel({
     visible.sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')));
     return visible.slice(0, 300);
   }, [items, hidden]);
-  const [mediaFilter, setMediaFilter] = useState<HistoryMediaFilter>('all');
+  const [mediaFilter, setMediaFilter] = useState<HistoryMediaFilter>('image');
   const imageCount = list.filter((item) => item.mediaType !== 'video').length;
   const videoCount = list.length - imageCount;
   const visibleList = useMemo(
-    () => mediaFilter === 'all'
-      ? list
-      : list.filter((item) => (item.mediaType || 'image') === mediaFilter),
+    () => list.filter((item) => (item.mediaType || 'image') === mediaFilter),
     [list, mediaFilter],
   );
   // 同一节点的版本id → 序号：把 baseVersionId 翻译成“基于 V1”
@@ -119,7 +114,6 @@ export default function HistoryPanel({
     return out;
   }, [visibleList]);
   const rootRef = useRef<HTMLElement>(null);
-  const [position, setPosition] = useState<CSSProperties>({});
 
   /* 视图与多选删除：视图关上面板就重置（多选同理），删除记录走模块级 hiddenKeys */
   const [view, setView] = useState<HistoryView>('grid');
@@ -133,19 +127,6 @@ export default function HistoryPanel({
     [visibleList, selected],
   );
   const selectedCount = selectedItems.length;
-
-  // 贴着锚点右侧展开，竖向居中：宫格内容更高，贴按钮定位容易顶出屏幕
-  useLayoutEffect(() => {
-    if (inline) {
-      setPosition({});
-      return;
-    }
-    if (!anchorRect) {
-      setPosition({});
-      return;
-    }
-    setPosition({ left: anchorRect.x, top: '50%', transform: 'translateY(-50%)' });
-  }, [anchorRect, inline, list.length]);
 
   const [revealError, setRevealError] = useState('');
   const revealFolder = useCallback(() => {
@@ -233,6 +214,22 @@ export default function HistoryPanel({
     void runDelete();
   };
 
+  /** 批量下载选中的原文件：逐个触发，间隔一拍，避免浏览器把连续下载合并或拦截。 */
+  const downloadSelected = () => {
+    if (selectedCount === 0) return;
+    selectedItems.forEach((item, index) => {
+      window.setTimeout(() => {
+        const link = document.createElement('a');
+        link.href = item.url;
+        link.download = item.fileName || `${item.mediaType || 'image'}-${item.createdAt || Date.now()}`;
+        link.rel = 'noopener';
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+      }, index * 80);
+    });
+  };
+
   /** 真删：逐条 DELETE /api/files/:name（bridge 路由），成功的记进模块级隐藏表 */
   const runDelete = async () => {
     const targets = selectedItems;
@@ -249,19 +246,30 @@ export default function HistoryPanel({
         failed.push(item.fileName);
       }
     }));
-    const targetKeys = new Set(targets.map(historyKeyOf));
-    const remaining = list.filter((item) => !targetKeys.has(historyKeyOf(item))).length;
     setHidden(new Set(hiddenKeys));
     setSelected(new Set());
     setConfirming(false);
     setDeleting(false);
     if (failed.length > 0) {
       setDeleteError(`删除失败：${failed.length} 个文件没删掉，请重试`);
-    } else if (remaining === 0) {
-      // 全删完了：收起多选态，让空态文案干干净净地露出来
+    } else {
+      // 一轮删除完成后退出选择态，底部操作栏不会留下“已选 0 个”。
       setMulti(false);
     }
   };
+
+  const viewToggle = (
+    <button
+      type="button"
+      className="image-history-view-btn"
+      aria-pressed={view === 'list'}
+      aria-label={view === 'grid' ? '切换为列表视图' : '切换为宫格视图'}
+      title={view === 'grid' ? '切换为列表视图' : '切换为宫格视图'}
+      onClick={() => setView((current) => current === 'grid' ? 'list' : 'grid')}
+    >
+      {view === 'grid' ? <ListIcon /> : <GridIcon />}
+    </button>
+  );
 
   /* 单条目渲染：宫格只放缩略图（勾选圈、定位按钮都压在图上）；
      列表才是小图 + 两行文字（第一排提示词、第二排版本/画布/来源/时刻）。 */
@@ -333,10 +341,9 @@ export default function HistoryPanel({
   return (
     <section
       ref={rootRef}
-      className={`image-history-panel${inline ? ' is-inline' : ''}${closing ? ' is-leaving' : ''}`}
+      className={`image-history-panel${inline ? ' is-inline' : ' is-canvas-panel is-canvas-history'}${closing ? ' is-leaving' : ''}`}
       role="dialog"
       aria-label="生成历史"
-      style={position}
       onClick={(event) => event.stopPropagation()}
       onAnimationEnd={(event) => {
         // 只认面板自己的收起动画：子元素（图片等）的动画结束也会冒泡上来
@@ -348,99 +355,52 @@ export default function HistoryPanel({
           <strong>生成历史</strong>
           <span>({loading ? '…' : list.length})</span>
         </div>
+        {revealError ? (
+          <span className="image-history-reveal-error" role="alert">{revealError}</span>
+        ) : null}
         <div className="image-history-head-actions">
           <button
             type="button"
             className={`image-history-multi${multi ? ' is-exit' : ''}`}
             aria-pressed={multi}
             onClick={toggleMulti}
-            title={multi ? '取消多选并清空勾选' : '多选删除'}
+            aria-label={multi ? '取消多选' : '多选历史记录'}
+            title={multi ? '取消多选' : '多选历史记录'}
           >
-            <CheckCircleIcon />
-            <span>{multi ? '取消多选' : '多选'}</span>
+            <span>{multi ? '取消' : '多选'}</span>
           </button>
-          {multi ? (
-            <button
-              type="button"
-              className={`image-history-delete${confirming ? ' is-armed' : ''}`}
-              onClick={onDeleteClick}
-              disabled={deleting || selectedCount === 0}
-              title={confirming ? '再点一次确认删除' : '删除选中的媒体文件'}
-            >
-              {deleting ? '删除中…' : confirming ? '确认删除' : `删除(${selectedCount})`}
-            </button>
-          ) : null}
+          <button type="button" onClick={revealFolder} aria-label="打开本地文件" title="打开本地文件">
+            <FolderIcon />
+          </button>
+          <div className="image-history-views">{viewToggle}</div>
         </div>
-        {revealError ? (
-          <span className="image-history-reveal-error" role="alert">{revealError}</span>
-        ) : null}
-        <div className="image-history-views">
-          <button
-            type="button"
-            className="image-history-view-btn"
-            aria-pressed={view === 'grid'}
-            aria-label="宫格视图"
-            title="宫格视图"
-            onClick={() => setView('grid')}
-          >
-            <GridIcon />
-          </button>
-          <button
-            type="button"
-            className="image-history-view-btn"
-            aria-pressed={view === 'list'}
-            aria-label="列表视图"
-            title="列表视图"
-            onClick={() => setView('list')}
-          >
-            <ListIcon />
-          </button>
-        </div>
-        <button type="button" onClick={revealFolder} aria-label="打开本地文件" title="打开本地文件">
-          <FolderIcon />
-        </button>
       </header> : null}
       <nav className="image-history-filter" aria-label="生成历史分类">
-        {([
-          ['all', '全部', list.length],
-          ['image', '图片', imageCount],
-          ['video', '视频', videoCount],
-        ] as const).map(([filter, label, count]) => (
-          <button
-            key={filter}
-            type="button"
-            className="image-history-filter-btn"
-            aria-pressed={mediaFilter === filter}
-            onClick={() => {
-              setMediaFilter(filter);
-              setSelected(new Set());
-              setConfirming(false);
-            }}
-          >
-            {label}<span>{count}</span>
-          </button>
-        ))}
+        <div className="image-history-filter-tabs" role="tablist" aria-label="媒体类型">
+          {([
+            ['image', '图片', imageCount],
+            ['video', '视频', videoCount],
+          ] as const).map(([filter, label, count]) => (
+            <button
+              key={filter}
+              type="button"
+              role="tab"
+              className="image-history-filter-btn"
+              aria-selected={mediaFilter === filter}
+              onClick={() => {
+                setMediaFilter(filter);
+                setSelected(new Set());
+                setConfirming(false);
+              }}
+            >
+              {label}<span>{count}</span>
+            </button>
+          ))}
+        </div>
         {inline ? (
           <div className="image-history-filter-actions">
             {revealError ? <span className="image-history-reveal-error" role="alert">{revealError}</span> : null}
-            <div className="image-history-views">
-              <button
-                type="button"
-                className="image-history-view-btn"
-                aria-pressed={view === 'grid'}
-                aria-label="宫格视图"
-                title="宫格视图"
-                onClick={() => setView('grid')}
-              ><GridIcon /></button>
-              <button
-                type="button"
-                className="image-history-view-btn"
-                aria-pressed={view === 'list'}
-                aria-label="列表视图"
-                title="列表视图"
-                onClick={() => setView('list')}
-              ><ListIcon /></button>
-            </div>
+            <div className="image-history-views">{viewToggle}</div>
             <button type="button" onClick={revealFolder} aria-label="打开本地文件" title="打开本地文件">
               <FolderIcon />
             </button>
@@ -468,6 +428,43 @@ export default function HistoryPanel({
             </section>
           ))}
       </div>
+      {!inline && multi ? (
+        <div className="image-history-bulkbar" role="toolbar" aria-label="已选媒体操作">
+          <button
+            type="button"
+            className="image-history-bulk-close"
+            onClick={toggleMulti}
+            aria-label="退出选择"
+            title="退出选择"
+          >
+            <CloseIcon />
+          </button>
+          <span className="image-history-bulk-selected" aria-live="polite">
+            已选 <strong>{selectedCount}</strong> 个
+          </span>
+          <div className="image-history-bulk-actions">
+            <button
+              type="button"
+              onClick={downloadSelected}
+              disabled={selectedCount === 0}
+              aria-label="下载选中文件"
+              title="下载选中文件"
+            >
+              <DownloadIcon />
+            </button>
+            <button
+              type="button"
+              className={`image-history-delete${confirming ? ' is-armed' : ''}`}
+              onClick={onDeleteClick}
+              disabled={deleting || selectedCount === 0}
+              aria-label={confirming ? '再点一次确认删除' : '删除选中的媒体文件'}
+              title={confirming ? '再点一次确认删除' : '删除选中的媒体文件'}
+            >
+              <TrashIcon />
+            </button>
+          </div>
+        </div>
+      ) : null}
     </section>
   );
 }
@@ -530,12 +527,18 @@ function ListIcon() {
   );
 }
 
-/** 多选开关：圈里一个勾。 */
-function CheckCircleIcon() {
+function DownloadIcon() {
   return (
     <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
-      <circle cx="12" cy="12" r="8.4" stroke="currentColor" strokeWidth="1.6" />
-      <path d="m8.3 12.4 2.6 2.6 4.9-5.5" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M12 3.5v11M7.8 10.6 12 14.8l4.2-4.2M5 19.5h14" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function TrashIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <path d="M4.5 7h15M9.5 3.8h5M7 7l.7 12.1a1.7 1.7 0 0 0 1.7 1.6h5.2a1.7 1.7 0 0 0 1.7-1.6L17 7M10 10.5v6.2M14 10.5v6.2" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
     </svg>
   );
 }

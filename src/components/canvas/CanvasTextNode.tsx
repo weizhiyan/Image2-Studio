@@ -2,6 +2,8 @@ import { useEffect, useRef, useState, type CSSProperties, type PointerEvent as R
 import { Handle, Position, type NodeProps } from '@xyflow/react';
 import { MarkdownText } from '@/components/chat/ChatMessageList';
 import { nodeBoxFor } from '@/lib/aspect';
+import { pickTextProfile } from '@/lib/enhance';
+import { useSettingsStore } from '@/stores/settingsStore';
 import type { CanvasNodeData } from '@/types';
 import {
   emitEvent,
@@ -28,25 +30,64 @@ export default function CanvasTextNode({ id, data, selected }: NodeProps) {
   const nodeData = data as unknown as CanvasNodeData;
   const box = nodeBoxFor(nodeData);
   const content = String(nodeData.textContent || '');
+  const settings = useSettingsStore((state) => state.settings);
+  const polishModelLabel = pickTextProfile(settings)?.model || '';
   const [editing, setEditing] = useState(nodeData.textEditing === true);
   const [draft, setDraft] = useState(content);
   const [optimizing, setOptimizing] = useState(false);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  const draftRef = useRef(draft);
+  const contentRef = useRef(content);
+  const commitTimerRef = useRef(0);
+  draftRef.current = draft;
+  contentRef.current = content;
 
-  useEffect(() => setDraft(content), [content]);
+  // 编辑期间只认本地草稿：父级回写 content 会让受控 textarea 重设选区，光标就跳到末尾 / 消失
+  useEffect(() => {
+    if (editing) return;
+    setDraft(content);
+  }, [content, editing]);
+
   useEffect(() => {
     if (editing) inputRef.current?.focus();
   }, [editing]);
+
+  useEffect(() => () => window.clearTimeout(commitTimerRef.current), []);
+
   useEffect(() => onEvent<NodeTextOptimizeResultDetail>(
     NODE_EVENTS.textOptimizeResult,
     (detail) => {
-      if (detail.nodeId === id) setOptimizing(false);
+      if (detail.nodeId !== id) return;
+      setOptimizing(false);
+      if (typeof detail.text === 'string') {
+        draftRef.current = detail.text;
+        setDraft(detail.text);
+      }
     },
   ), [id]);
 
-  const updateContent = (text: string) => {
+  const commitDraft = () => {
+    window.clearTimeout(commitTimerRef.current);
+    if (draftRef.current !== contentRef.current) {
+      emitEvent<NodeTextContentDetail>(NODE_EVENTS.textContent, { nodeId: id, text: draftRef.current });
+    }
+    setEditing(false);
+  };
+
+  const updateDraft = (text: string) => {
+    draftRef.current = text;
     setDraft(text);
-    emitEvent<NodeTextContentDetail>(NODE_EVENTS.textContent, { nodeId: id, text });
+    window.clearTimeout(commitTimerRef.current);
+    commitTimerRef.current = window.setTimeout(() => {
+      if (draftRef.current === contentRef.current) return;
+      emitEvent<NodeTextContentDetail>(NODE_EVENTS.textContent, { nodeId: id, text: draftRef.current });
+    }, 300);
+  };
+
+  const beginEditing = () => {
+    draftRef.current = content;
+    setDraft(content);
+    setEditing(true);
   };
 
   const startResize = (event: ReactPointerEvent<HTMLButtonElement>) => {
@@ -92,21 +133,21 @@ export default function CanvasTextNode({ id, data, selected }: NodeProps) {
               value={draft}
               maxLength={12000}
               aria-label="Markdown 文本内容"
-              onChange={(event) => updateContent(event.currentTarget.value)}
-              onBlur={() => setEditing(false)}
+              onChange={(event) => updateDraft(event.currentTarget.value)}
+              onBlur={commitDraft}
               onKeyDown={(event) => {
                 if (event.key === 'Escape' || (event.key === 'Enter' && (event.metaKey || event.ctrlKey))) {
                   event.preventDefault();
-                  setEditing(false);
+                  commitDraft();
                 }
               }}
             />
           ) : (
             <div
               className="canvas-text-node-preview nodrag nowheel nopan"
-              onDoubleClick={() => setEditing(true)}
+              onDoubleClick={beginEditing}
               onClick={() => {
-                if (!draft.trim()) setEditing(true);
+                if (!draft.trim()) beginEditing();
               }}
             >
               {draft.trim() ? <MarkdownText text={draft} /> : null}
@@ -117,6 +158,8 @@ export default function CanvasTextNode({ id, data, selected }: NodeProps) {
               type="button"
               className="canvas-text-node-polish nodrag nowheel nopan"
               disabled={!draft.trim() || optimizing}
+              title={polishModelLabel ? `润色（${polishModelLabel}）` : '润色'}
+              aria-label={polishModelLabel ? `润色，使用 ${polishModelLabel}` : '润色'}
               onClick={optimizeContent}
             >
               <AiGlyphIcon />

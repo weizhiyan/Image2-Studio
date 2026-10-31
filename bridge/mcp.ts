@@ -13,7 +13,7 @@ import {
   fidelityForUsage,
   LEVEL_SPECS,
 } from './textApi.js';
-import { countOpenTabs, pushImage, pushLocate } from './hub.js';
+import { broadcastForwardBase, countOpenTabs, isBroadcastForwarded, pushImage, pushLocate } from './hub.js';
 import { fetchRemoteImage } from './providerApi.js';
 import { mediaFileToDataUrl } from './files.js';
 import { clearAgentPresence, markAgentPresence } from './agentPresence.js';
@@ -24,7 +24,7 @@ import {
   readCanvasDoc,
   readCanvasRegistry,
 } from './http.js';
-import type { CanvasNodeRecord, CanvasDocRecord } from './http.js';
+import type { CanvasNodeRecord, CanvasDocRecord, InternalCanvasWriteOperation, InternalCanvasWriteResults } from './http.js';
 import { listEnabledPromptSkills, type PromptSkill } from './skills.js';
 import { PORT } from './paths.js';
 import { findVideoTaskByNode } from './videoTasks.js';
@@ -73,10 +73,10 @@ export interface McpDeps {
   readCanvasDoc: typeof readCanvasDoc;
   enhancePrompt: typeof enhancePromptDetailed;
   generateImages: typeof generateImages;
-  pushImage: typeof pushImage;
-  pushLocate: typeof pushLocate;
+  pushImage: (payload: Parameters<typeof pushImage>[0]) => void | Promise<void>;
+  pushLocate: (payload: Parameters<typeof pushLocate>[0]) => void | Promise<void>;
   appendCanvasImageNodes: typeof appendCanvasImageNodes;
-  countOpenTabs: () => number;
+  countOpenTabs: () => number | Promise<number>;
   createCanvas: (canvasId: string, name: string) => Promise<{ id: string; name: string }>;
   resolveReferenceDataUrls: (inputs: string[]) => Promise<Array<{ dataUrl: string; url: string }>>;
   listPromptSkills?: () => Promise<PromptSkill[]>;
@@ -632,8 +632,8 @@ export async function callMcpTool(
       ? `画布 ${canvasId} 上没有节点 ${nodeId}（用 huiban_nodes 核对 id）`
       : `画布 ${canvasId} 上还没有节点，没有可定位的对象`);
     const targetId = String(target.id || '');
-    deps.pushLocate({ type: 'locate', canvasId, nodeId: targetId, at: new Date().toISOString() });
-    const openTabs = deps.countOpenTabs();
+    await deps.pushLocate({ type: 'locate', canvasId, nodeId: targetId, at: new Date().toISOString() });
+    const openTabs = await deps.countOpenTabs();
     return toolText({
       ok: true,
       located: true,
@@ -725,6 +725,8 @@ export async function callMcpTool(
     let persisted = false;
     let delivered = false;
     let persistError = '';
+    let deliveryError = '';
+    let autoLocated = false;
     const nodes: CanvasNodeRecord[] = [];
 
     if (canvasId) {
@@ -765,9 +767,13 @@ export async function callMcpTool(
       });
       try {
         persisted = await deps.appendCanvasImageNodes(canvasId, nodes);
-        if (persisted) {
-          nodes.forEach((node, index) => {
-            deps.pushImage({
+      } catch (error) {
+        persistError = error instanceof Error ? error.message : '画布写入失败';
+      }
+      if (persisted) {
+        try {
+          for (const [index, node] of nodes.entries()) {
+            await deps.pushImage({
               type: 'image',
               canvasId,
               nodeId: node.id,
@@ -784,23 +790,22 @@ export async function callMcpTool(
               url: images[index].url,
               jobId: `job_${Date.now().toString(36)}_${index}`,
             });
-          });
-          // 图先落画布，再发定位（默认开：不依赖 agent 记得调 huiban_locate，用户不会看不到成果）。
-          // onlyIfOffscreen 让前端自己判断——新节点本就在用户视口里就不挪镜头，别打断他。
-          // 传 locate:false 才彻底不碰视口，之后 agent 还能用 huiban_locate 补。
+          }
+          // 图先落画布并确认广播，再发定位。无确认或转发失败时不得虚报送达。
           if (args.locate !== false && nodes.length > 0) {
-            deps.pushLocate({
+            await deps.pushLocate({
               type: 'locate',
               canvasId,
               nodeId: nodes[0].id,
               at: new Date().toISOString(),
               onlyIfOffscreen: true,
             });
+            autoLocated = true;
           }
           delivered = true;
+        } catch (error) {
+          deliveryError = error instanceof Error ? error.message : '实时通知失败';
         }
-      } catch (error) {
-        persistError = error instanceof Error ? error.message : '画布写入失败';
       }
     }
 
@@ -809,8 +814,9 @@ export async function callMcpTool(
       canvasId: canvasId || null,
       deliveredToCanvas: delivered,
       persistedToDoc: persisted,
-      autoLocate: Boolean(persisted && args.locate !== false),
+      autoLocate: autoLocated,
       ...(persistError ? { persistError } : {}),
+      ...(deliveryError ? { deliveryError } : {}),
       usedPrompt: prompt,
       apiMode,
       size,
@@ -828,7 +834,7 @@ export async function callMcpTool(
       })),
       hints: [
         canvasId
-          ? (persisted ? '已写入画布文档：浏览器里该画布在线即时可见，不在线时下次打开/刷新也能看到' : `未能写入画布文档${persistError ? `：${persistError}` : ''}`)
+          ? (persisted ? (delivered ? '已写入画布文档并确认实时通知：浏览器在线时可见，不在线时下次打开/刷新可见' : `已写入画布文档，但实时通知失败：${deliveryError}；打开/刷新画布可恢复`) : `未能写入画布文档${persistError ? `：${persistError}` : ''}`)
           : '未指定 canvasId：只返回了图片（文件已在 ~/.huiban/media），不会出现在画布上',
         referenceDataUrls.length > 0 ? `已带 ${referenceDataUrls.length} 张参考图（inputFidelity=${String(inputFidelity || '默认')}）` : '',
         persisted && args.locate === false
@@ -841,6 +847,23 @@ export async function callMcpTool(
   throw new Error(`未知工具: ${name}`);
 }
 
+async function internalCanvasWrite<T extends InternalCanvasWriteOperation>(operation: T): Promise<InternalCanvasWriteResults[T['op']]> {
+  const response = await fetch(`${broadcastForwardBase()}/api/internal/write`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(operation),
+  });
+  const body = await response.json() as { code?: number; data?: unknown; msg?: string };
+  if (!response.ok || body.code !== 0) throw new Error(body.msg || `主 Bridge 写入失败（HTTP ${response.status}）`);
+  if (operation.op === 'createCanvas') {
+    const result = body.data as { id?: unknown; name?: unknown } | null;
+    if (!result || result.id !== operation.canvasId || typeof result.name !== 'string') throw new Error('主 Bridge 返回了无效的画布创建结果');
+  } else if (typeof body.data !== 'boolean') {
+    throw new Error('主 Bridge 返回了无效的画布写入结果');
+  }
+  return body.data as InternalCanvasWriteResults[T['op']];
+}
+
 export const defaultMcpDeps: McpDeps = {
   readSettings,
   readCanvasRegistry,
@@ -849,12 +872,28 @@ export const defaultMcpDeps: McpDeps = {
   generateImages,
   pushImage,
   pushLocate,
-  countOpenTabs,
-  appendCanvasImageNodes,
-  createCanvas: (canvasId: string, name: string) => createCanvasInRegistry(canvasId, name),
+  countOpenTabs: async () => {
+    if (!isBroadcastForwarded()) return countOpenTabs();
+    const response = await fetch(`${broadcastForwardBase()}/api/agent/status`);
+    const body = await response.json() as { code?: number; data?: { openTabs?: unknown }; msg?: string };
+    if (!response.ok || (body.code !== undefined && body.code !== 0)) {
+      throw new Error(body.msg || `读取在线标签页失败（HTTP ${response.status}）`);
+    }
+    const tabs = body.data?.openTabs;
+    if (typeof tabs !== 'number' || !Number.isInteger(tabs) || tabs < 0) throw new Error('主 Bridge 返回了无效的在线标签页数');
+    return tabs;
+  },
+  appendCanvasImageNodes: (canvasId, nodes) => isBroadcastForwarded()
+    ? internalCanvasWrite({ op: 'appendImages', canvasId, nodes })
+    : appendCanvasImageNodes(canvasId, nodes),
+  createCanvas: (canvasId, name) => isBroadcastForwarded()
+    ? internalCanvasWrite({ op: 'createCanvas', canvasId, name })
+    : createCanvasInRegistry(canvasId, name),
   resolveReferenceDataUrls,
   listPromptSkills: listEnabledPromptSkills,
-  patchVideoNode: patchCanvasVideoNode,
+  patchVideoNode: (canvasId, nodeId, patch) => isBroadcastForwarded()
+    ? internalCanvasWrite({ op: 'patchVideoNode', canvasId, nodeId, patch })
+    : patchCanvasVideoNode(canvasId, nodeId, patch),
 };
 
 let presenceHeartbeat: ReturnType<typeof setInterval> | null = null;

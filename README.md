@@ -120,7 +120,9 @@ bridge（Node 单进程）
   ├─ /api/generate   生图出口
   ├─ /api/files/*    本地图片与媒体文件
   ├─ /api/events     SSE：把新图和画布更新推给页面
-  ├─ /api/chats      对话线程持久化
+  ├─ /api/chat/threads  对话线程持久化（revision CAS）
+  ├─ /api/chat/runs     对话运行、SSE 快照与生图确认
+  ├─ /api/internal/*    同机 MCP 进程的广播与共享文档写入
   └─ MCP stdio       给 Codex / 其他 Agent 的工具入口
 ```
 

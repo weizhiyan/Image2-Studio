@@ -1,48 +1,150 @@
-export interface AgentConnectPromptInput {
+export interface AgentConnectInput {
   canvasId?: string;
   canvasName?: string;
   mcpEntry: string;
   nodeCommand: string;
+  nodePath?: string;
+  platform?: string;
 }
 
-export function buildAgentConnectPrompt({
-  canvasId,
-  canvasName,
-  mcpEntry,
-  nodeCommand,
-}: AgentConnectPromptInput): string {
-  const canvasLabel = canvasName ? `「${canvasName}」` : '当前画布';
-  const canvasRef = canvasId ? `${canvasLabel}（${canvasId}）` : canvasLabel;
-  const config = [
+export interface AgentConnectCodeBlock {
+  id: string;
+  label: string;
+  code: string;
+}
+
+export interface AgentConnectOption {
+  id: 'codex' | 'claude' | 'workbuddy' | 'generic';
+  label: string;
+  summary: string;
+  note?: string;
+  blocks: AgentConnectCodeBlock[];
+}
+
+function shellQuote(value: string, platform?: string): string {
+  if (platform === 'win32') return `"${value.replace(/"/g, '\\"')}"`;
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+function canvasLabel(input: AgentConnectInput): string {
+  const label = input.canvasName ? `「${input.canvasName}」` : '当前画布';
+  return input.canvasId ? `${label}（${input.canvasId}）` : label;
+}
+
+function nodeBinary(input: AgentConnectInput): string {
+  return input.nodePath || input.nodeCommand;
+}
+
+function codexToml(input: AgentConnectInput): string {
+  return [
     '[mcp_servers.huiban]',
-    `command = ${JSON.stringify(nodeCommand)}`,
-    `args = [${JSON.stringify(mcpEntry)}]`,
+    `command = ${JSON.stringify(nodeBinary(input))}`,
+    `args = [${JSON.stringify(input.mcpEntry)}]`,
   ].join('\n');
-  const workbuddyConfig = JSON.stringify({
+}
+
+function claudeJson(input: AgentConnectInput): string {
+  return JSON.stringify({
     mcpServers: {
       huiban: {
-        type: 'stdio',
-        command: nodeCommand,
-        args: [mcpEntry],
+        command: nodeBinary(input),
+        args: [input.mcpEntry],
       },
     },
   }, null, 2);
+}
 
+function workbuddyJson(input: AgentConnectInput): string {
+  const command = input.platform === 'win32'
+    ? nodeBinary(input)
+    : (input.nodeCommand || nodeBinary(input));
+  return JSON.stringify({
+    mcpServers: {
+      huiban: {
+        type: 'stdio',
+        command,
+        args: [input.mcpEntry],
+      },
+    },
+  }, null, 2);
+}
+
+export function buildAgentConnectPrompt(input: AgentConnectInput): string {
+  const command = `${shellQuote(nodeBinary(input), input.platform)} ${shellQuote(input.mcpEntry, input.platform)}`;
   return [
-    `请通过绘板 MCP 操作当前画布${canvasRef}。先调用 huiban_canvases（WorkBuddy 中实际名称是 huiban_huiban_canvases），按 ID 核对画布；找不到就停止，不要新建或改用其他画布。`,
-    '确认存在后，只在这张画布上执行我的后续指令。',
-    '',
+    `请通过绘板 MCP 操作当前画布${canvasLabel(input)}。`,
+    `MCP 服务名：huiban；stdio 启动命令：${command}`,
+    '先调用 huiban_canvases 核对画布；找不到就停止，不要新建或改用其他画布。',
+    '工具名以 tools/list 为准（通常是 huiban_generate、huiban_canvases、huiban_nodes、huiban_locate）。',
     '如果 huiban_canvases 不可用或调用失败，请停止操作，不要假装已连接。',
-    'WorkBuddy 会给工具名加连接器命名空间前缀，生图等工具对应 huiban_huiban_generate；以 tools/list 里的实际名称为准，不要因为找不到无前缀名字就判定未连接。',
-    '',
-    '若我在使用 WorkBuddy，请让我打开「专家·技能·连接器 > 连接器 > 自定义连接器 > MCP 服务管理 > 配置 MCP」，把下面 JSON 保存到编辑器里。WorkBuddy 的实际配置文件是 ~/.workbuddy/mcp.json，注意不是 ~/.workbuddy/.mcp.json。保存后按提示信任并重启 WorkBuddy：',
-    workbuddyConfig,
-    '',
-    'WorkBuddy 启动 MCP 时 PATH 里没有 node，command 必须用上面的绝对路径启动脚本，不要改成 node。',
-    '',
-    '若我在使用 Codex，请告诉我到设置 > MCP servers 添加以下配置并重启：',
-    config,
-    '',
-    '这是本机 stdio 接入，不提供远程 URL。若当前 Agent 是 ChatGPT 等托管服务，请说明它不能直接启动本机 MCP，并且不要编造远程地址。',
   ].join('\n');
+}
+
+export function buildAgentConnectOptions(input: AgentConnectInput): AgentConnectOption[] {
+  const node = nodeBinary(input);
+  const command = `${shellQuote(node, input.platform)} ${shellQuote(input.mcpEntry, input.platform)}`;
+  return [
+    {
+      id: 'codex',
+      label: 'Codex',
+      summary: '在终端执行一次即可；Codex 会写入 ~/.codex/config.toml。',
+      note: 'ChatGPT 桌面版 / IDE 在 Settings > MCP servers 里添加 STDIO 服务，command 和 args 填上面的值。',
+      blocks: [
+        {
+          id: 'codex-command',
+          label: '终端命令',
+          code: `codex mcp add huiban -- ${command}`,
+        },
+        {
+          id: 'codex-config',
+          label: '或写入 ~/.codex/config.toml',
+          code: codexToml(input),
+        },
+      ],
+    },
+    {
+      id: 'claude',
+      label: 'Claude Code',
+      summary: '在项目目录执行一次；也可以写入项目 .mcp.json。',
+      note: 'Claude Code 会从 .mcp.json 读取 stdio 服务，重启会话后生效。',
+      blocks: [
+        {
+          id: 'claude-command',
+          label: '终端命令',
+          code: `claude mcp add --transport stdio huiban -- ${command}`,
+        },
+        {
+          id: 'claude-json',
+          label: '或写入 .mcp.json',
+          code: claudeJson(input),
+        },
+      ],
+    },
+    {
+      id: 'workbuddy',
+      label: 'WorkBuddy',
+      summary: '保存到 ~/.workbuddy/mcp.json（不是 .mcp.json），信任并重启 WorkBuddy。',
+      note: 'WorkBuddy 的 PATH 可能没有 node，command 使用绝对路径；工具名会加 huiban_ 前缀，实际名称以 tools/list 为准。',
+      blocks: [
+        {
+          id: 'workbuddy-json',
+          label: 'mcp.json',
+          code: workbuddyJson(input),
+        },
+      ],
+    },
+    {
+      id: 'generic',
+      label: '通用',
+      summary: '把这段说明和启动命令发给任意支持 stdio MCP 的 Agent。',
+      note: '如果客户端给工具加了命名空间前缀，以 tools/list 里的实际名称为准。',
+      blocks: [
+        {
+          id: 'generic-prompt',
+          label: '发给 Agent 的说明',
+          code: buildAgentConnectPrompt(input),
+        },
+      ],
+    },
+  ];
 }

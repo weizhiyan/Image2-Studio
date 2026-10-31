@@ -1,15 +1,11 @@
 import {
-  useEffect,
   useId,
-  useRef,
-  useState,
   type ButtonHTMLAttributes,
   type CSSProperties,
   type ReactNode,
 } from 'react';
 import {
   AiGlyphIcon,
-  CopyPromptGlyphIcon,
   DeleteGlyphIcon,
   DrawGlyphIcon,
   OutpaintGlyphIcon,
@@ -17,37 +13,6 @@ import {
   ZoomGlyphIcon,
 } from './NodeToolbarIcons';
 import './NodeSelectionToolbar.css';
-
-function legacyCopyText(text: string): boolean {
-  const field = document.createElement('textarea');
-  field.value = text;
-  field.setAttribute('readonly', '');
-  field.style.position = 'fixed';
-  field.style.left = '-9999px';
-  field.style.opacity = '0';
-  field.style.pointerEvents = 'none';
-  document.body.appendChild(field);
-  field.select();
-  field.setSelectionRange(0, text.length);
-  try {
-    return document.execCommand('copy');
-  } catch {
-    return false;
-  } finally {
-    field.remove();
-  }
-}
-
-/** 局域网 HTTP 下 Clipboard API 可能不可用，保留 execCommand 兜底。 */
-async function copyText(text: string): Promise<boolean> {
-  try {
-    if (!navigator.clipboard?.writeText) return legacyCopyText(text);
-    await navigator.clipboard.writeText(text);
-    return true;
-  } catch {
-    return legacyCopyText(text);
-  }
-}
 
 function ToolbarButton({
   label,
@@ -97,7 +62,6 @@ export default function NodeSelectionToolbar({
   onRegenerate,
   onAnnotate,
   onOutpaint,
-  copyPrompt,
   onDelete,
   regenerateLabel = '重新生成',
   regenerateTitle = '重新生成：在当前节点追加一个新版本',
@@ -115,32 +79,14 @@ export default function NodeSelectionToolbar({
   onAnnotate?: () => void;
   /** 扩图：进入画布内扩展编辑器。 */
   onOutpaint?: () => void;
-  /** 仅 AI 生成且确有提示词时传入；上传图不应出现复制入口。 */
-  copyPrompt?: string;
   /** 删除节点：仅图片 / 参考图由页面层接入现有 React Flow 删除链路。 */
   onDelete?: () => void;
   regenerateLabel?: string;
   regenerateTitle?: string;
   ariaLabel?: string;
 }) {
-  const promptText = String(copyPrompt || '').trim();
-  const [promptCopied, setPromptCopied] = useState(false);
-  const copyTimerRef = useRef<number | null>(null);
   const hasViewActions = showPreview || Boolean(onAnnotate) || Boolean(onOutpaint);
-  const hasGenerationActions = showRedit || Boolean(onRegenerate) || Boolean(promptText) || Boolean(onDelete);
-
-  useEffect(() => () => {
-    if (copyTimerRef.current !== null) window.clearTimeout(copyTimerRef.current);
-  }, []);
-
-  const handleCopyPrompt = async () => {
-    if (!promptText) return;
-    const copied = await copyText(promptText);
-    if (!copied) return;
-    setPromptCopied(true);
-    if (copyTimerRef.current !== null) window.clearTimeout(copyTimerRef.current);
-    copyTimerRef.current = window.setTimeout(() => setPromptCopied(false), 1400);
-  };
+  const hasGenerationActions = showRedit || Boolean(onRegenerate) || Boolean(onDelete);
 
   return (
     <div className="image-selection-toolbar" style={style} role="toolbar" aria-label={ariaLabel}>
@@ -177,16 +123,6 @@ export default function NodeSelectionToolbar({
       ) : null}
       {hasViewActions && hasGenerationActions ? <span aria-hidden="true" /> : null}
       {/* 第二组：生成类——二次编辑（图标+文字）、重新生成（淡底图标钮） */}
-      {promptText ? (
-        <ToolbarButton
-          className={`image-selection-toolbar-glyph-sm${promptCopied ? ' is-copied' : ''}`}
-          label={promptCopied ? '已复制提示词' : '复制提示词'}
-          tooltip={promptCopied ? '已复制提示词' : '复制提示词'}
-          onClick={() => void handleCopyPrompt()}
-        >
-          <CopyPromptGlyphIcon />
-        </ToolbarButton>
-      ) : null}
       {showRedit ? (
         <ToolbarButton
           className="image-selection-toolbar-text"

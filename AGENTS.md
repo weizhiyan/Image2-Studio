@@ -87,6 +87,14 @@ CSS，不要新造平行结构。节点尺寸经 `--image-node-width` 注入（J
 `activeProfile` / `textProfilesOf` 会跳过（全停用时退回原池不抛空），显式按 `profileId`
 指定的仍认。界面启停入口统一在左侧配置卡片，停用当前生效那路时前端自动让位并提示。
 
+语言模型同样允许多路同时启用，且**没有配置级启停**：所有语言配置都在对话菜单里可选。
+配置卡片里 `selectedModels` 决定哪些模型显示在卡片上（详情页内层勾选），
+`enabledModels` 决定模型是否启用（卡片开关）；关闭开关只停用，不从卡片移除。
+对话线程用 `textProfileId` + `textModel` 锁定一路一模型，发出首条消息后只能新建对话切换。
+Agent 出图模型（`imageProfileId` + `imageModel`）按线程保存、可随时切换，新对话继承上一个；
+直接生成仍走生成节点自己的模型选择。聊天输入区只显示 Agent 生图模型，悬停“对话模型”
+在右侧（空间不足时翻到左侧）展开二级菜单；别再拆回两个并列按钮或把语言模型限制成只启用一路。
+
 ## 画布状态约定（改 CanvasPage 前必读）
 
 `nodesRef` / `edgesRef` 是画布**真源**，只在写操作里推进（`appendNode` / `patchNode` / `onNodesChange` /
@@ -118,6 +126,12 @@ CSS，不要新造平行结构。节点尺寸经 `--image-node-width` 注入（J
 否则 `mergeCanvases` 同 id 取新的一侧，并把本地较新的回推（`putCanvasDoc`）。活动画布变更后 600ms 防抖上桥。
 删画布走 `DELETE /api/canvases/:id`。registry（`canvases.json`，只有名字）继续供 MCP `huiban_canvases` 列目录。
 别把这里改回「只存名字」或「只存浏览器」——用户明确要求换浏览器打开链接要有记录。
+
+**上桥发变更集，不发整份快照**：`putCanvasDoc` 只发相对上次成功同步的 `graphChanges`
+（节点/连线的新增、修改、删除）+ `baselineUpdatedAt`，bridge 在写锁内合并进最新文档；
+删除会留下 30 天墓碑（`deletedNodeIds` / `deletedEdgeIds`），旧标签页拿过期基线回写时
+不会把已删节点或连线复活，客户端已看到删除后的撤销恢复仍然允许。别再改回整份快照覆盖——
+那正是「另一个标签页把已删节点带回来」的根因。
 
 **顺手清空占位画布**：活动画布定下来之后，删掉「名字叫 `默认画布` + 0 节点 0 边」且非活动的画布
 （只在已经存在有内容的画布时才动，全新安装仍保留那一张当工作台）。注意**不能**加"本地独占"条件——
@@ -188,6 +202,17 @@ composer 手动拖过高度时用 `clamp(nodeHeight, MIN/MAX_COMPOSER_NODE_HEIGH
   ② pushImage 推 SSE 给订阅该画布的标签页。浏览器没开时 ① 保证图不丢，刷新/切画布随水合出来；
   PUT 整文档时 keepExternalNodesOnSnapshot 会把「MCP 刚写、本地旧快照还没有」的节点捞回来
   （判据 source==='mcp' 且 createdAt 晚于请求 updatedAt；用户真删后 updatedAt 更新，不复活）。
+  **MCP stdio 与 HTTP 进程分离时**：MCP 进程拿不到端口，hub 的 clients 是空的。拿不到端口的进程
+  通过 `setBroadcastForwardBase` 把 image / locate / video / canvas-updated 转发到
+  `POST /api/internal/broadcast`，由持有端口的进程广播（该路由只接受本机请求）。别在 MCP 侧直接
+  调 hub 就以为浏览器能收到；`countOpenTabs` 也要经 `/api/agent/status` 读真实值。
+  共享文档的写入同样不能由 MCP 进程直接读改写：`appendCanvasImageNodes` / `createCanvasInRegistry` /
+  `patchCanvasVideoNode` 经 typed `POST /api/internal/write` 交给持有端口的主进程执行，复用同一写锁、
+  墓碑合并和滚动备份；请求只接受 loopback、拒绝跨站 Origin、严格校验操作/ID/JSON 形状，不接受任意路径。
+  网络失败明确报错，不回退写共享 JSON。
+- **定位补发**：pushLocate 会保留最近一条（10 分钟 TTL），`GET /api/agent/locate` 供画布页挂载时
+  补处理，处理完 `POST /api/agent/locate/ack` 确认（带 at，避免误清新定位）。生成时用户停在
+  「工作台」或页面没开也应在下次进入画布页时自动切到目标画布并聚焦。
 - MCP 工具面（`bridge/mcp.ts`，业务逻辑与协议壳分离，单测见 tests/mcp.test.ts）：
   huiban_generate / huiban_canvases / huiban_canvas_create / huiban_nodes / huiban_models / huiban_config /
   huiban_prompt_guide / huiban_optimize（后两个把提示词优化链路暴露给 agent：guide 返回
@@ -200,32 +225,66 @@ composer 手动拖过高度时用 `clamp(nodeHeight, MIN/MAX_COMPOSER_NODE_HEIGH
   转 isError:true 的结果而非断连接，agent 可据此自纠。
 - 两条路共用同一 Key/模型配置（`bridge/settings.ts`，存 `~/.huiban/settings.json`）。
 
-## 对话（一张画布一条线程）
+## 对话（线程独立于画布）
 
-右下角 AI 按钮展开右侧抽屉。设计前提：**消息只存 nodeId / versionId 引用，图片本体永远在
-画布节点上——对话是画布的视图，不是第二数据源**，因此不用给对话再设计一套并发合并。
+右下角 AI 按钮展开右侧抽屉。设计前提不变：**消息只存 nodeId / versionId 引用，图片本体永远在
+画布节点上——对话是画布的视图，不是第二数据源**。线程是全局实体，可以跨画布继续，
+生成结果落在发送时确定的画布。
 
-- **thread id = canvasId**：`useChatStore` 的 threads 以 canvasId 为键，跟随 activeId 切换。
-  首条消息落时按内容起标题（超 24 字截断），之后不自动改。
-- **每轮发送的落地路径**（`CanvasPage.sendChatMessage`）：用户消息上屏 → 建 composer 节点
-  （不选中、不进输入态，别抢画布焦点）→ 引用图**连边**（runComposer 的参考图数组走
-  `buildOrderedReferences`，认边不认 `data.references`；先 patch `referenceOrder` 再
-  `syncComposerReferences`，chips 编号与发送顺序才一致）→ 占位 assistant 消息
-  （pendingNodeId）→ `runComposerRef.current(nodeId, prompt, { previousVersionId })` →
-  出图后补 media / 失败补 error。节点排布：`chatAnchorRef` 锚点 + 每 3 张换一行。
-- **上下文续接**在 `runComposer` 里算：上一轮 assistant 消息 `media[0].versionId` →
-  `findVersionOnCanvas` 找版本 → 同口径校验（同 profile + 同 responsesModel）才续
-  responseId。断了不静默：`ComposerRunResult.context` 带回 resetReason，消息上出徽标。
-- **双份持久化**：localStorage（`huiban-chat-v1`，工作副本）+ bridge `/api/chats`
-  （`~/.huiban/chat-docs.json`，第二拷贝）。bridge 侧 `bridge/chat.ts` 与 canvas-docs
-  同款三条保险：写串行链 + 滚动备份 + **单调时间戳**（旧快照不覆盖新数据）。消息入库前
-  `normalizeChatThread` 清洗：>64KB 的 dataURL 剥掉、单线程截断到 500 条。
-  活动画布变更后 600ms 防抖上桥（与 putCanvasDoc 同节拍）；删画布时 `dropThread` 连带删。
+- **线程与修订**：`useChatStore` 的线程不再以 canvasId 为键；首条消息落时按内容起标题（超 24 字截断）。
+  bridge `chat-docs.json` 的线程带 `revision` / `generation`：客户端提交带基线 revision，
+  冲突返回 409 + 当前线程，客户端按消息 ID 合并后再发；运行中的 assistant 输出、记忆只由服务端写入，
+  客户端不得用整快照覆盖。`writeClientThread` 只接受客户端新增的用户/空 assistant（CAS append），
+  `writeRunThread` 只更新该 run 拥有的 assistant 消息。写入走同目录临时文件 + rename；
+  删除留下 tombstone，旧标签页不能复活。revision>0 后 legacy 整快照写入只读，标题/模型等元数据走单独更新。
+- **run 生命周期**：同一线程同一时刻只允许一个 run；`requestId` 幂等，传输失败重试不会产生第二个 run。
+  事件统一带 `{runId, messageId, seq}`；SSE 首连/重连先发当前 snapshot，再用 `afterSeq` /
+  `Last-Event-ID` 续传，缺口或游标过期发完整 snapshot reset。snapshot 包含流式正文、工具、候选、
+  待确认、澄清和终态。stop 进入 stopping 收尾，等终态持久化完成才释放线程锁；迟到结果不得再写画布/消息。
+  run 按 TTL 回收并关闭 SSE。
+- **每轮发送**：`CanvasPage.startChatRunFlow` 先追加本地用户消息和 running assistant 占位，
+  再 `POST /api/chat/runs`；被拒（409）时采用服务端当前线程并 `discardRequest` 清掉本次未接管的两个占位、
+  把文字放回输入框，不能让“未发送用户消息”在合并时永久留下。刷新后凭 `activeRun.runId` 的 snapshot 恢复。
+- **Agent 出图**：聊天不再调用第二个“优化模型”。当前线程模型直接通过 `generate_image` 输出最终 prompt
+  （画布/工作台的独立优化器不受影响）。工具参数同时保留原始意图和优化后提示词；生成后把本批候选
+  （最多 4 张）连同稳定 ID/标签回喂视觉上下文，模型必须实际看图再点评。三协议
+  （chat/completions、responses、JSON 兜底）共用同一套视觉输入构造和截断检测；
+  最后一轮禁用工具，避免生图后没机会总结。用户显式引用的同画布图片会作为边的起点连到每张新结果；
+  没有显式引用、只是继续编辑上一版时，上一版结果节点同样连到新结果（`chatResultConnectFrom`：
+  显式引用优先，`style` 新需求不连）；跨画布引用不连线。边由
+  `appendCanvasImageNodes(..., { connectFrom })` 幂等写入，重复事件不重复连。
+  结果摆放见 `layoutChatResultPositions`：放在参考图（或上一版结果）**右侧一列**，多张向下排并
+  避开已有节点；只有完全没有参考锚点时才退回“最右节点右侧错开”的旧布局。节点盒子用
+  `estimateCanvasBox` 按前端同口径估算（横幅 400 / 方图 320 / 竖幅 280，高 = 宽 / 比例）。
+- **思考过程**：只展示上游显式返回的 reasoning（chat 的 `reasoning_content` / `reasoning_details`，
+  responses 的 reasoning summary），经 `thinking` 事件流式写入消息 `reasoning`，在助手消息里折叠展示；
+  不伪造隐藏推理，上游不返回时没有该区块。
+- **上游网络失败**：`fetchAgent` 对请求建立阶段的瞬时错误（ECONNRESET / ETIMEDOUT / ENOTFOUND 等）
+  重试一次；仍失败时给出“检查 Base URL、系统代理和网络”的可执行错误，不把 `fetch failed` 原样抛给用户，
+  也不再换 JSON 协议重复打一遍。
+- **角色**：角色带 `temperature`（0–1，缺省 0.6），发送时固化为消息快照；澄清续答、重试都继承原 run 的
+  角色、模型和引用。消息悬停同时显示角色头像和名称，不随当前选择变化。
+- **记忆**：设置里有“对话记忆”tab（窗口/预算/摘要参数）。记忆全自动运行：近期原文窗口默认 12 条 / 4500 tokens，
+  越窗时用当前线程模型做一次语义摘要（20 秒超时、输出上限 1500 tokens，每 run 最多一次），
+  维护 goal/confirmed/preserve/change/rejected/openQuestions；失败保留旧摘要和未覆盖原文并显示警告，
+  超硬预算暂停而不是静默截断。对话头部**不再有**线程记忆按钮（用户要求只删入口、保留能力）；
+  线程记忆的编辑/清除能力仍在 `ThreadMemoryEditor` 与 `/api/chat/threads/:id/memory`，
+  基于 `memoryRevision` CAS；清除记录 `clearedThroughMessageId`，屏障前的历史不会自动重新入窗或继承图片，
+  显式引用仍可用。重新开放入口时不要再放回头部常驻按钮。
+- **确认与预算**：单次和单 run 默认最多 4 张，累计超过 1 张先发 `confirmation_requested`；
+  确认绑定 runId/callId、模型、尺寸、数量、prompt 摘要，10 分钟失效；批准前零付费请求，
+  取消/拒绝不发图。没有真实报价只显示“费用未知”，不把 token 估算当账单。
+- **澄清**：`ask_user` 支持单选/多选/开放输入、推荐项和单题跳过；跳过只清空该题答案，取消任务才停 run。
+  续答消息带 `askResponse`，服务端以 CAS 追加并继续同一个 run。
 - **定位**：消息媒体格定位按钮 → `revealResultNode(nodeId, { onlyIfOffscreen: false })`
-  （显式一律归位）；生成后自动定位走 `onlyIfOffscreen: true`（视口内不挪镜头），
-  开关在面板头部，默认开。
-- 组件在 `src/components/chat/`：ChatPanel（外壳）/ ChatMessageList / ChatComposer /
-  ChatIcons。CSS 全额走 token（tokens.guard 会拦字面量）；浮层材质用
+  （显式一律归位）；生成后自动定位走 `onlyIfOffscreen: true`（视口内不挪镜头），开关在面板头部，默认开。
+  历史面板「定位」和 MCP 定位都要**先拉 bridge 最新文档再切画布**（`mergeRemoteCanvasNodes`）：
+  本地工作副本可能还没有 MCP / 别的标签页刚写的节点，只 `setActive` 会切到一张空画布。
+  显式 `huiban_locate` 不带 `onlyIfOffscreen`，前端要当 false；只有生成后的自动定位是 true。
+- **前端性能**：流式文本按 40ms 批处理，localStorage 单独节流；终态/停止/切线程/pagehide 强制 flush，
+  滚动位置单独存 sessionStorage，不在每次滚动时序列化整条线程。
+- 组件在 `src/components/chat/`：ChatPanel / ChatMessageList / ChatComposer / ClarificationModal /
+  ThreadMemoryEditor / ChatRoleStack。CSS 全额走 token（tokens.guard 会拦字面量）；浮层材质用
   `--surface-popover-glass-*`，图上的控件用 `--media-chrome-*`（恒定深色）。
 - 「引用到对话」入口在 NodeSelectionToolbar（结果节点选中态）：`addDraftAttachment`
   （同节点替换、同 url 去重）+ 展开面板。

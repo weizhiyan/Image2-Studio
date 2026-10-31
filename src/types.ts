@@ -308,6 +308,8 @@ export interface ModelProfileView {
   models: string[];
   /** 勾选启用的模型；默认模型从其中选择。 */
   enabledModels: string[];
+  /** 在配置卡片里展示的模型（内层勾选）；缺省时回落到 enabledModels。 */
+  selectedModels?: string[];
   /** 这路配置的用途。 */
   kind: ProfileKind;
   /** 该路是否已存 Key（不回显 key 本身）。 */
@@ -343,6 +345,23 @@ export interface PreferenceProfile {
   updatedAt: string;
 }
 
+export interface MemorySettings {
+  enabled: boolean;
+  shortTermMessageLimit: number;
+  shortTermTokenBudget: number;
+  summaryTriggerTokens: number;
+  summaryTargetTokens: number;
+  maxRecentOutputs: number;
+}
+
+export interface ChatRuntimeSettings {
+  maxModelRounds: number;
+  maxToolCalls: number;
+  maxImagesPerRun: number;
+  confirmImagesAbove: number;
+  maxOutputTokens: number;
+}
+
 export interface MediaSettings {
   /** 全部生图配置；「生图设置」里可增删改。 */
   profiles: ModelProfileView[];
@@ -358,6 +377,8 @@ export interface MediaSettings {
   enhanceLevel: EnhanceLevel;
   /** 用户偏好档案：归纳 + 手动录入，注入优化对话。 */
   preferences: PreferenceProfile;
+  chatMemory: MemorySettings;
+  chatRuntime: ChatRuntimeSettings;
 }
 
 export interface ImageResult {
@@ -447,6 +468,14 @@ export interface ChatMessageMedia {
 /** 长对话的持久化记忆：原始消息始终保留，摘要和当前目标只作为压缩上下文。 */
 export interface ChatThreadMemory {
   version?: number;
+  memoryRevision?: number;
+  summaryThroughMessageId?: string;
+  clearedThroughMessageId?: string;
+  /** Last run's observed window; estimates are not billing data. */
+  windowMessageCount?: number;
+  windowEstimatedTokens?: number;
+  compactionStatus?: 'idle' | 'pending' | 'complete' | 'failed';
+  warning?: string;
   summary?: string;
   summaryMessageCount?: number;
   summaryUpdatedAt?: string;
@@ -517,6 +546,8 @@ export interface ChatClarificationQuestion {
   id: string;
   title: string;
   description?: string;
+  type?: 'single' | 'multiple' | 'text';
+  optional?: boolean;
   multiple: boolean;
   options: ChatClarificationOption[];
 }
@@ -540,6 +571,7 @@ export interface ChatAskResponseSummary {
 
 export interface ChatModelSelection {
   textProfileId?: string;
+  textModel?: string;
   imageProfileId?: string;
   imageModel?: string;
 }
@@ -558,6 +590,8 @@ export interface ChatRoleSnapshot {
   category?: string;
   systemPrompt: string;
   skills: ChatRoleSkill[];
+  /** 对话采样温度 0-1；缺省按 0.6。 */
+  temperature?: number;
 }
 
 /** 消息运行态：运行中 / 完成 / 失败 / 已停止 / 刷新后状态未知（不伪装成完成）。 */
@@ -567,6 +601,8 @@ export interface ChatMessage {
   id: string;
   role: 'user' | 'assistant';
   content: string;
+  /** assistant：模型显式返回的思考过程（不是隐藏推理；上游不返回时为空）。 */
+  reasoning?: string;
   /** user：发送时引用的画布图片快照（版本级）。 */
   attachments?: ChatImageRef[];
   /** assistant：生成的图（指向画布节点版本）。 */
@@ -581,6 +617,15 @@ export interface ChatMessage {
   modelSelection?: ChatModelSelection;
   /** 发送这轮消息时选中的角色；未选择时表示通用模式。 */
   agentRole?: ChatRoleSnapshot;
+  runId?: string;
+  requestId?: string;
+  retrySource?: {
+    content: string;
+    attachments?: ChatImageRef[];
+    modelSelection?: ChatModelSelection;
+    agentRole?: ChatRoleSnapshot;
+    answers?: Record<string, string[]>;
+  };
   /** 本轮上下文徽标：续接了哪一版 / 断链原因。 */
   context?: ChatMessageContext;
   status?: ChatMessageStatus;
@@ -590,8 +635,16 @@ export interface ChatMessage {
 
 export interface ChatThread {
   id: string;
+  revision?: number;
+  generation?: number;
   /** 最近的画布/默认生成落点，不代表线程归属；独立对话可以没有画布。 */
   canvasId?: string;
+  /** 本线程使用的语言模型配置与具体模型；发出第一条消息后锁定，换模型需新建对话。 */
+  textProfileId?: string;
+  textModel?: string;
+  /** Agent 出图使用的生图配置与模型；可随时切换，新对话继承。 */
+  imageProfileId?: string;
+  imageModel?: string;
   title: string;
   messages: ChatMessage[];
   memory?: ChatThreadMemory;

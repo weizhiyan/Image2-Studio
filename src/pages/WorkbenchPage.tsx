@@ -5,6 +5,7 @@ import {
   useRef,
   useState,
   type ChangeEvent,
+  type PointerEvent as ReactPointerEvent,
 } from 'react';
 import type { CSSProperties } from 'react';
 import { ReactFlowProvider } from '@xyflow/react';
@@ -61,14 +62,14 @@ import AppModeTabs from '@/components/AppModeTabs';
 import AgentConnectDialog from '@/components/AgentConnectDialog';
 import AgentConnectIcon from '@/components/AgentConnectIcon';
 import SettingsPanel from '@/components/SettingsPanel';
-import { ChevronIcon } from '@/components/canvas/NodeChrome';
+import { ChevronIcon, PlusIcon } from '@/components/canvas/NodeChrome';
 import {
+  CloseGlyphIcon,
   CopyGlyphIcon,
   CopySuccessGlyphIcon,
   HistoryGlyphIcon,
   PlusImageGlyphIcon,
   SendGlyphIcon,
-  TrashGlyphIcon,
 } from '@/components/chat/ChatIcons';
 import {
   AiGlyphIcon,
@@ -87,6 +88,10 @@ const WORKBENCH_VIDEO_SECONDS = [4, 5, 6, 8, 10] as const;
 interface ReferenceImage {
   dataUrl: string;
   name: string;
+}
+
+export function referenceLabel(index: number): string {
+  return `${index + 1}`;
 }
 
 export interface WorkbenchResult {
@@ -160,6 +165,9 @@ export function workbenchStageState(running: boolean, hasResult: boolean): 'runn
 export function WorkbenchStageBackdrop({ running }: { running: boolean }) {
   return (
     <div className={`workbench-stage-backdrop${running ? ' is-running' : ''}`} aria-hidden="true">
+      {running ? null : (
+        <span className="workbench-stage-dot-spotlight" />
+      )}
       {running ? (
         <span className="workbench-stage-ripples">
           <i />
@@ -250,6 +258,7 @@ function resultToPreview(item: WorkbenchResult): ImagePreviewItem {
       videoResolution: item.videoResolution,
       videoRatio: item.videoRatio,
       videoAudio: item.videoAudio,
+      assetSourceKey: item.fileName ? `${item.canvasId || 'workbench'}:${item.fileName}` : undefined,
     },
   };
 }
@@ -428,8 +437,10 @@ export default function WorkbenchPage() {
   const [prompt, setPrompt] = useState('');
   const [optimizedFrom, setOptimizedFrom] = useState('');
   const [optimizing, setOptimizing] = useState(false);
-  const [reference, setReference] = useState<ReferenceImage | null>(null);
-  const videoMode: WorkbenchVideoMode = reference ? 'image' : 'text';
+  const [references, setReferences] = useState<ReferenceImage[]>([]);
+  const primaryReference = references[0] || null;
+  const visibleReferences = mode === 'video' ? references.slice(0, 1) : references;
+  const videoMode: WorkbenchVideoMode = primaryReference ? 'image' : 'text';
   const [imageModelKey, setImageModelKey] = useState('');
   const [imageRatio, setImageRatio] = useState<(typeof RATIO_PRESETS)[number]>('1:1');
   const [imageResolution, setImageResolution] = useState<ResolutionLabel>('2K');
@@ -484,6 +495,7 @@ export default function WorkbenchPage() {
   };
 
   const imageOptions = useMemo(() => imageModelOptionsOf(settings?.profiles), [settings?.profiles]);
+  const optimizeModelLabel = pickTextProfile(settings)?.model || '';
   const selectedImageOption = imageOptions.find((option) => option.key === imageModelKey) || imageOptions[0];
   const videoProfile = useMemo(() => videoProfileOf(settings), [settings]);
   const videoModels = useMemo(() => {
@@ -517,6 +529,15 @@ export default function WorkbenchPage() {
   useEffect(() => {
     if (!settings) void loadSettings();
   }, [loadSettings, settings]);
+
+  useEffect(() => {
+    const openSettings = (event: Event) => {
+      const path = (event as CustomEvent<{ path?: string }>).detail?.path;
+      if (path === 'workbench') setSettingsOpen(true);
+    };
+    window.addEventListener('huiban:open-settings', openSettings);
+    return () => window.removeEventListener('huiban:open-settings', openSettings);
+  }, []);
 
   useEffect(() => {
     let alive = true;
@@ -685,9 +706,9 @@ export default function WorkbenchPage() {
         const optimized = await enhancePromptApi({
           prompt: original,
           size: imageSize,
-          referenceDataUrls: reference ? [reference.dataUrl] : undefined,
+          referenceDataUrls: references.length ? references.map((item) => item.dataUrl) : undefined,
           profileId: textProfile.id,
-          usage: reference ? 'edit' : undefined,
+          usage: references.length ? 'edit' : undefined,
         });
         if (!optimized.prompt) throw new Error('优化结果为空');
         setPrompt(optimized.prompt);
@@ -708,16 +729,19 @@ export default function WorkbenchPage() {
   };
 
   const handleReferenceFile = async (event: ChangeEvent<HTMLInputElement>) => {
-    const file = event.currentTarget.files?.[0];
+    const files = Array.from(event.currentTarget.files || []);
     event.currentTarget.value = '';
-    if (!file) return;
-    if (!file.type.startsWith('image/')) {
+    if (files.length === 0) return;
+    if (files.some((file) => !file.type.startsWith('image/'))) {
       setError('请选择图片文件');
       return;
     }
     try {
-      const dataUrl = await readFileAsDataUrl(file);
-      setReference({ dataUrl, name: file.name });
+      const loaded = await Promise.all(files.map(async (file) => ({
+        dataUrl: await readFileAsDataUrl(file),
+        name: file.name,
+      })));
+      setReferences((current) => mode === 'video' ? loaded.slice(0, 1) : [...current, ...loaded]);
       setError('');
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : '读取参考图失败');
@@ -740,7 +764,9 @@ export default function WorkbenchPage() {
       return;
     }
     const nextSize = override?.size || imageSize;
-    const nextReference = override?.referenceDataUrl || reference?.dataUrl || '';
+    const nextReferenceDataUrls = override?.referenceDataUrl
+      ? [override.referenceDataUrl]
+      : references.map((item) => item.dataUrl);
     const direct = resolveDirect(undefined, settings?.direct);
     const apiMode = direct || selectedImageOption && settings?.profiles.find((profile) => profile.id === selectedImageOption.profileId)?.imageApiMode !== 'responses'
       ? 'images'
@@ -758,12 +784,12 @@ export default function WorkbenchPage() {
         apiMode,
         model: selectedImageOption.model,
         size: nextSize,
-        referenceDataUrls: nextReference ? [nextReference] : undefined,
+        referenceDataUrls: nextReferenceDataUrls.length ? nextReferenceDataUrls : undefined,
         n: imageCount,
         canvasId: 'workbench',
         nodeId: nodeIdRef.current,
         profileId: selectedImageOption.profileId,
-        referenceUsage: nextReference ? 'edit' : undefined,
+        referenceUsage: nextReferenceDataUrls.length ? 'edit' : undefined,
       });
       if (!outcome.ok) {
         setError(outcome.error);
@@ -797,7 +823,7 @@ export default function WorkbenchPage() {
     imageSize,
     optimizedFrom,
     prompt,
-    reference,
+    references,
     running,
     selectedImageOption,
     settings,
@@ -824,11 +850,11 @@ export default function WorkbenchPage() {
     const modeSpec = videoSchema?.params.find((param) => /^(mode|generation_mode)$/i.test(param.name));
     const modeValue = String(params[modeSpec?.name || 'mode'] || '');
     const uploadSpec = videoSchema ? videoUploadParamForMode(videoSchema, modeValue) : undefined;
-    if (videoMode === 'image' && !reference) {
+    if (videoMode === 'image' && !primaryReference) {
       setError('图生视频需要先上传一张首帧图片');
       return;
     }
-    if (videoMode === 'image' && uploadSpec?.required && !reference) {
+    if (videoMode === 'image' && uploadSpec?.required && !primaryReference) {
       setError(`该模型的「${uploadSpec.label}」是必填项`);
       return;
     }
@@ -839,7 +865,7 @@ export default function WorkbenchPage() {
     const schemaRatio = schemaValueOf(videoSchema, params, /^(aspect_ratio|ratio)$/i);
     const effectiveRatio = (!schemaRatio || /^(auto|adaptive)$/i.test(schemaRatio) ? videoRatio : schemaRatio) as VideoRatio;
     const referenceMode: VideoReferenceMode = videoMode === 'image' ? 'first_frame' : 'style';
-    const effectivePrompt = buildVideoPrompt(nextPrompt, [], referenceMode, Boolean(reference), reference ? 1 : 0);
+    const effectivePrompt = buildVideoPrompt(nextPrompt, [], referenceMode, Boolean(primaryReference), primaryReference ? 1 : 0);
     taskIdRef.current = '';
     setRunning(true);
     setRunLabel('正在提交视频任务');
@@ -847,8 +873,8 @@ export default function WorkbenchPage() {
     setError('');
     try {
       let imageFileNames: string[] = [];
-      if (reference) {
-        const saved = await saveImageDataUrl(reference.dataUrl);
+      if (primaryReference) {
+        const saved = await saveImageDataUrl(primaryReference.dataUrl);
         imageFileNames = saved.fileName ? [saved.fileName] : [];
         if (!saved.fileName) throw new Error('本地 Bridge 未返回参考图文件名');
       }
@@ -896,7 +922,7 @@ export default function WorkbenchPage() {
     }
   }, [
     prompt,
-    reference,
+    primaryReference,
     running,
     selectedVideoModel,
     videoAudio,
@@ -1001,12 +1027,109 @@ export default function WorkbenchPage() {
   const displaySize = fitDisplaySize(outpaintSize.width, outpaintSize.height);
   const generationDisabled = mode === 'image'
     ? !imageProfileReady || !prompt.trim() || running
-    : !videoReady || !prompt.trim() || running || (videoMode === 'image' && !reference);
+    : !videoReady || !prompt.trim() || running || (videoMode === 'image' && !primaryReference);
+
+  const spotlightStageRef = useRef<HTMLDivElement>(null);
+  const spotlightFrameRef = useRef<number | null>(null);
+  const spotlightLastFrameRef = useRef(0);
+  const spotlightMotionRef = useRef({
+    currentX: 0,
+    currentY: 0,
+    targetX: 0,
+    targetY: 0,
+    velocityX: 0,
+    velocityY: 0,
+    hasPosition: false,
+  });
+
+  const animateStageSpotlight = useCallback((now: number) => {
+    const stage = spotlightStageRef.current;
+    const motion = spotlightMotionRef.current;
+    if (!stage || !motion.hasPosition) {
+      spotlightFrameRef.current = null;
+      return;
+    }
+    const dt = Math.min(1 / 30, spotlightLastFrameRef.current
+      ? (now - spotlightLastFrameRef.current) / 1000
+      : 1 / 60);
+    spotlightLastFrameRef.current = now;
+    const stiffness = 46;
+    const damping = 13.5;
+    motion.velocityX += ((motion.targetX - motion.currentX) * stiffness - motion.velocityX * damping) * dt;
+    motion.velocityY += ((motion.targetY - motion.currentY) * stiffness - motion.velocityY * damping) * dt;
+    motion.currentX += motion.velocityX * dt;
+    motion.currentY += motion.velocityY * dt;
+    stage.style.setProperty('--workbench-dot-x', `${motion.currentX}px`);
+    stage.style.setProperty('--workbench-dot-y', `${motion.currentY}px`);
+    const settled = Math.abs(motion.targetX - motion.currentX) < 0.05
+      && Math.abs(motion.targetY - motion.currentY) < 0.05
+      && Math.abs(motion.velocityX) < 0.05
+      && Math.abs(motion.velocityY) < 0.05;
+    if (settled) {
+      motion.currentX = motion.targetX;
+      motion.currentY = motion.targetY;
+      motion.velocityX = 0;
+      motion.velocityY = 0;
+      spotlightFrameRef.current = null;
+      return;
+    }
+    spotlightFrameRef.current = requestAnimationFrame(animateStageSpotlight);
+  }, []);
+
+  const handleStagePointerMove = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const rect = event.currentTarget.getBoundingClientRect();
+    const x = event.clientX - rect.left;
+    const y = event.clientY - rect.top;
+    const motion = spotlightMotionRef.current;
+    if (!motion.hasPosition) {
+      motion.currentX = x;
+      motion.currentY = y;
+      motion.velocityX = 0;
+      motion.velocityY = 0;
+      motion.hasPosition = true;
+      event.currentTarget.style.setProperty('--workbench-dot-x', `${x}px`);
+      event.currentTarget.style.setProperty('--workbench-dot-y', `${y}px`);
+    }
+    motion.targetX = x;
+    motion.targetY = y;
+    event.currentTarget.style.setProperty('--workbench-dot-spotlight-opacity', '0.22');
+    if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+      if (spotlightFrameRef.current !== null) {
+        cancelAnimationFrame(spotlightFrameRef.current);
+        spotlightFrameRef.current = null;
+      }
+      motion.currentX = x;
+      motion.currentY = y;
+      motion.velocityX = 0;
+      motion.velocityY = 0;
+      event.currentTarget.style.setProperty('--workbench-dot-x', `${x}px`);
+      event.currentTarget.style.setProperty('--workbench-dot-y', `${y}px`);
+      return;
+    }
+    if (spotlightFrameRef.current === null) {
+      spotlightLastFrameRef.current = performance.now();
+      spotlightFrameRef.current = requestAnimationFrame(animateStageSpotlight);
+    }
+  };
+
+  const handleStagePointerLeave = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (spotlightFrameRef.current !== null) {
+      cancelAnimationFrame(spotlightFrameRef.current);
+      spotlightFrameRef.current = null;
+    }
+    spotlightMotionRef.current.hasPosition = false;
+    event.currentTarget.style.setProperty('--workbench-dot-spotlight-opacity', '0');
+  };
+
+  useEffect(() => () => {
+    if (spotlightFrameRef.current !== null) cancelAnimationFrame(spotlightFrameRef.current);
+  }, []);
 
   return (
     <div className="workbench-page">
       <header className="workbench-header hb-topbar">
         <AppModeTabs mode="workbench" />
+        <span className="workbench-brand-title">绘板工作台</span>
         <div className="hb-topbar-spacer" />
         <span
           className={`image-canvas-mode-hint ${settings?.direct !== false ? 'is-direct' : 'is-enhance'}`}
@@ -1028,7 +1151,6 @@ export default function WorkbenchPage() {
           }}
         >
           <AgentConnectIcon />
-          <span className="agent-connect-btn-dot" aria-hidden="true" />
         </button>
         <button
           type="button"
@@ -1070,21 +1192,35 @@ export default function WorkbenchPage() {
 
           <div className="workbench-prompt-composer">
             <div className="workbench-reference-zone">
-              {reference ? (
-                <div className="workbench-reference">
-                  <img src={reference.dataUrl} alt="已上传的参考图" />
-                  <div>
-                    <strong>{mode === 'video' && videoMode === 'image' ? '视频首帧' : '参考图片'}</strong>
-                    <span>{reference.name}</span>
+              {visibleReferences.length ? (
+                <div className="workbench-reference-stack">
+                  <div className="workbench-reference-grid" data-count={visibleReferences.length}>
+                    {visibleReferences.map((item, index) => (
+                      <figure className="workbench-reference-card" key={`${item.name}-${index}`}>
+                        <img src={item.dataUrl} alt={`参考图片${index + 1}：${item.name}`} />
+                        <span className="workbench-reference-label">{referenceLabel(index)}</span>
+                        <button
+                          type="button"
+                          className="workbench-reference-remove"
+                          aria-label={`移除参考图 ${referenceLabel(index)}`}
+                          title={`移除参考图 ${referenceLabel(index)}`}
+                          onClick={() => setReferences((current) => current.filter((_, itemIndex) => itemIndex !== index))}
+                        >
+                          <CloseGlyphIcon />
+                        </button>
+                        <figcaption title={item.name}>{item.name}</figcaption>
+                      </figure>
+                    ))}
+                    <button
+                      type="button"
+                      className="workbench-reference-add"
+                      aria-label={mode === 'video' ? '更换视频首帧' : '继续添加参考图'}
+                      title={mode === 'video' ? '更换视频首帧' : '继续添加参考图'}
+                      onClick={() => fileInputRef.current?.click()}
+                    >
+                      <PlusIcon />
+                    </button>
                   </div>
-                  <button
-                    type="button"
-                    aria-label="移除参考图"
-                    title="移除参考图"
-                    onClick={() => setReference(null)}
-                  >
-                    <TrashGlyphIcon />
-                  </button>
                 </div>
               ) : (
                 <button
@@ -1121,10 +1257,12 @@ export default function WorkbenchPage() {
                   type="button"
                   className="workbench-quiet-button"
                   disabled={!prompt.trim() || optimizing || running}
+                  title={optimizeModelLabel ? `优化提示词（${optimizeModelLabel}）` : '优化提示词'}
+                  aria-label={optimizeModelLabel ? `优化提示词，使用 ${optimizeModelLabel}` : '优化提示词'}
                   onClick={() => void optimizePrompt()}
                 >
                   <AiGlyphIcon />
-                  <span>{optimizing ? '优化中…' : '优化提示词'}</span>
+                  <span>{optimizing ? '优化中…' : optimizeModelLabel ? `优化提示词 · ${optimizeModelLabel}` : '优化提示词'}</span>
                 </button>
               </div>
             </div>
@@ -1132,6 +1270,7 @@ export default function WorkbenchPage() {
               ref={fileInputRef}
               type="file"
               accept="image/*"
+              multiple={mode === 'image'}
               hidden
               onChange={(event) => void handleReferenceFile(event)}
             />
@@ -1467,8 +1606,11 @@ export default function WorkbenchPage() {
           ) : null}
 
           <div
+            ref={spotlightStageRef}
             className={`workbench-result-stage is-${workbenchStageState(running, Boolean(selectedResult))}`}
             data-state={workbenchStageState(running, Boolean(selectedResult))}
+            onPointerMove={handleStagePointerMove}
+            onPointerLeave={handleStagePointerLeave}
           >
             {workbenchStageState(running, Boolean(selectedResult)) !== 'result' ? (
               <WorkbenchStageBackdrop running={running} />

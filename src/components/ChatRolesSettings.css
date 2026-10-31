@@ -340,8 +340,12 @@
   align-self: center;
 }
 
-.chat-role-name-field {
+.chat-role-identity-fields {
   grid-column: 2;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(240px, 0.85fr);
+  align-items: end;
+  gap: var(--spacing-3);
 }
 
 .chat-role-avatar-picker {
@@ -519,5 +523,11 @@
 
   .chat-role-avatar-option:hover {
     transform: none;
+  }
+}
+
+@media (max-width: 560px) {
+  .chat-role-identity-fields {
+    grid-template-columns: minmax(0, 1fr);
   }
 }

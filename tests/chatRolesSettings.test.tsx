@@ -35,6 +35,31 @@ describe('AI 对话角色设置页', () => {
     expect(ROLE_SOURCE).toContain('手动添加');
   });
 
+  it('角色编辑器提供温度设置', () => {
+    expect(ROLE_SOURCE).toContain('温度');
+    expect(ROLE_SOURCE).toContain('ParameterSlider');
+    expect(ROLE_SOURCE).toContain('temperature');
+    expect(ROLE_SOURCE).toContain('max={10}');
+  });
+
+  it('模型设置弹层使用遮罩淡入与弹层弹性入场', () => {
+    expect(SETTINGS_CSS).toMatch(/\.hb-modal-overlay\s*\{[^}]*animation:\s*fade-in/s);
+    expect(SETTINGS_CSS).toMatch(/\.hb-modal-overlay\s*\{[^}]*background:\s*var\(--dialog-scrim\)/s);
+    expect(SETTINGS_CSS).toMatch(/\.model-config-modal\s*\{[^}]*--enter-scale:\s*0\.4/s);
+    expect(SETTINGS_CSS).toMatch(/\.model-config-modal\s*\{[^}]*transform-origin:\s*center/s);
+    expect(SETTINGS_CSS).toMatch(/\.model-config-modal\s*\{[^}]*animation:\s*spring-in var\(--motion-slower\) var\(--ease-emphasized\)/s);
+    expect(SETTINGS_CSS).toMatch(/@media \(prefers-reduced-motion: reduce\)[\s\S]*\.model-config-modal\.is-closing\s*\{[^}]*animation:\s*none/s);
+  });
+
+  it('模型设置关闭时先收缩淡出再卸载', () => {
+    expect(SETTINGS_SOURCE).toContain('const requestClose = useCallback');
+    expect(SETTINGS_SOURCE).toContain('className={`hb-modal-overlay${closing ? \' is-closing\' : \'\'}`}');
+    expect(SETTINGS_SOURCE).toContain('className={`model-config-modal model-config-modal-wide${closing ? \' is-closing\' : \'\'}`}');
+    expect(SETTINGS_SOURCE).toContain('window.setTimeout(finishClose, 260)');
+    expect(SETTINGS_CSS).toMatch(/\.hb-modal-overlay\.is-closing\s*\{[^}]*animation:\s*fade-out/s);
+    expect(SETTINGS_CSS).toMatch(/\.model-config-modal\.is-closing\s*\{[^}]*animation:\s*spring-out/s);
+  });
+
   it('将当前通用对话策略作为内置只读项展示，不把它当作可编辑角色', () => {
     const HTTP_SOURCE = readFileSync(new URL('../bridge/http.ts', import.meta.url), 'utf8');
     expect(ROLE_SOURCE).toContain('getGeneralChatPrompt()');

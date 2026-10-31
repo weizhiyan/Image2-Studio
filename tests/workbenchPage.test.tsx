@@ -10,6 +10,7 @@ import WorkbenchPage, {
   applyVideoMode,
   isWorkbenchPath,
   mergeWorkbenchHistory,
+  referenceLabel,
   videoQuantityRange,
   videoQuantityValues,
   videoControlParams,
@@ -123,9 +124,25 @@ describe('WorkbenchPage', () => {
   });
 
   it('图片上传状态决定图生视频或文生视频，不需要额外模式 Tab', () => {
-    expect(WORKBENCH_SOURCE).toContain("const videoMode: WorkbenchVideoMode = reference ? 'image' : 'text';");
+    expect(WORKBENCH_SOURCE).toContain("const videoMode: WorkbenchVideoMode = primaryReference ? 'image' : 'text';");
     expect(WORKBENCH_SOURCE).not.toContain('handleVideoModeChange');
     expect(WORKBENCH_SOURCE).not.toContain('workbench-video-tabs');
+  });
+
+  it('多张参考图按顺序标注并继续使用现有参考图数组接口', () => {
+    expect(referenceLabel(0)).toBe('1');
+    expect(referenceLabel(2)).toBe('3');
+    expect(referenceLabel(10)).toBe('11');
+    expect(WORKBENCH_SOURCE).toContain('multiple={mode === \'image\'}');
+    expect(WORKBENCH_SOURCE).toContain('references.map((item) => item.dataUrl)');
+    expect(WORKBENCH_SOURCE).toContain('继续添加参考图');
+    expect(CSS).toContain('.workbench-reference-grid');
+    expect(CSS).toContain('.workbench-reference-remove');
+    expect(CSS).toMatch(/\.workbench-reference-card\s*\{[^}]*width: 80px[^}]*height: 80px/s);
+    expect(CSS).toMatch(/\.workbench-reference-remove\s*\{[^}]*opacity: 0/s);
+    expect(CSS).toMatch(/\.workbench-reference-card\s*\{[^}]*overflow: visible/s);
+    expect(CSS).toMatch(/\.workbench-reference-remove\s*\{[^}]*top: -8px[^}]*right: -8px/s);
+    expect(CSS).toMatch(/\.workbench-reference-card:hover \.workbench-reference-remove[^{]*\{[^}]*opacity: 1/s);
   });
 
   it('视频模型参数只展示可编辑的生成参数', () => {
@@ -204,7 +221,12 @@ describe('WorkbenchPage', () => {
     expect(CSS).toMatch(/\.workbench-stage-backdrop::before\s*\{[^}]*background-image: radial-gradient\(circle, var\(--color-canvas-dot\)/s);
     expect(CSS).toMatch(/\.workbench-stage-backdrop::before\s*\{[^}]*mask-image: radial-gradient\(ellipse at center/s);
     expect(CSS).toMatch(/\.workbench-stage-ripples i\s*\{[^}]*animation: workbench-ripple/s);
-    expect(CSS).toMatch(/\.workbench-page \.workbench-stage-ripples i,\s*\.workbench-page \.workbench-running-mark\s*\{[^}]*animation: none/s);
+    expect(CSS).toMatch(/\.workbench-stage-dot-spotlight\s*\{[^}]*background-image: radial-gradient\(circle, var\(--color-text-primary\)/s);
+    expect(CSS).toMatch(/\.workbench-stage-dot-spotlight\s*\{[^}]*circle 112px at var\(--workbench-dot-x\) var\(--workbench-dot-y\)/s);
+    expect(CSS).not.toContain('@keyframes workbench-dot-wave');
+    expect(WORKBENCH_SOURCE).toContain("--workbench-dot-spotlight-opacity', '0.22'");
+    expect(WORKBENCH_SOURCE).toContain('const stiffness = 46');
+    expect(WORKBENCH_SOURCE).toContain('const damping = 13.5');
     expect(CSS).toContain('@media (prefers-reduced-motion: reduce)');
     expect(CSS).not.toMatch(/\.workbench-header\s*\{[^}]*(?:background|border-bottom)/s);
 
@@ -214,8 +236,10 @@ describe('WorkbenchPage', () => {
     const idleBackdrop = renderToStaticMarkup(<WorkbenchStageBackdrop running={false} />);
     const runningBackdrop = renderToStaticMarkup(<WorkbenchStageBackdrop running />);
     expect(idleBackdrop).toContain('workbench-stage-backdrop');
+    expect(idleBackdrop).toContain('workbench-stage-dot-spotlight');
     expect(idleBackdrop).not.toContain('workbench-stage-ripples');
     expect(runningBackdrop).toContain('workbench-stage-backdrop is-running');
+    expect(runningBackdrop).not.toContain('workbench-stage-dot-spotlight');
     expect(runningBackdrop.match(/<i>/g)).toHaveLength(3);
   });
 
@@ -235,14 +259,15 @@ describe('WorkbenchPage', () => {
     expect(CSS).toMatch(/\.workbench-shell\s*\{[^}]*grid-template-rows:\s*minmax\(0,\s*1fr\)/s);
     expect(CSS).toMatch(/\.workbench-results\.has-history\s*\{[^}]*grid-template-rows:\s*minmax\(0,\s*1fr\)/s);
     expect(HISTORY_CSS).toMatch(/\.image-history-scroll\s*\{[^}]*min-height:\s*0;[^}]*overflow-y:\s*auto/s);
+    expect(HISTORY_CSS).toMatch(/\.image-history-filter-actions \.image-history-views button svg\s*\{[^}]*width: var\(--icon-glyph-sm\)[^}]*height: var\(--icon-glyph-sm\)/s);
   });
 
-  it('提示词与参考图使用画布底色，优化入口位于编辑器内部右下角', () => {
-    expect(CSS).toMatch(/\.workbench-prompt-composer\s*\{[^}]*border: 0[^}]*border-radius: var\(--radius-md\)[^}]*background: var\(--color-bg-canvas\)/s);
+  it('提示词与参考图共用玻璃底色，优化入口位于编辑器内部右下角', () => {
+    expect(CSS).toMatch(/\.workbench-prompt-composer\s*\{[^}]*border: 0[^}]*border-radius: var\(--radius-md\)[^}]*background: var\(--chat-composer-glass-bg\)/s);
     expect(CSS).toMatch(/\.workbench-prompt-composer\s*\{[^}]*flex: 0 0 auto/s);
-    expect(CSS).toMatch(/\.workbench-prompt-editor textarea\s*\{[^}]*height: 168px[^}]*resize: none[^}]*border: 0[^}]*background: var\(--color-bg-canvas\)/s);
+    expect(CSS).toMatch(/\.workbench-prompt-editor textarea\s*\{[^}]*height: 168px[^}]*resize: none[^}]*border: 0[^}]*background: transparent/s);
     expect(CSS).toMatch(/\.workbench-upload\s*\{[^}]*border: 1px dashed var\(--control-border-hover\)[^}]*background: var\(--color-bg-canvas\)/s);
-    expect(CSS).toMatch(/\.workbench-reference\s*\{[^}]*background: var\(--color-bg-canvas\)/s);
+    expect(CSS).toMatch(/\.workbench-reference-card\s*\{[^}]*background: var\(--color-ui-control\)/s);
     expect(CSS).toMatch(/\.workbench-prompt-actions\s*\{[^}]*position: absolute[^}]*justify-content: flex-end/s);
   });
 
@@ -319,7 +344,7 @@ describe('WorkbenchPage', () => {
     );
     expect(durationHtml).toContain('type="range"');
     expect(durationHtml).toContain('aria-label="视频时长"');
-    expect(SLIDER_CSS).toContain('var(--parameter-slider-progress)');
+    expect(SLIDER_CSS).toContain('var(--parameter-slider-ratio)');
     expect(SLIDER_CSS).toContain('var(--segment-thumb-bg)');
   });
 

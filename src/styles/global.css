@@ -96,6 +96,11 @@ code, pre, kbd {
   transition-timing-function: var(--ease-chat-collapse);
 }
 
+/* 拖拽调宽时顶栏必须逐帧跟随，不能复用展开/收起的缓动。 */
+.image-canvas-page:has(.hb-chat-panel.is-resizing) .hb-topbar {
+  transition: none;
+}
+
 .hb-topbar > * {
   pointer-events: auto;
 }

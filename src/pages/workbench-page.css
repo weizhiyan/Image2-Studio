@@ -13,6 +13,16 @@
   width: 100%;
 }
 
+.workbench-brand-title {
+  flex: 0 0 auto;
+  color: var(--color-text-primary);
+  font-family: var(--font-sans);
+  font-size: var(--font-size-md);
+  font-weight: var(--font-weight-semibold);
+  line-height: var(--line-height-tight);
+  white-space: nowrap;
+}
+
 .workbench-settings-button {
   height: 34px;
 }
@@ -143,7 +153,7 @@
   flex-direction: column;
   border: 0;
   border-radius: var(--radius-md);
-  background: var(--color-bg-canvas);
+  background: var(--chat-composer-glass-bg);
 }
 
 .workbench-reference-zone {
@@ -168,7 +178,7 @@
   border: 0;
   border-radius: 0;
   color: var(--color-text-primary);
-  background: var(--color-bg-canvas);
+  background: transparent;
   font: inherit;
   font-size: var(--font-size-base);
   line-height: var(--line-height-normal);
@@ -265,64 +275,141 @@
   font-size: var(--font-size-2xs);
 }
 
-.workbench-reference {
-  min-height: 64px;
-  display: grid;
-  grid-template-columns: 48px minmax(0, 1fr) var(--control-height-compact);
-  align-items: center;
-  gap: var(--spacing-3);
-  padding: var(--spacing-2);
-  border: 0;
-  border-radius: var(--radius-sm);
-  background: var(--color-bg-canvas);
+.workbench-reference-stack {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-2);
 }
 
-.workbench-reference img {
-  width: 48px;
-  height: 48px;
-  border-radius: var(--radius-xs);
+.workbench-reference-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--spacing-2);
+}
+
+.workbench-reference-card {
+  position: relative;
+  width: 80px;
+  height: 80px;
+  flex: none;
+  margin: 0;
+  overflow: visible;
+  border: 1px solid var(--divider-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--color-ui-control);
+}
+
+.workbench-reference-card img {
+  width: 100%;
+  height: 100%;
+  display: block;
+  border-radius: inherit;
   object-fit: cover;
 }
 
-.workbench-reference div {
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: var(--spacing-1);
+.workbench-reference-card::after {
+  position: absolute;
+  inset: 50% 0 0;
+  background: linear-gradient(transparent, color-mix(in srgb, var(--color-shadow) 72%, transparent));
+  border-radius: inherit;
+  content: '';
+  pointer-events: none;
 }
 
-.workbench-reference strong,
-.workbench-reference span {
+.workbench-reference-label,
+.workbench-reference-card figcaption {
+  position: absolute;
+  z-index: 1;
+  left: var(--spacing-2);
+  max-width: calc(100% - var(--spacing-8));
   overflow: hidden;
+  color: var(--color-paper);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.workbench-reference strong {
-  color: var(--color-text-primary);
-  font-size: var(--font-size-sm);
-  font-weight: var(--font-weight-medium);
-}
-
-.workbench-reference span {
-  color: var(--color-text-tertiary);
-  font-size: var(--font-size-xs);
-}
-
-.workbench-reference button {
-  width: var(--control-height-compact);
-  height: var(--control-height-compact);
+.workbench-reference-label {
+  top: 0;
+  left: 0;
+  width: 20px;
+  height: 20px;
   display: grid;
   place-items: center;
+  padding: 0;
   border: 0;
-  border-radius: var(--radius-xs);
-  color: var(--color-text-tertiary);
-  background: transparent;
+  border-radius: var(--radius-full);
+  background: var(--media-chrome-bg-strong);
+  font-size: var(--font-size-2xs);
+  font-weight: var(--font-weight-medium);
+  line-height: 1;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+.workbench-reference-card figcaption {
+  display: none;
+}
+
+.workbench-reference-remove {
+  position: absolute;
+  z-index: 2;
+  top: -8px;
+  right: -8px;
+  width: 20px;
+  height: 20px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-full);
+  color: var(--color-paper);
+  background: var(--media-chrome-bg-strong);
+  cursor: pointer;
+  opacity: 0;
+  transition:
+    opacity var(--motion-fast) var(--ease-out),
+    transform var(--motion-fast) var(--ease-out),
+    background-color var(--motion-fast) var(--ease-out);
+}
+
+.workbench-reference-card:hover .workbench-reference-remove,
+.workbench-reference-remove:focus-visible {
+  opacity: 1;
+}
+
+.workbench-reference-remove:hover {
+  transform: scale(1.06);
+}
+
+.workbench-reference-remove svg {
+  width: 14px;
+  height: 14px;
+}
+
+@media (hover: none) {
+  .workbench-reference-remove {
+    opacity: 1;
+  }
+}
+
+.workbench-reference-add {
+  width: 80px;
+  height: 80px;
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 1px dashed var(--control-border-hover);
+  border-radius: var(--radius-sm);
+  color: var(--color-text-secondary);
+  background: color-mix(in srgb, var(--color-bg-canvas) 40%, transparent);
+  font: inherit;
   cursor: pointer;
 }
 
-.workbench-reference button:hover {
-  color: var(--color-accent-red);
+.workbench-reference-add:hover {
+  color: var(--color-text-primary);
   background: var(--control-bg-hover);
 }
 
@@ -715,6 +802,9 @@
 .workbench-result-stage {
   position: relative;
   isolation: isolate;
+  --workbench-dot-x: 50%;
+  --workbench-dot-y: 50%;
+  --workbench-dot-spotlight-opacity: 0;
   min-height: 0;
   overflow: hidden;
   border: 0;
@@ -739,6 +829,28 @@
   opacity: 0.62;
   mask-image: radial-gradient(ellipse at center, var(--color-text-primary) 0%, transparent 86%);
   -webkit-mask-image: radial-gradient(ellipse at center, var(--color-text-primary) 0%, transparent 86%);
+}
+
+.workbench-stage-dot-spotlight {
+  position: absolute;
+  inset: 0;
+  display: block;
+  background-image: radial-gradient(circle, var(--color-text-primary) 1.35px, transparent 1.85px);
+  background-size: var(--spacing-4) var(--spacing-4);
+  opacity: var(--workbench-dot-spotlight-opacity);
+  mask-image: radial-gradient(
+    circle 112px at var(--workbench-dot-x) var(--workbench-dot-y),
+    #000 0%,
+    rgb(0 0 0 / 55%) 46%,
+    transparent 100%
+  );
+  -webkit-mask-image: radial-gradient(
+    circle 112px at var(--workbench-dot-x) var(--workbench-dot-y),
+    #000 0%,
+    rgb(0 0 0 / 55%) 46%,
+    transparent 100%
+  );
+  transition: opacity var(--motion-normal) var(--ease-out);
 }
 
 .workbench-stage-ripples {

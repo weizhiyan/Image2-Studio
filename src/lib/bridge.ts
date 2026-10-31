@@ -1,4 +1,4 @@
-import type { CanvasDoc, ChatClarificationQuestion, ChatModelSelection, ChatRoleSnapshot, ChatThread, ChatThreadMemory, CustomVideoApiConfig, EnhanceLevel, GenerateOutcome, HistoryItem, ImageApiMode, MediaSettings, PreferenceEntry, PreferenceProfile, ProfileKind, VideoApiMode, VideoModelInfo, VideoModelSchema, VideoRatio, VideoReferenceMode, VideoResolution, VideoTaskStatus } from '@/types';
+import type { CanvasDoc, ChatClarificationQuestion, ChatMessage, ChatModelSelection, ChatRoleSnapshot, ChatThread, ChatThreadMemory, CustomVideoApiConfig, EnhanceLevel, GenerateOutcome, HistoryItem, ImageApiMode, MediaSettings, PreferenceEntry, PreferenceProfile, ProfileKind, VideoApiMode, VideoModelInfo, VideoModelSchema, VideoRatio, VideoReferenceMode, VideoResolution, VideoTaskStatus } from '@/types';
 import { subscribeEventStream } from './eventStream';
 
 export interface AgentStatus {
@@ -8,6 +8,8 @@ export interface AgentStatus {
   transport?: string;
   mcpEntry?: string;
   nodeCommand?: string;
+  nodePath?: string;
+  platform?: string;
 }
 
 /** 第三方 Agent 的最近连接状态；bridge 通过 MCP 活跃文件判断，不暴露工具参数。 */
@@ -126,6 +128,8 @@ export interface PromptSkill {
   avatarUrl: string;
   content: string;
   skills: RoleSkill[];
+  /** 对话采样温度 0-1；缺省按 0.6。 */
+  temperature?: number;
   enabled: boolean;
   createdAt: string;
   updatedAt: string;
@@ -156,6 +160,66 @@ export function savePromptSkill(input: Partial<PromptSkill> & Pick<PromptSkill, 
 
 export async function deletePromptSkill(id: string): Promise<void> {
   await assetRequest(`/api/skills/${encodeURIComponent(id)}`, { method: 'DELETE' });
+}
+
+export interface CanvasGraphChanges {
+  nodeUpserts: CanvasDoc['nodes'];
+  nodeDeletes: string[];
+  edgeUpserts: CanvasDoc['edges'];
+  edgeDeletes: string[];
+  name?: string;
+  viewport?: CanvasDoc['viewport'] | null;
+}
+
+/**
+ * 每张画布最后一次成功上桥的内容与时间。变更集相对它计算：
+ * 别的标签页新增的节点不在基线里，因此永远不会被这边误删。
+ */
+const canvasBaselines = new Map<string, CanvasDoc>();
+
+function snapshotValue(value: unknown): string {
+  return JSON.stringify(value) ?? 'undefined';
+}
+
+export function canvasGraphChanges(baseline: CanvasDoc | undefined, incoming: CanvasDoc): CanvasGraphChanges {
+  if (!baseline) {
+    return {
+      nodeUpserts: incoming.nodes,
+      nodeDeletes: [],
+      edgeUpserts: incoming.edges,
+      edgeDeletes: [],
+      name: incoming.name,
+      ...(incoming.viewport ? { viewport: incoming.viewport } : {}),
+    };
+  }
+  const baselineNodes = new Map(baseline.nodes.map((node) => [node.id, node]));
+  const incomingNodes = new Map(incoming.nodes.map((node) => [node.id, node]));
+  const baselineEdges = new Map(baseline.edges.map((edge) => [edge.id, edge]));
+  const incomingEdges = new Map(incoming.edges.map((edge) => [edge.id, edge]));
+  const changes: CanvasGraphChanges = {
+    nodeUpserts: incoming.nodes.filter((node) => (
+      snapshotValue(baselineNodes.get(node.id)) !== snapshotValue(node)
+    )),
+    nodeDeletes: baseline.nodes.filter((node) => !incomingNodes.has(node.id)).map((node) => node.id),
+    edgeUpserts: incoming.edges.filter((edge) => (
+      snapshotValue(baselineEdges.get(edge.id)) !== snapshotValue(edge)
+    )),
+    edgeDeletes: baseline.edges.filter((edge) => !incomingEdges.has(edge.id)).map((edge) => edge.id),
+  };
+  if (baseline.name !== incoming.name) changes.name = incoming.name;
+  if (snapshotValue(baseline.viewport) !== snapshotValue(incoming.viewport)) {
+    changes.viewport = incoming.viewport || null;
+  }
+  return changes;
+}
+
+export function hasCanvasGraphChanges(changes: CanvasGraphChanges): boolean {
+  return changes.nodeUpserts.length > 0
+    || changes.nodeDeletes.length > 0
+    || changes.edgeUpserts.length > 0
+    || changes.edgeDeletes.length > 0
+    || changes.name !== undefined
+    || changes.viewport !== undefined;
 }
 
 /** 服务端全量画布文档：换浏览器/新 profile 打开链接时靠它还原，不是只存名字。 */
@@ -191,7 +255,7 @@ function getCanvasClientId(): string {
   }
 }
 
-/** 整文档快照上桥：localStorage 之外的第二份拷贝，跨浏览器/跨设备都能续上。 */
+/** 整文档上桥：只发送相对上次成功同步的变更集，由 bridge 合并进最新文档。 */
 export async function putCanvasDoc(doc: CanvasDoc): Promise<void> {
   const nodes = doc.nodes.map((node) => {
     const persistent = { ...node } as typeof node & {
@@ -204,14 +268,33 @@ export async function putCanvasDoc(doc: CanvasDoc): Promise<void> {
     delete persistent.className;
     return persistent;
   });
-  await fetch(`/api/canvases/${encodeURIComponent(doc.id)}`, {
+  const outgoing: CanvasDoc = { ...doc, nodes };
+  const baseline = canvasBaselines.get(doc.id);
+  const changes = canvasGraphChanges(baseline, outgoing);
+  // 已同步过的画布没有变化就不打扰 bridge，避免空写入触发别的标签页反复水合
+  if (baseline && !hasCanvasGraphChanges(changes)) return;
+  const response = await fetch(`/api/canvases/${encodeURIComponent(doc.id)}`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ name: doc.name, nodes, edges: doc.edges, viewport: doc.viewport, updatedAt: doc.updatedAt, originId: getCanvasClientId() }),
-  }).catch(() => undefined);
+    body: JSON.stringify({
+      name: outgoing.name,
+      graphChanges: changes,
+      baselineUpdatedAt: baseline?.updatedAt,
+      originId: getCanvasClientId(),
+    }),
+  }).catch(() => null);
+  if (!response?.ok) return;
+  const body = await response.json().catch(() => null) as { data?: { updatedAt?: string } } | null;
+  // 基线内容用本次发送的版本（不含别的标签页新增、这边没见过的节点），
+  // 时间戳用 bridge 的单调时间，供墓碑判断「是否已看到删除」。
+  canvasBaselines.set(doc.id, {
+    ...outgoing,
+    updatedAt: String(body?.data?.updatedAt || outgoing.updatedAt),
+  });
 }
 
 export async function deleteCanvasDoc(canvasId: string): Promise<void> {
+  canvasBaselines.delete(canvasId);
   await fetch(`/api/canvases/${encodeURIComponent(canvasId)}`, { method: 'DELETE' }).catch(() => undefined);
 }
 
@@ -258,18 +341,52 @@ export async function getChatThreads(): Promise<ChatThread[]> {
   return Array.isArray(body.data) ? body.data : [];
 }
 
-/** 整线程上桥（upsert）：线程变更后防抖调用（与 putCanvasDoc 同一节拍）。 */
-export async function putChatThread(thread: ChatThread): Promise<void> {
-  await fetch('/api/chat/threads', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(thread),
-  }).catch(() => undefined);
+/** CAS failures carry the current server thread so callers can merge before retrying. */
+export class ChatConflictError extends Error {
+  readonly status = 409;
+  constructor(message: string, readonly current?: ChatThread) { super(message); }
 }
 
-/** 删一条线程（幂等）：只删对话，不碰画布节点。 */
+async function chatRequest<T>(url: string, init?: RequestInit): Promise<T> {
+  const response = await fetch(url, init);
+  const body = await response.json().catch(() => null) as { data?: T; msg?: string } | null;
+  if (response.status === 409) throw new ChatConflictError(body?.msg || '对话已更新，请重试', body?.data as ChatThread | undefined);
+  if (!response.ok || body?.data === undefined) throw new Error(body?.msg || `对话请求失败（HTTP ${response.status}）`);
+  return body.data;
+}
+
+/** Explicit metadata/legacy writes only. Run output must never be sent back as a snapshot. */
+export async function putChatThread(thread: ChatThread, options: { metadataOnly?: boolean } = {}): Promise<ChatThread> {
+  const { messages, memory: _memory, ...metadata } = thread;
+  return chatRequest<ChatThread>('/api/chat/threads', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ...metadata, messages: options.metadataOnly ? [] : messages, ...(options.metadataOnly ? { metadataOnly: true } : {}) }),
+  });
+}
+
+export async function clearChatThread(threadId: string, revision?: number): Promise<ChatThread> {
+  return chatRequest<ChatThread>(`/api/chat/threads/${encodeURIComponent(threadId)}/clear`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ revision }),
+  });
+}
+
+export function getChatThreadMemory(threadId: string): Promise<ChatThread> {
+  return chatRequest<ChatThread>(`/api/chat/threads/${encodeURIComponent(threadId)}/memory`);
+}
+export function saveChatThreadMemory(threadId: string, memory: ChatThreadMemory, expectedRevision: number): Promise<ChatThread> {
+  return chatRequest<ChatThread>(`/api/chat/threads/${encodeURIComponent(threadId)}/memory`, {
+    method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ memory, expectedRevision }),
+  });
+}
+export function clearChatThreadMemory(threadId: string, revision: number): Promise<ChatThread> {
+  return chatRequest<ChatThread>(`/api/chat/threads/${encodeURIComponent(threadId)}/memory?revision=${revision}`, { method: 'DELETE' });
+}
+
+/** Server coordinates deletion with the run terminal fence. */
 export async function deleteChatThread(threadId: string): Promise<void> {
-  await fetch(`/api/chat/threads/${encodeURIComponent(threadId)}`, { method: 'DELETE' }).catch(() => undefined);
+  const response = await fetch(`/api/chat/threads/${encodeURIComponent(threadId)}`, { method: 'DELETE' });
+  if (!response.ok) throw new Error(`删除对话失败（HTTP ${response.status}）`);
 }
 
 export async function getSettings(): Promise<MediaSettings> {
@@ -279,6 +396,31 @@ export async function getSettings(): Promise<MediaSettings> {
   if (!res.ok) throw new Error('读取配置失败');
   const body = await res.json() as { data: MediaSettings };
   return body.data;
+}
+
+export interface ServiceHealth {
+  bridgeOnline: boolean;
+  imageModel: {
+    configured: boolean;
+    modelsLoaded: boolean;
+    profileName: string;
+    modelName: string;
+  };
+}
+
+export async function getServiceHealth(): Promise<ServiceHealth> {
+  const controller = new AbortController();
+  const timer = window.setTimeout(() => controller.abort(), 5000);
+  try {
+    const response = await fetch('/api/health', { cache: 'no-store', signal: controller.signal });
+    const body = await response.json().catch(() => null) as { data?: ServiceHealth; msg?: string } | null;
+    if (!response.ok || !body?.data?.bridgeOnline || !body.data.imageModel) {
+      throw new Error(body?.msg || `后台服务暂不可用（HTTP ${response.status}）`);
+    }
+    return body.data;
+  } finally {
+    window.clearTimeout(timer);
+  }
 }
 
 /** 按需读取当前配置的 Key；普通设置读取始终只返回 keyConfigured。 */
@@ -368,6 +510,7 @@ export async function saveSettings(input: SettingsInput): Promise<MediaSettings>
   });
   const body = await res.json().catch(() => null) as { data?: MediaSettings; msg?: string } | null;
   if (!res.ok || !body?.data) throw new Error(body?.msg || `保存配置失败（HTTP ${res.status}）`);
+  window.dispatchEvent(new Event('huiban:settings-saved'));
   return body.data;
 }
 
@@ -848,10 +991,31 @@ export function subscribeCanvasLocate(onLocate: (event: PushedLocateEvent) => vo
   return subscribeEventStream('/api/events', [{ type: 'locate', handler: handler as EventListener }]);
 }
 
+/** 页面没开 / 停在别的页面时错过的定位请求：画布页挂载后补一次。 */
+export async function getPendingLocate(): Promise<PushedLocateEvent | null> {
+  const res = await fetch('/api/agent/locate');
+  if (!res.ok) throw new Error('读取待处理定位失败');
+  const body = await res.json() as { data?: { pending?: PushedLocateEvent | null } };
+  return body.data?.pending || null;
+}
+
+/** 确认定位已处理；不确认的话下次打开画布页会重复跳转。 */
+export async function ackPendingLocate(at: string): Promise<void> {
+  await fetch('/api/agent/locate/ack', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ at }),
+  });
+}
+
 /* ── Agent 运行（方案 §12/§13）：起 run → SSE 推事件 → 可停止 ── */
 
 /** run 请求快照：前端是线程内容的权威方，bridge 只认这份快照跑循环。 */
 export interface ChatRunRequest {
+  requestId: string;
+  threadRevision?: number;
+  generation?: number;
+  answers?: Record<string, string[]>;
   threadId: string;
   canvasId: string;
   thread: ChatThread;
@@ -868,7 +1032,35 @@ export interface ChatRunRequest {
   agentRole?: ChatRoleSnapshot;
 }
 
-export type ChatRunEvent =
+export interface ChatRunConfirmation {
+  callId: string;
+  prompt: string;
+  model: string;
+  size: string;
+  count: number;
+  totalCount: number;
+  cost: 'unknown';
+  expiresAt: string;
+}
+
+export interface ChatRunSnapshot {
+  runId: string;
+  messageId: string;
+  seq: number;
+  status: 'running' | 'stopping' | 'done' | 'stopped' | 'error';
+  thread: ChatThread;
+  pendingConfirmation?: ChatRunConfirmation;
+  generation: number;
+}
+
+export function isTerminalRunStatus(status: string): boolean {
+  return status === 'done' || status === 'stopped' || status === 'error';
+}
+
+type ChatRunEventPayload =
+  | ({ type: 'snapshot' } & ChatRunSnapshot)
+  | { type: 'confirmation_requested'; confirmation: ChatRunConfirmation }
+  | { type: 'confirmation_resolved'; callId: string; approved: boolean }
   | { type: 'message_delta'; text: string }
   | { type: 'thinking'; text: string }
   | { type: 'clarification_requested'; callId: string; questions: ChatClarificationQuestion[] }
@@ -879,39 +1071,68 @@ export type ChatRunEvent =
   | { type: 'context_updated'; context: { baseVersionId?: string; responseId?: string; referenceCount: number; resetReason?: string } }
   | { type: 'memory_updated'; memory: ChatThreadMemory }
   | { type: 'tool_finished'; callId: string; status: 'done' | 'error' | 'stopped'; error?: string; durationMs?: number; finishedAt?: string }
-  | { type: 'message_done'; messageId: string; status: 'done' | 'stopped' }
+  | { type: 'message_done'; status: 'done' | 'stopped' | 'error'; message?: ChatMessage; thread?: ChatThread }
   | { type: 'error'; message: string };
+
+// Envelope fields are optional only for reading pre-upgrade cached events.
+export type ChatRunEvent = ChatRunEventPayload & { runId?: string; messageId?: string; seq?: number };
 
 /** 起一个 agent run：bridge 立即开始跑循环并缓冲事件。 */
 export async function startChatRun(request: ChatRunRequest): Promise<string> {
-  const res = await fetch('/api/chat/runs', {
+  const init: RequestInit = {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(request),
-  });
-  const body = await res.json().catch(() => null) as { data?: { runId?: string }; msg?: string } | null;
-  if (!res.ok || !body?.data?.runId) throw new Error(body?.msg || `启动对话失败（HTTP ${res.status}）`);
+  };
+  // One transport retry is safe only because the server binds requestId to the accepted run.
+  // This is not an image/provider retry and never creates a fresh request identity.
+  const res = await fetch('/api/chat/runs', init).catch(() => fetch('/api/chat/runs', init));
+  const body = await res.json().catch(() => null) as { data?: { runId?: string } | ChatThread; msg?: string } | null;
+  if (res.status === 409) throw new ChatConflictError(body?.msg || '线程已有运行中的任务', body?.data as ChatThread | undefined);
+  if (!res.ok || !body?.data || !('runId' in body.data) || !body.data.runId) throw new Error(body?.msg || `启动对话失败（HTTP ${res.status}）`);
   return body.data.runId;
+}
+
+export async function getChatRun(runId: string): Promise<ChatRunSnapshot | null> {
+  const response = await fetch(`/api/chat/runs/${encodeURIComponent(runId)}`, { cache: 'no-store' });
+  if (response.status === 404) return null;
+  const body = await response.json().catch(() => null) as { data?: ChatRunSnapshot; msg?: string } | null;
+  if (!response.ok || !body?.data) throw new Error(body?.msg || `读取运行状态失败（HTTP ${response.status}）`);
+  return body.data;
+}
+
+export async function confirmChatRun(runId: string, callId: string, approved: boolean): Promise<boolean> {
+  const data = await chatRequest<{ accepted: boolean }>(`/api/chat/runs/${encodeURIComponent(runId)}/confirm`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ callId, approved }),
+  });
+  return data.accepted;
 }
 
 /**
  * 订阅 run 的 SSE 事件。bridge 会先把缓冲事件补发给晚到的连接——
  * 刷新页面后凭 store 里留下的 runId 重连，不会丢中间过程。
  */
-export function subscribeChatRunEvents(runId: string, onEvent: (event: ChatRunEvent) => void): () => void {
+export function subscribeChatRunEvents(
+  runId: string,
+  onEvent: (event: ChatRunEvent) => void,
+  onOpen?: () => void,
+  afterSeq?: number,
+  onDisconnect?: () => void,
+): () => void {
   let cleanup = () => {};
   const types: Array<ChatRunEvent['type']> = [
+    'snapshot', 'confirmation_requested', 'confirmation_resolved',
     'message_delta', 'thinking', 'clarification_requested', 'clarification_answered', 'tool_started', 'tool_progress',
     'image_completed', 'context_updated', 'memory_updated', 'tool_finished', 'message_done', 'error',
   ];
-  const listeners = types.map((type) => {
+  const listeners: Array<{ type: string; handler: EventListener }> = types.map((type) => {
     const handler = (event: MessageEvent<string>) => {
       try {
         const parsed = JSON.parse(event.data) as ChatRunEvent;
         try {
           onEvent(parsed);
         } finally {
-          if (parsed.type === 'message_done' || parsed.type === 'error') cleanup();
+          if (parsed.type === 'message_done' || (parsed.type === 'snapshot' && isTerminalRunStatus(parsed.status))) cleanup();
         }
       } catch {
         /* 单条脏数据不该打断订阅 */
@@ -919,7 +1140,11 @@ export function subscribeChatRunEvents(runId: string, onEvent: (event: ChatRunEv
     };
     return { type, handler: handler as EventListener };
   });
-  cleanup = subscribeEventStream(`/api/chat/runs/${encodeURIComponent(runId)}/events`, listeners);
+  if (onOpen) listeners.push({ type: 'open', handler: onOpen as EventListener });
+  // Network errors have no data; the named server error event has a JSON body.
+  if (onDisconnect) listeners.push({ type: 'error', handler: ((event: Event) => { if (!(event as MessageEvent).data) onDisconnect(); }) as EventListener });
+  const query = afterSeq === undefined ? '' : `?afterSeq=${Math.max(0, afterSeq)}`;
+  cleanup = subscribeEventStream(`/api/chat/runs/${encodeURIComponent(runId)}/events${query}`, listeners);
   return cleanup;
 }
 

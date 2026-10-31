@@ -1,29 +1,36 @@
-export interface ChatPanelResizeFrame {
-  shellWidth: number;
-  contentOpacity: number;
-  collapseOffset: number;
-  shellOpacity: number;
-  contentHidden: boolean;
-  collapsed: boolean;
+export type ChatPanelResizePhase = 'expanded' | 'collapsing' | 'collapsed' | 'expanding';
+
+export function getNextChatPanelResizePhase(
+  phase: ChatPanelResizePhase,
+  desiredWidth: number,
+  minWidth: number,
+): ChatPanelResizePhase {
+  const safeWidth = Number.isFinite(desiredWidth) ? desiredWidth : minWidth;
+  const safeMinimum = Math.max(0, Number.isFinite(minWidth) ? minWidth : 0);
+  const collapseWidth = safeMinimum / 2;
+
+  if ((phase === 'expanded' || phase === 'expanding') && safeWidth <= collapseWidth) {
+    return 'collapsing';
+  }
+  if ((phase === 'collapsing' || phase === 'collapsed') && safeWidth >= safeMinimum) {
+    return 'expanding';
+  }
+  return phase;
 }
 
-const CONTENT_FADE_DISTANCE = 12;
+export function getChatPanelResizeWidth(
+  desiredWidth: number,
+  minWidth: number,
+  maxWidth: number,
+  phase: ChatPanelResizePhase,
+): number {
+  const safeMaximum = Math.max(0, Number.isFinite(maxWidth) ? maxWidth : 0);
+  const safeMinimum = Math.min(
+    safeMaximum,
+    Math.max(0, Number.isFinite(minWidth) ? minWidth : 0),
+  );
+  if (phase === 'collapsing' || phase === 'collapsed') return safeMinimum;
 
-function clamp01(value: number): number {
-  return Math.max(0, Math.min(1, value));
-}
-
-export function getChatPanelResizeFrame(width: number, minWidth: number): ChatPanelResizeFrame {
-  const collapseWidth = minWidth / 2;
-  const safeWidth = Number.isFinite(width) ? width : minWidth;
-  const contentFadeStart = minWidth - CONTENT_FADE_DISTANCE;
-
-  return {
-    shellWidth: Math.max(collapseWidth, safeWidth),
-    contentOpacity: clamp01((safeWidth - contentFadeStart) / CONTENT_FADE_DISTANCE),
-    collapseOffset: Math.max(0, collapseWidth - safeWidth),
-    shellOpacity: clamp01(safeWidth / collapseWidth),
-    contentHidden: safeWidth < minWidth,
-    collapsed: safeWidth <= collapseWidth,
-  };
+  const safeWidth = Number.isFinite(desiredWidth) ? desiredWidth : safeMinimum;
+  return Math.max(safeMinimum, Math.min(safeMaximum, safeWidth));
 }

@@ -84,7 +84,7 @@ describe('实时连接复用与释放', () => {
     expect(locate).toHaveBeenCalledTimes(1);
   });
 
-  it.each(['message_done', 'error'] as const)('对话收到 %s 后自动释放，不累积长期连接', (type) => {
+  it.each(['message_done'] as const)('对话收到 %s 后自动释放，不累积长期连接', (type) => {
     const onEvent = vi.fn();
     const cleanup = subscribeChatRunEvents(`run-${type}`, onEvent);
     cleanups.push(cleanup);
@@ -96,6 +96,29 @@ describe('实时连接复用与释放', () => {
     source.emit('message_delta', { type: 'message_delta', text: 'late' });
     expect(onEvent).toHaveBeenCalledTimes(2);
     cleanup();
+    expect(source.close).toHaveBeenCalledTimes(1);
+  });
+
+  it('error通知之后仍等待带最终正文的message_done再关闭', () => {
+    const receive = vi.fn();
+    cleanups.push(subscribeChatRunEvents('error-final', receive));
+    const source = FakeEventSource.instances[0];
+    source.emit('error', { type: 'error', runId: 'error-final', messageId: 'a', seq: 1, message: 'failed' });
+    expect(source.close).not.toHaveBeenCalled();
+    source.emit('message_done', { type: 'message_done', status: 'error', runId: 'error-final', messageId: 'a', seq: 2, message: { content: 'final text' } });
+    expect(receive).toHaveBeenCalledTimes(2);
+    expect(source.close).toHaveBeenCalledTimes(1);
+  });
+
+  it('snapshot终态释放连接，running snapshot保留，订阅携带已提交游标', () => {
+    const receive = vi.fn();
+    cleanups.push(subscribeChatRunEvents('recover', receive, undefined, 700));
+    const source = FakeEventSource.instances[0];
+    expect(source.url).toContain('afterSeq=700');
+    source.emit('snapshot', { type: 'snapshot', runId: 'recover', seq: 900, status: 'running' });
+    expect(receive).toHaveBeenCalledTimes(1);
+    expect(source.close).not.toHaveBeenCalled();
+    source.emit('snapshot', { type: 'snapshot', runId: 'recover', seq: 950, status: 'error' });
     expect(source.close).toHaveBeenCalledTimes(1);
   });
 

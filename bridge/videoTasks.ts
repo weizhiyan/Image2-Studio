@@ -120,7 +120,15 @@ export async function findVideoTaskByNode(nodeId: string): Promise<VideoTaskReco
  * 落一条任务。**提交之前就先占位**（taskId 空、submissionUnknown 未定）——
  * 否则 POST 成功但进程崩在拿到响应之前，这条任务就凭空消失了，用户看到的是
  * 「点了生成什么都没发生」，而上游已经在计费。
+ *
+ * 「查重 + 占位」必须在同一把写锁里完成：分成两步时，两个并发请求会同时通过查重、
+ * 各自向上游下单，重复计费。reserved=false 表示该节点已有在途 / 结果未知任务。
  */
+export interface VideoTaskReservation {
+  record: VideoTaskRecord;
+  reserved: boolean;
+}
+
 export async function reserveVideoTask(input: {
   profileId: string;
   nodeId: string;
@@ -137,35 +145,41 @@ export async function reserveVideoTask(input: {
   imageParamName?: string;
   imageUrls?: string[];
   imageFileNames?: string[];
-}): Promise<VideoTaskRecord> {
-  const record: VideoTaskRecord = {
-    taskId: '',
-    profileId: input.profileId,
-    nodeId: input.nodeId,
-    canvasId: input.canvasId,
-    prompt: input.prompt,
-    model: input.model,
-    seconds: normalizeVideoSeconds(input.seconds),
-    resolution: normalizeVideoResolution(input.resolution),
-    ratio: normalizeVideoRatio(input.ratio),
-    referenceMode: input.referenceMode || 'first_frame',
-    ...(input.params && Object.keys(input.params).length > 0 ? { params: input.params } : {}),
-    ...(input.apiMode && input.apiMode !== 'auto' ? { apiMode: input.apiMode } : {}),
-    ...(input.videoCustomConfig ? { videoCustomConfig: { ...input.videoCustomConfig } } : {}),
-    ...(input.imageParamName ? { imageParamName: input.imageParamName } : {}),
-    imageUrls: input.imageUrls || [],
-    ...(input.imageFileNames?.length ? { imageFileNames: input.imageFileNames } : {}),
-    status: 'queued',
-    progress: 0,
-    createdAt: new Date().toISOString(),
-    submissionUnknown: true,
-  };
-  await withVideoTaskWriteLock(async () => {
+}): Promise<VideoTaskReservation> {
+  return withVideoTaskWriteLock(async () => {
     const records = await readTaskFile();
+    const existing = [...records].reverse().find((item) => (
+      item.nodeId === input.nodeId
+      && (item.submissionUnknown || (!item.url && (item.status === 'queued' || item.status === 'in_progress')))
+    ));
+    if (existing) return { record: existing, reserved: false };
+
+    const record: VideoTaskRecord = {
+      taskId: '',
+      profileId: input.profileId,
+      nodeId: input.nodeId,
+      canvasId: input.canvasId,
+      prompt: input.prompt,
+      model: input.model,
+      seconds: normalizeVideoSeconds(input.seconds),
+      resolution: normalizeVideoResolution(input.resolution),
+      ratio: normalizeVideoRatio(input.ratio),
+      referenceMode: input.referenceMode || 'first_frame',
+      ...(input.params && Object.keys(input.params).length > 0 ? { params: input.params } : {}),
+      ...(input.apiMode && input.apiMode !== 'auto' ? { apiMode: input.apiMode } : {}),
+      ...(input.videoCustomConfig ? { videoCustomConfig: { ...input.videoCustomConfig } } : {}),
+      ...(input.imageParamName ? { imageParamName: input.imageParamName } : {}),
+      imageUrls: input.imageUrls || [],
+      ...(input.imageFileNames?.length ? { imageFileNames: input.imageFileNames } : {}),
+      status: 'queued',
+      progress: 0,
+      createdAt: new Date().toISOString(),
+      submissionUnknown: true,
+    };
     records.push(record);
     await writeTaskFile(prune(records));
+    return { record, reserved: true };
   });
-  return record;
 }
 
 /** 提交成功拿到 id：清掉「结果未知」标记，任务进入可轮询状态。 */

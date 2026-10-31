@@ -8,10 +8,11 @@
   background: var(--dialog-scrim);
   backdrop-filter: var(--surface-modal-backdrop-blur);
   -webkit-backdrop-filter: var(--surface-modal-backdrop-blur);
+  animation: fade-in var(--motion-slow) var(--ease-out) both;
 }
 
 .agent-connect-dialog {
-  width: min(560px, calc(100vw - var(--spacing-8)));
+  width: min(600px, calc(100vw - var(--spacing-8)));
   max-height: calc(100dvh - var(--spacing-8));
   display: grid;
   gap: var(--spacing-4);
@@ -21,9 +22,10 @@
   border-radius: var(--radius-lg);
   background: color-mix(in srgb, var(--surface-panel-bg) 92%, transparent);
   box-shadow: var(--shadow-lg);
-  --enter-y: 6px;
-  --enter-scale: 0.99;
-  animation: spring-in var(--motion-normal) var(--ease-out) both;
+  --enter-y: 0px;
+  --enter-scale: 0.4;
+  transform-origin: center;
+  animation: spring-in var(--motion-slower) var(--ease-emphasized) both;
 }
 
 .agent-connect-dialog-header {
@@ -119,36 +121,129 @@
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-accent-green) 18%, transparent);
 }
 
-.agent-connect-config {
-  display: grid;
-  padding: var(--spacing-4);
-  border: 1px solid var(--control-border);
-  border-radius: var(--radius-md);
-  background: var(--control-bg);
+.agent-connect-agents {
+  display: flex;
+  gap: var(--spacing-2);
+  min-width: 0;
 }
 
-.agent-connect-config-head {
+.agent-connect-agent {
+  flex: 1 1 0;
+  min-width: 0;
+  min-height: 44px;
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: var(--spacing-3);
-  color: var(--color-text-secondary);
-  font-size: var(--font-size-xs);
-}
-
-.agent-connect-copy {
-  min-height: 32px;
-  padding: 0 var(--spacing-4);
-  border: 0;
+  gap: var(--spacing-2);
+  border: 1px solid var(--control-border);
   border-radius: var(--radius-sm);
-  background: var(--color-text-primary);
-  color: var(--color-text-inverse);
+  background: var(--control-bg);
+  color: var(--color-text-primary);
+  padding: 0 var(--spacing-3);
   font-family: var(--font-sans);
-  font-size: var(--font-size-xs);
-  font-weight: var(--font-weight-medium);
+  font-size: var(--font-size-sm);
   cursor: pointer;
+  transition: background var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out);
 }
 
-.agent-connect-copy:hover {
-  opacity: 0.88;
+.agent-connect-agent:hover:not(:disabled) {
+  background: var(--control-bg-hover);
+  border-color: var(--control-border-hover);
+}
+
+.agent-connect-agent:focus-visible {
+  outline: 1px solid var(--control-border-focus);
+  outline-offset: 2px;
+}
+
+.agent-connect-agent:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.agent-connect-agent.is-copied {
+  border-color: color-mix(in srgb, var(--color-accent-green) 42%, transparent);
+}
+
+.agent-connect-agent.is-copied .agent-connect-agent-copy {
+  color: var(--color-accent-green);
+}
+
+.agent-connect-agent-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+}
+
+.agent-connect-agent-icon.is-claude {
+  color: var(--color-accent-amber);
+}
+
+.agent-connect-agent-icon.is-codex {
+  color: var(--color-text-primary);
+}
+
+.agent-connect-agent-icon.is-workbuddy {
+  color: var(--color-accent-green);
+}
+
+.agent-connect-agent-icon.is-generic {
+  color: var(--color-text-tertiary);
+}
+
+.agent-connect-agent-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: left;
+}
+
+.agent-connect-agent-hint {
+  flex: 0 0 auto;
+  color: var(--color-text-tertiary);
+  font-size: var(--font-size-xs);
+}
+
+.agent-connect-agent-copy {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  color: var(--color-text-tertiary);
+}
+
+.agent-connect-other {
+  display: grid;
+  gap: var(--spacing-2);
+  border-top: 1px solid var(--divider-subtle);
+  padding-top: var(--spacing-4);
+}
+
+.agent-connect-other-title {
+  color: var(--color-text-tertiary);
+  font-size: var(--font-size-xs);
+}
+
+.agent-connect-feedback {
+  margin: 0;
+  color: var(--color-text-tertiary);
+  font-size: var(--font-size-xs);
+  line-height: var(--line-height-normal);
+}
+
+.agent-connect-feedback.is-copied {
+  color: var(--color-accent-green);
+}
+
+.agent-connect-feedback.is-error {
+  color: var(--color-feedback-error-text);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .agent-connect-overlay,
+  .agent-connect-dialog {
+    animation: none;
+  }
 }

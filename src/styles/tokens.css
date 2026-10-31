@@ -125,6 +125,13 @@
   /* ghost 变体（无轨道，如看板分类页签）的选中填充 */
   --segment-ghost-active-bg: var(--color-interaction-default);
 
+  /* ── 参数滑块 Parameter slider ── */
+  /* 轨道比填充亮：滑动区域是压下去的深色，未滑动区域是抬起的浅色。 */
+  --parameter-slider-track-bg: color-mix(in srgb, var(--color-paper) 8%, var(--color-ui-control-active));
+  --parameter-slider-fill-bg: color-mix(in srgb, var(--color-paper) 20%, var(--color-ui-control-active));
+  --parameter-slider-thumb-bg: var(--color-paper);
+  --parameter-slider-tick: color-mix(in srgb, var(--color-text-primary) 22%, transparent);
+
   /* ── 通知提示 Toast ── */
   /* 底片 = 中性半透明层，再按 --toast-tint 掺入类型色；描边刻意做弱 */
   --toast-bg: color-mix(in srgb, var(--color-bg-surface) 84%, transparent);
@@ -474,6 +481,12 @@ html.floating-shell {
   /* 浅色白滑块压在浅灰轨道上（Δ28），去掉发丝描边后全靠这层投影托住，所以比深色更重。 */
   --segment-thumb-shadow: 0 1px 3px rgb(17 19 24 / 15%), 0 0 1px rgb(17 19 24 / 7%);
   --segment-ghost-active-bg: var(--color-interaction-default);
+
+  /* 浅色下轨道接近面板底色，填充回落到控件活动色；滑块改用深色以保持对比。 */
+  --parameter-slider-track-bg: var(--color-ui-control-panel);
+  --parameter-slider-fill-bg: var(--color-paper);
+  --parameter-slider-thumb-bg: var(--color-text-primary);
+  --parameter-slider-tick: color-mix(in srgb, var(--color-text-primary) 16%, transparent);
 
   --toast-bg: color-mix(in srgb, var(--color-bg-surface) 88%, transparent);
   --toast-tint: 10%;

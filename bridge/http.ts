@@ -1,16 +1,17 @@
 import http from 'node:http';
+import { randomUUID } from 'node:crypto';
 import { createReadStream } from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { CANVASES_FILE, CANVAS_DOCS_FILE, CHAT_DOCS_FILE, HOST, MEDIA_DIR, PORT, STATIC_DIR } from './paths.js';
-import { createProfile, findProfile, normalizeEnhanceLevel, publicView, readSettings, resolveTextProfile, resolveVideoProfile, writeSettings, type ModelProfile } from './settings.js';
+import { createProfile, findProfile, imageModelReadiness, normalizeEnhanceLevel, publicView, readSettings, resolveTextProfile, resolveVideoProfile, writeSettings, type ModelProfile } from './settings.js';
 import { addManualPreference, clearPreferences, distillPreferences, removePreference, setPreferencesEnabled } from './preferences.js';
 import { generateImages, normalizeImageSize } from './imageApi.js';
 import { detectReferenceUsage, directStyleNote, enhancePromptDetailed, fidelityForUsage, optimizeVideoPrompt, testTextProfile, usageForGenerateRequest } from './textApi.js';
 import { fetchProviderModels, fetchRemoteImage, testProviderConnection } from './providerApi.js';
-import { addSseClient, pushCanvasUpdated, pushImage, pushVideo } from './hub.js';
-import { deleteChatThread, putChatThread, readChatThreads } from './chat.js';
-import { answerChatRun, buildAgentSystemSpec, startChatRun, stopChatRun, subscribeChatRun, type StartRunRequest } from './runs.js';
+import { ackPendingLocate, addSseClient, countOpenTabs, peekPendingLocate, pushCanvasUpdated, pushImage, pushLocate, pushVideo } from './hub.js';
+import { ChatConflictError, clearChatThread, deleteChatThread, readChatThread, readChatThreads, updateChatMemory, writeClientThread } from './chat.js';
+import { answerChatRun, buildAgentSystemSpec, confirmChatRun, getChatRunSnapshot, startChatRun, stopChatRun, stopThreadRuns, subscribeChatRun, waitChatRunReady, type StartRunRequest } from './runs.js';
 import { contentTypeOf, copyMediaFile, deleteMediaFile, imageExtensionOf, revealLocalFile, saveDataUrl, safeMediaPath } from './files.js';
 import { createVideoTask, describeVideoModel, downloadVideoUrl, encodeVideoImagesAsDataUrls, getMediaVideoPriceQuote, listVideoModels, normalizeVideoRatio, normalizeVideoResolution, probeVideoConnection, validateVideoConfig, validateVideoImageDataUrls, VideoConfigurationError, VideoImageInputError, VideoRequestError, videoImagesUseDataUrls, videoUploadSupportsInlineDataUrl } from './videoApi.js';
 import { detectVideoProtocol, ensureVideoApiMode } from './videoProtocol.js';
@@ -38,6 +39,9 @@ export interface CanvasDocRecord {
   edges: unknown[];
   viewport?: { x: number; y: number; zoom: number };
   updatedAt?: string;
+  /** 已删除节点墓碑（id → 删除时间）：用于阻止旧标签页把节点复活。 */
+  deletedNodeIds?: Record<string, string>;
+  deletedEdgeIds?: Record<string, string>;
 }
 
 const MIME: Record<string, string> = {
@@ -160,25 +164,53 @@ async function serveMediaFile(req: http.IncomingMessage, res: http.ServerRespons
   createReadStream(filePath).pipe(res);
 }
 
-async function readRegistry(): Promise<CanvasRegistry> {
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+async function readJsonObject(filePath: string): Promise<Record<string, unknown>> {
+  let raw: string;
   try {
-    return JSON.parse(await fs.readFile(CANVASES_FILE, 'utf8')) as CanvasRegistry;
-  } catch {
-    return {};
+    raw = await fs.readFile(filePath, 'utf8');
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return {};
+    throw error;
   }
+  const parsed: unknown = JSON.parse(raw);
+  if (!isRecord(parsed)) throw new Error(`数据文件不是 JSON 对象：${path.basename(filePath)}`);
+  return parsed;
+}
+
+/** 同目录唯一临时文件 + rename：读者只会看到完整的旧版或新版 JSON。 */
+async function atomicWriteJson(filePath: string, value: unknown): Promise<void> {
+  const temp = `${filePath}.${process.pid}.${randomUUID()}.tmp`;
+  try {
+    await fs.writeFile(temp, JSON.stringify(value, null, 2), { encoding: 'utf8', flag: 'wx' });
+    await fs.rename(temp, filePath);
+  } finally {
+    await fs.unlink(temp).catch((error: NodeJS.ErrnoException) => {
+      if (error.code !== 'ENOENT') throw error;
+    });
+  }
+}
+
+async function readRegistry(): Promise<CanvasRegistry> {
+  const parsed = await readJsonObject(CANVASES_FILE);
+  if (!Object.values(parsed).every((name) => typeof name === 'string')) throw new Error('画布注册表损坏');
+  return parsed as CanvasRegistry;
 }
 
 async function writeRegistry(registry: CanvasRegistry): Promise<void> {
-  await fs.writeFile(CANVASES_FILE, JSON.stringify(registry, null, 2), 'utf8');
+  await atomicWriteJson(CANVASES_FILE, registry);
 }
 
 async function readCanvasDocs(): Promise<Record<string, CanvasDocRecord>> {
-  try {
-    const parsed = JSON.parse(await fs.readFile(CANVAS_DOCS_FILE, 'utf8')) as Record<string, CanvasDocRecord>;
-    return parsed && typeof parsed === 'object' ? parsed : {};
-  } catch {
-    return {};
+  const parsed = await readJsonObject(CANVAS_DOCS_FILE);
+  if (!Object.values(parsed).every((doc) => isRecord(doc)
+    && typeof doc.name === 'string' && Array.isArray(doc.nodes) && Array.isArray(doc.edges))) {
+    throw new Error('画布文档损坏：name/nodes/edges 类型不正确');
   }
+  return parsed as unknown as Record<string, CanvasDocRecord>;
 }
 
 async function mediaFileIsReferenced(fileName: string): Promise<boolean> {
@@ -253,36 +285,68 @@ export async function patchCanvasVideoNode(
     const timestamp = new Date(Math.max(now, Number.isFinite(previous) ? previous + 1 : now)).toISOString();
     docs[canvasId] = { ...doc, nodes, updatedAt: timestamp };
     await backupCanvasDocs();
-    await fs.writeFile(CANVAS_DOCS_FILE, JSON.stringify(docs, null, 2), 'utf8');
+    await atomicWriteJson(CANVAS_DOCS_FILE, docs);
     return timestamp;
   });
-  if (updatedAt) pushCanvasUpdated({ type: 'canvas-updated', canvasId, updatedAt });
+  if (updatedAt) await pushCanvasUpdated({ type: 'canvas-updated', canvasId, updatedAt });
   return Boolean(updatedAt);
+}
+
+export interface AppendCanvasImageOptions {
+  /** 聊天生图时把已有的参考图节点连到每张新结果上（同画布）。 */
+  connectFrom?: string[];
 }
 
 /** MCP 追加图片节点（外部写入）。注册表和文档都没有这个 id 时拒绝——
    防把提示词里拼错的 canvasId 写成一张幽灵画布。
    幂等：已存在的节点 id 跳过——对话 agent 的节点 id 由 runId+callId 确定性生成，
-   重复事件（SSE 重连补发 / 客户端重试）不会追加出重复节点。 */
-export async function appendCanvasImageNodes(canvasId: string, nodes: CanvasNodeRecord[]): Promise<boolean> {
+   重复事件（SSE 重连补发 / 客户端重试）不会追加出重复节点。
+   传入 connectFrom 时，按 source -> 每张结果建立边；重复调用不会重复加边。 */
+export async function appendCanvasImageNodes(canvasId: string, nodes: CanvasNodeRecord[], options: AppendCanvasImageOptions = {}): Promise<boolean> {
   if (nodes.length === 0) return false;
   return withCanvasWriteLock(async () => {
     const registry = await readRegistry();
     const docs = await readCanvasDocs();
     const previous = docs[canvasId];
     if (!previous && !registry[canvasId]) return false;
-    const existingIds = new Set((previous?.nodes || []).map((node) => String((node as { id?: string })?.id || '')));
-    const fresh = nodes.filter((node) => !existingIds.has(String(node.id || '')));
-    if (fresh.length === 0) return true;
+    const previousNodes = previous?.nodes || [];
+    const existingIds = new Set(previousNodes.map((node) => String((node as { id?: string })?.id || '')));
+    const fresh = nodes.filter((node) => !existingIds.has(String(node.id || ''))
+      && !Object.hasOwn(previous?.deletedNodeIds || {}, node.id));
+    const targetIds = nodes
+      .map((node) => String(node.id || ''))
+      .filter((id) => id && !Object.hasOwn(previous?.deletedNodeIds || {}, id));
+    const sourceIds = [...new Set((options.connectFrom || []).map((id) => String(id || '').trim()))]
+      .filter((id) => id && existingIds.has(id) && !targetIds.includes(id));
+    const previousEdges = previous?.edges || [];
+    const edgeKeys = new Set(previousEdges.map((edge) => {
+      const item = edge as { source?: unknown; target?: unknown };
+      return `${String(item.source || '')}->${String(item.target || '')}`;
+    }));
+    const edgeIds = new Set(previousEdges.map((edge) => String((edge as { id?: unknown })?.id || '')));
+    const newEdges: Array<Record<string, unknown>> = [];
+    for (const source of sourceIds) {
+      for (const target of targetIds) {
+        const key = `${source}->${target}`;
+        if (edgeKeys.has(key)) continue;
+        let edgeId = `edge_chat_${source}_${target}`;
+        for (let suffix = 2; edgeIds.has(edgeId); suffix += 1) edgeId = `edge_chat_${source}_${target}_${suffix}`;
+        edgeKeys.add(key);
+        edgeIds.add(edgeId);
+        newEdges.push({ id: edgeId, source, sourceHandle: 'out', target, targetHandle: 'in' });
+      }
+    }
+    if (fresh.length === 0 && newEdges.length === 0) return true;
+    const previousAt = Date.parse(String(previous?.updatedAt || ''));
     docs[canvasId] = {
+      ...previous,
       name: registry[canvasId] || previous?.name || '未命名画布',
-      nodes: [...(previous?.nodes || []), ...fresh],
-      edges: previous?.edges || [],
-      ...(previous?.viewport ? { viewport: previous.viewport } : {}),
-      updatedAt: new Date().toISOString(),
+      nodes: [...previousNodes, ...fresh],
+      edges: [...previousEdges, ...newEdges],
+      updatedAt: new Date(Math.max(Date.now(), Number.isFinite(previousAt) ? previousAt + 1 : 0)).toISOString(),
     };
     await backupCanvasDocs();
-    await fs.writeFile(CANVAS_DOCS_FILE, JSON.stringify(docs, null, 2), 'utf8');
+    await atomicWriteJson(CANVAS_DOCS_FILE, docs);
     return true;
   });
 }
@@ -292,17 +356,18 @@ export async function createCanvasInRegistry(canvasId: string, name: string): Pr
   const finalName = String(name || '').trim() || '新画布';
   return withCanvasWriteLock(async () => {
     const registry = await readRegistry();
+    const docs = await readCanvasDocs();
     const existed = registry[canvasId];
     if (existed) return { id: canvasId, name: existed };
-    registry[canvasId] = finalName;
-    await writeRegistry(registry);
-    const docs = await readCanvasDocs();
+    // 先完整读取两份文件，损坏时不允许先改注册表。
+    registry[canvasId] = docs[canvasId]?.name || finalName;
     if (!docs[canvasId]) {
       docs[canvasId] = { name: finalName, nodes: [], edges: [], updatedAt: new Date().toISOString() };
       await backupCanvasDocs();
-      await fs.writeFile(CANVAS_DOCS_FILE, JSON.stringify(docs, null, 2), 'utf8');
+      await atomicWriteJson(CANVAS_DOCS_FILE, docs);
     }
-    return { id: canvasId, name: finalName };
+    await writeRegistry(registry);
+    return { id: canvasId, name: registry[canvasId] };
   });
 }
 
@@ -404,12 +469,211 @@ export function mergeCanvasSnapshot(
   };
 }
 
+/** 浏览器整文档上桥改为「相对基线的变更集」，这里只描述变了什么，不覆盖整份文档。 */
+export interface CanvasGraphChanges {
+  nodeUpserts: Array<{ id: string; [key: string]: unknown }>;
+  nodeDeletes: string[];
+  edgeUpserts: Array<{ id: string; source: string; target: string; [key: string]: unknown }>;
+  edgeDeletes: string[];
+  name?: string;
+  viewport?: { x: number; y: number; zoom: number } | null;
+}
+
+const TOMBSTONE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+const MAX_TOMBSTONES = 1000;
+
+function pruneTombstones(tombstones: Record<string, string>, now: number): Record<string, string> {
+  const entries = Object.entries(tombstones).filter(([, at]) => {
+    const time = Date.parse(at);
+    return Number.isFinite(time) && now - time <= TOMBSTONE_TTL_MS;
+  });
+  if (entries.length <= MAX_TOMBSTONES) return Object.fromEntries(entries);
+  entries.sort((left, right) => Date.parse(left[1]) - Date.parse(right[1]));
+  return Object.fromEntries(entries.slice(entries.length - MAX_TOMBSTONES));
+}
+
+function idOf(item: unknown): string {
+  return String((item as { id?: unknown })?.id || '');
+}
+
+/**
+ * 把某次保存相对其基线的变更合并进服务端最新文档。
+ *
+ * - 不同标签页改不同节点时各自生效，不互相覆盖；
+ * - 节点/连线被别的标签页删掉后，旧标签页的更新不会把它带回来（墓碑时间晚于它的基线）；
+ * - 客户端已经看到删除后的主动恢复（撤销）仍然允许，靠墓碑时间 ≤ 基线时间判断。
+ */
+export function mergeCanvasGraphChanges(
+  previous: CanvasDocRecord | undefined,
+  changes: CanvasGraphChanges,
+  fallbackName: string,
+  baselineUpdatedAt: string | undefined,
+  updatedAt: string,
+): CanvasDocRecord {
+  const now = Date.parse(updatedAt);
+  const baselineTime = Date.parse(String(baselineUpdatedAt || ''));
+  const nodeTombstones = { ...(previous?.deletedNodeIds || {}) };
+  const edgeTombstones = { ...(previous?.deletedEdgeIds || {}) };
+  const seenDeletion = (tombstones: Record<string, string>, id: string): boolean => {
+    const deletedAt = Date.parse(String(tombstones[id] || ''));
+    if (!Number.isFinite(deletedAt)) return true;
+    return Number.isFinite(baselineTime) && deletedAt <= baselineTime;
+  };
+
+  const nodeDeletes = new Set(changes.nodeDeletes.map(String));
+  let nodes = (previous?.nodes || []).filter((item) => !nodeDeletes.has(idOf(item)));
+  for (const id of nodeDeletes) nodeTombstones[id] = updatedAt;
+  const presentNodeIds = new Set(nodes.map(idOf));
+  for (const node of changes.nodeUpserts) {
+    const id = idOf(node);
+    if (!id) continue;
+    if (presentNodeIds.has(id)) {
+      nodes = nodes.map((item) => (idOf(item) === id ? node : item));
+      continue;
+    }
+    if (!seenDeletion(nodeTombstones, id)) continue;
+    delete nodeTombstones[id];
+    nodes = [...nodes, node];
+    presentNodeIds.add(id);
+  }
+
+  const liveNodeIds = new Set(nodes.map(idOf));
+  const edgeDeletes = new Set(changes.edgeDeletes.map(String));
+  let edges = (previous?.edges || []).filter((item) => (
+    !edgeDeletes.has(idOf(item))
+    && liveNodeIds.has(String((item as { source?: unknown }).source || ''))
+    && liveNodeIds.has(String((item as { target?: unknown }).target || ''))
+  ));
+  for (const id of edgeDeletes) edgeTombstones[id] = updatedAt;
+  const presentEdgeIds = new Set(edges.map(idOf));
+  for (const edge of changes.edgeUpserts) {
+    const id = idOf(edge);
+    if (!id) continue;
+    if (!liveNodeIds.has(String(edge.source || '')) || !liveNodeIds.has(String(edge.target || ''))) continue;
+    if (presentEdgeIds.has(id)) {
+      edges = edges.map((item) => (idOf(item) === id ? edge : item));
+      continue;
+    }
+    if (!seenDeletion(edgeTombstones, id)) continue;
+    delete edgeTombstones[id];
+    edges = [...edges, edge];
+    presentEdgeIds.add(id);
+  }
+
+  const name = String(changes.name ?? previous?.name ?? fallbackName).trim() || fallbackName;
+  const viewport = changes.viewport !== undefined ? changes.viewport : previous?.viewport;
+  const merged: CanvasDocRecord = {
+    name,
+    nodes: protectVideoTerminalNodes(previous?.nodes, nodes),
+    edges,
+    ...(viewport ? { viewport } : {}),
+    updatedAt,
+  };
+  const deletedNodeIds = pruneTombstones(nodeTombstones, now);
+  const deletedEdgeIds = pruneTombstones(edgeTombstones, now);
+  if (Object.keys(deletedNodeIds).length > 0) merged.deletedNodeIds = deletedNodeIds;
+  if (Object.keys(deletedEdgeIds).length > 0) merged.deletedEdgeIds = deletedEdgeIds;
+  return merged;
+}
+
+export type InternalCanvasWriteOperation =
+  | { op: 'appendImages'; canvasId: string; nodes: CanvasNodeRecord[] }
+  | { op: 'createCanvas'; canvasId: string; name: string }
+  | { op: 'patchVideoNode'; canvasId: string; nodeId: string; patch: Record<string, unknown> };
+
+export interface InternalCanvasWriteResults {
+  appendImages: boolean;
+  createCanvas: { id: string; name: string };
+  patchVideoNode: boolean;
+}
+
+function validInternalId(value: unknown): value is string {
+  return typeof value === 'string' && /^[\w-]{1,200}$/.test(value)
+    && !['__proto__', 'prototype', 'constructor'].includes(value);
+}
+
+function validCanvasNode(value: unknown): value is CanvasNodeRecord {
+  return isRecord(value) && validInternalId(value.id) && value.type === 'flow-image'
+    && isRecord(value.position) && typeof value.position.x === 'number' && Number.isFinite(value.position.x)
+    && typeof value.position.y === 'number' && Number.isFinite(value.position.y)
+    && isRecord(value.data) && value.data.kind === 'image';
+}
+
+const VIDEO_PATCH_STRINGS = new Set([
+  'prompt', 'videoStatus', 'videoError', 'videoTaskId', 'videoUrl', 'videoFileName',
+  'videoResolution', 'videoRatio', 'videoReferenceMode', 'videoModel', 'videoProfileId', 'createdAt',
+]);
+const VIDEO_PATCH_BOOLEANS = new Set([
+  'videoAudio', 'videoSubmissionUnknown', 'videoDownloadRecoverable', 'videoDownloadRecovering',
+]);
+function validVideoPatch(value: unknown): value is Record<string, unknown> {
+  return isRecord(value) && Object.entries(value).every(([key, entry]) => {
+    if (VIDEO_PATCH_STRINGS.has(key)) return typeof entry === 'string';
+    if (VIDEO_PATCH_BOOLEANS.has(key)) return typeof entry === 'boolean';
+    if (key === 'videoSeconds' || key === 'videoProgress') return typeof entry === 'number' && Number.isFinite(entry);
+    if (key === 'videoParams') return isRecord(entry);
+    if (key === 'videoImageUrls') return Array.isArray(entry) && entry.every((url) => typeof url === 'string');
+    return false;
+  });
+}
+
+function validInternalWrite(value: unknown): value is InternalCanvasWriteOperation {
+  if (!isRecord(value) || !validInternalId(value.canvasId)) return false;
+  switch (value.op) {
+    case 'appendImages': return Array.isArray(value.nodes) && value.nodes.length <= 100 && value.nodes.every(validCanvasNode);
+    case 'createCanvas': return typeof value.name === 'string' && value.name.length <= 500;
+    case 'patchVideoNode': return validInternalId(value.nodeId) && validVideoPatch(value.patch);
+    default: return false;
+  }
+}
+
+/** 内部通道仅允许 loopback；有 Origin 时必须是本机同源，禁止浏览器跨站 POST。 */
+function isInternalRequest(req: http.IncomingMessage): boolean {
+  if (!/^(::1|::ffff:127\.0\.0\.1|127\.0\.0\.1)$/.test(String(req.socket.remoteAddress || ''))) return false;
+  if (req.headers.origin === undefined) return true;
+  try {
+    const origin = new URL(req.headers.origin);
+    const host = new URL(`http://${req.headers.host}`);
+    return ['127.0.0.1', 'localhost', '[::1]'].includes(host.hostname)
+      && Number(host.port || 80) === req.socket.localPort
+      && origin.origin === host.origin && req.headers.origin === origin.origin;
+  } catch {
+    return false;
+  }
+}
+
+function validBroadcast(value: unknown): value is { kind: string; payload: Record<string, unknown> } {
+  if (!isRecord(value) || !isRecord(value.payload)) return false;
+  const p = value.payload;
+  if (p.type !== value.kind) return false;
+  const validOptionalCanvas = p.canvasId === undefined || p.canvasId === '' || validInternalId(p.canvasId);
+  switch (value.kind) {
+    case 'image': return validOptionalCanvas && validInternalId(p.nodeId)
+      && ['prompt', 'fileName', 'url', 'jobId'].every((key) => typeof p[key] === 'string');
+    case 'locate': return validInternalId(p.canvasId) && validInternalId(p.nodeId)
+      && typeof p.at === 'string' && Number.isFinite(Date.parse(p.at))
+      && (p.onlyIfOffscreen === undefined || typeof p.onlyIfOffscreen === 'boolean');
+    case 'video': return validOptionalCanvas && validInternalId(p.nodeId) && typeof p.taskId === 'string'
+      && ['submitted', 'progress', 'download-failed', 'done', 'failed'].includes(String(p.phase));
+    case 'canvas-updated': return validInternalId(p.canvasId)
+      && typeof p.updatedAt === 'string' && Number.isFinite(Date.parse(p.updatedAt))
+      && (p.originId === undefined || typeof p.originId === 'string');
+    default: return false;
+  }
+}
+
 export function createHttpServer() {
   return http.createServer(async (req, res) => {
     const url = new URL(req.url || '/', `http://${HOST}`);
     const pathname = decodeURIComponent(url.pathname);
 
     try {
+      if (pathname === '/api/health' && req.method === 'GET') {
+        const readiness = imageModelReadiness(await readSettings());
+        res.setHeader('Cache-Control', 'no-store');
+        json(res, 200, { code: 0, data: { bridgeOnline: true, imageModel: readiness }, msg: 'ok' });
+        return;
+      }
       if (pathname === '/api/agent/status' && req.method === 'GET') {
         const presence = await readAgentPresence();
         json(res, 200, {
@@ -421,9 +685,61 @@ export function createHttpServer() {
             transport: presence.transport || 'stdio',
             mcpEntry: MCP_ENTRY,
             nodeCommand: MCP_LAUNCHER,
+            nodePath: process.execPath,
+            platform: process.platform,
+            openTabs: countOpenTabs(),
           },
           msg: 'ok',
         });
+        return;
+      }
+      if ((pathname === '/api/internal/write' || pathname === '/api/internal/broadcast') && req.method === 'POST') {
+        if (!isInternalRequest(req)) {
+          json(res, 403, { code: 1, data: null, msg: 'forbidden' });
+          return;
+        }
+        let body: unknown;
+        try {
+          body = await readBody(req);
+        } catch {
+          json(res, 400, { code: 1, data: null, msg: '非法 JSON' });
+          return;
+        }
+        if (pathname === '/api/internal/write') {
+          if (!validInternalWrite(body)) {
+            json(res, 400, { code: 1, data: null, msg: '非法画布写入操作或参数' });
+            return;
+          }
+          let result: InternalCanvasWriteResults[keyof InternalCanvasWriteResults];
+          switch (body.op) {
+            case 'appendImages': result = await appendCanvasImageNodes(body.canvasId, body.nodes); break;
+            case 'createCanvas': result = await createCanvasInRegistry(body.canvasId, body.name); break;
+            case 'patchVideoNode': result = await patchCanvasVideoNode(body.canvasId, body.nodeId, body.patch); break;
+          }
+          json(res, 200, { code: 0, data: result, msg: 'ok' });
+          return;
+        }
+        if (!validBroadcast(body)) {
+          json(res, 400, { code: 1, data: null, msg: '非法广播类型或参数' });
+          return;
+        }
+        switch (body.kind) {
+          case 'image': await pushImage(body.payload as never); break;
+          case 'locate': await pushLocate(body.payload as never); break;
+          case 'video': await pushVideo(body.payload as never); break;
+          case 'canvas-updated': await pushCanvasUpdated(body.payload as never); break;
+        }
+        json(res, 200, { code: 0, data: { broadcast: body.kind }, msg: 'ok' });
+        return;
+      }
+      if (pathname === '/api/agent/locate' && req.method === 'GET') {
+        json(res, 200, { code: 0, data: { pending: peekPendingLocate() }, msg: 'ok' });
+        return;
+      }
+      if (pathname === '/api/agent/locate/ack' && req.method === 'POST') {
+        const body = await readBody(req).catch(() => ({})) as Record<string, unknown>;
+        ackPendingLocate(typeof body.at === 'string' ? body.at : undefined);
+        json(res, 200, { code: 0, data: { acked: true }, msg: 'ok' });
         return;
       }
       if (pathname === '/api/settings' && req.method === 'GET') {
@@ -488,12 +804,14 @@ export function createHttpServer() {
             enabled: profile.enabled,
           }));
         const settings = await writeSettings({
-          profiles: drafts,
-          activeProfileId: Array.isArray(body.profiles) ? String(body.activeProfileId || '') : current.activeProfileId,
+          profiles: Array.isArray(body.profiles) ? drafts : undefined,
+          activeProfileId: Array.isArray(body.profiles) ? String(body.activeProfileId || '') : undefined,
           direct: typeof body.direct === 'boolean' ? body.direct : undefined,
           promptOptimizationEnabled: typeof body.promptOptimizationEnabled === 'boolean' ? body.promptOptimizationEnabled : undefined,
           textProfileId: typeof body.textProfileId === 'string' ? body.textProfileId : undefined,
           enhanceLevel: typeof body.enhanceLevel === 'string' ? normalizeEnhanceLevel(body.enhanceLevel) : undefined,
+          chatMemory: body.chatMemory && typeof body.chatMemory === 'object' ? body.chatMemory as Parameters<typeof writeSettings>[0]['chatMemory'] : undefined,
+          chatRuntime: body.chatRuntime && typeof body.chatRuntime === 'object' ? body.chatRuntime as Parameters<typeof writeSettings>[0]['chatRuntime'] : undefined,
         });
         json(res, 200, { code: 0, data: publicView(settings), msg: 'ok' });
         return;
@@ -1004,19 +1322,8 @@ function readReferenceUrls(body: { referenceDataUrl?: unknown; referenceDataUrls
         const referenceMode = body.referenceMode === 'last_frame' || body.referenceMode === 'style'
           ? body.referenceMode
           : 'first_frame';
-        // 同一节点已有在途任务时直接返回它：连点两次生成不该向上游重复下单（会重复计费）
-        const existing = await findVideoTaskByNode(nodeId);
-        if (
-          existing
-          && !existing.submissionUnknown
-          && !existing.url
-          && (existing.status === 'queued' || existing.status === 'in_progress')
-        ) {
-          json(res, 200, { code: 0, data: { ok: true, taskId: existing.taskId, duplicate: true }, msg: '该节点已有在途视频任务' });
-          return;
-        }
-        // 先占位再提交：POST 发出后进程崩掉的话，这条任务有据可查，不会凭空消失
-        await reserveVideoTask({
+        // 查重与占位在同一把写锁里完成：并发请求只有一个能拿到提交权，避免重复计费
+        const reservation = await reserveVideoTask({
           profileId: profile.id,
           nodeId,
           canvasId,
@@ -1033,6 +1340,10 @@ function readReferenceUrls(body: { referenceDataUrl?: unknown; referenceDataUrls
           imageUrls: taskImageUrls,
           imageFileNames: rawFileNames,
         });
+        if (!reservation.reserved) {
+          json(res, 200, { code: 0, data: { ok: true, taskId: reservation.record.taskId, duplicate: true }, msg: '该节点已有在途视频任务' });
+          return;
+        }
         pushVideo({ type: 'video', phase: 'submitted', canvasId, nodeId, taskId: '', status: 'queued', progress: 0 });
         try {
           const snapshot = await createVideoTask(runtimeProfile, {
@@ -1265,16 +1576,66 @@ function readReferenceUrls(body: { referenceDataUrl?: unknown; referenceDataUrls
           json(res, 400, { code: 1, data: null, msg: '缺少画布 id' });
           return;
         }
-        const body = await readBody(req) as { name?: string; nodes?: unknown[]; edges?: unknown[]; viewport?: { x: number; y: number; zoom: number }; updatedAt?: string; originId?: string };
-        const registry = await readRegistry();
+        const body = await readBody(req) as {
+          name?: string;
+          graphChanges?: CanvasGraphChanges;
+          baselineUpdatedAt?: string;
+          originId?: string;
+          nodes?: unknown[];
+          edges?: unknown[];
+          viewport?: { x: number; y: number; zoom: number };
+          updatedAt?: string;
+        };
         const name = String(body.name || '未命名画布');
-        registry[canvasId] = name;
-        await writeRegistry(registry);
         let storedUpdatedAt = '';
+        let storedDoc: CanvasDocRecord | undefined;
         let wroteSnapshot = false;
         await withCanvasWriteLock(async () => {
+          const registry = await readRegistry();
           const docs = await readCanvasDocs();
           const previous = docs[canvasId];
+          if (body.graphChanges) {
+            const previousAt = Date.parse(String(previous?.updatedAt || ''));
+            const updatedAt = new Date(Math.max(Date.now(), Number.isFinite(previousAt) ? previousAt + 1 : 0)).toISOString();
+            const merged = mergeCanvasGraphChanges(
+              previous,
+              body.graphChanges,
+              name,
+              body.baselineUpdatedAt,
+              updatedAt,
+            );
+            const unchanged = previous && JSON.stringify({
+              name: previous.name,
+              nodes: previous.nodes,
+              edges: previous.edges,
+              viewport: previous.viewport,
+              deletedNodeIds: previous.deletedNodeIds,
+              deletedEdgeIds: previous.deletedEdgeIds,
+            }) === JSON.stringify({
+              name: merged.name,
+              nodes: merged.nodes,
+              edges: merged.edges,
+              viewport: merged.viewport,
+              deletedNodeIds: merged.deletedNodeIds,
+              deletedEdgeIds: merged.deletedEdgeIds,
+            });
+            if (unchanged) {
+              storedDoc = previous;
+              storedUpdatedAt = previous.updatedAt || '';
+              return;
+            }
+            docs[canvasId] = merged;
+            registry[canvasId] = merged.name;
+            await writeRegistry(registry);
+            await backupCanvasDocs();
+            await atomicWriteJson(CANVAS_DOCS_FILE, docs);
+            storedDoc = merged;
+            storedUpdatedAt = updatedAt;
+            wroteSnapshot = true;
+            return;
+          }
+          registry[canvasId] = name;
+          await writeRegistry(registry);
           // 只带 name 的注册请求（registerCanvas）：没有历史文档时直接返回，
           // 绝不用一张空快照把已经在桥上的画布冲掉
           if (!Array.isArray(body.nodes) && !Array.isArray(body.edges) && !previous) return;
@@ -1293,27 +1654,34 @@ function readReferenceUrls(body: { referenceDataUrl?: unknown; referenceDataUrls
             ...(body.viewport ? { viewport: body.viewport } : {}),
             updatedAt,
           };
+          storedDoc = docs[canvasId];
           storedUpdatedAt = docs[canvasId].updatedAt || '';
           wroteSnapshot = true;
           await backupCanvasDocs();
-          await fs.writeFile(CANVAS_DOCS_FILE, JSON.stringify(docs, null, 2), 'utf8');
+          await atomicWriteJson(CANVAS_DOCS_FILE, docs);
         });
         if (wroteSnapshot && storedUpdatedAt) {
           pushCanvasUpdated({ type: 'canvas-updated', canvasId, updatedAt: storedUpdatedAt, originId: String(body.originId || '') || undefined });
         }
-        json(res, 200, { code: 0, data: { id: canvasId, name }, msg: 'ok' });
+        json(res, 200, {
+          code: 0,
+          data: storedDoc
+            ? { id: canvasId, name: storedDoc.name, updatedAt: storedUpdatedAt }
+            : { id: canvasId, name },
+          msg: 'ok',
+        });
         return;
       }
       if (pathname.startsWith('/api/canvases') && req.method === 'DELETE') {
         const canvasId = pathname.slice('/api/canvases/'.length);
-        const registry = await readRegistry();
-        delete registry[canvasId];
-        await writeRegistry(registry);
         await withCanvasWriteLock(async () => {
+          const registry = await readRegistry();
           const docs = await readCanvasDocs();
+          delete registry[canvasId];
           delete docs[canvasId];
           await backupCanvasDocs();
-          await fs.writeFile(CANVAS_DOCS_FILE, JSON.stringify(docs, null, 2), 'utf8');
+          await atomicWriteJson(CANVAS_DOCS_FILE, docs);
+          await writeRegistry(registry);
         });
         // 级联清掉该画布的视频任务：否则轮询器会一直在后台查一个已删除画布的任务
         await removeVideoTasksByCanvas(canvasId);
@@ -1434,6 +1802,7 @@ function readReferenceUrls(body: { referenceDataUrl?: unknown; referenceDataUrls
             avatarUrl: String(body.avatarUrl || ''),
             content: String(body.content || ''),
             skills: readRoleSkills(body.skills),
+            temperature: typeof body.temperature === 'number' ? body.temperature : undefined,
             enabled: body.enabled !== false,
           });
           json(res, 200, { code: 0, data: skill, msg: '已安装 Skill' });
@@ -1454,6 +1823,7 @@ function readReferenceUrls(body: { referenceDataUrl?: unknown; referenceDataUrls
             avatarUrl: String(body.avatarUrl || ''),
             content: String(body.content || ''),
             skills: readRoleSkills(body.skills),
+            temperature: typeof body.temperature === 'number' ? body.temperature : undefined,
             enabled: body.enabled !== false,
           });
           json(res, 200, { code: 0, data: skill, msg: '已更新 Skill' });
@@ -1490,12 +1860,51 @@ function readReferenceUrls(body: { referenceDataUrl?: unknown; referenceDataUrls
       }
       if (pathname === '/api/chat/threads' && req.method === 'POST') {
         const body = await readBody(req) as Record<string, unknown>;
-        const stored = await putChatThread(body);
-        if (!stored) {
-          json(res, 400, { code: 1, data: null, msg: '对话内容不合法' });
+        try {
+          const stored = await writeClientThread(body, typeof body.revision === 'number' ? body.revision : undefined);
+          if (!stored) { json(res, 409, { code: 1, data: null, msg: '对话已删除或内容不合法' }); return; }
+          json(res, 200, { code: 0, data: stored, msg: 'ok' });
+        } catch (error) {
+          if (!(error instanceof ChatConflictError)) throw error;
+          json(res, 409, { code: 1, data: error.thread, msg: error.message });
+        }
+        return;
+      }
+      if (pathname.startsWith('/api/chat/threads/') && pathname.endsWith('/memory')) {
+        const threadId = pathname.slice('/api/chat/threads/'.length, -'/memory'.length);
+        const thread = await readChatThread(threadId);
+        if (!thread) { json(res, 404, { code: 1, data: null, msg: '对话不存在' }); return; }
+        if (req.method === 'GET') { json(res, 200, { code: 0, data: thread, msg: 'ok' }); return; }
+        if (req.method === 'PATCH' || req.method === 'DELETE') {
+          const body = req.method === 'PATCH' ? await readBody(req) as Record<string, unknown> : {};
+          const expected = Number(body.expectedRevision ?? url.searchParams.get('revision') ?? 0);
+          const now = new Date().toISOString();
+          const input = req.method === 'DELETE'
+            ? { memoryRevision: expected, clearedThroughMessageId: String(thread.messages.at(-1)?.id || ''), summary: '', goal: { updatedAt: now }, visualWorkingSet: { references: [], recentOutputs: [], inheritMode: 'new', explicitNewRequest: true } }
+            : { ...((body.memory || {}) as Record<string, unknown>), goal: { ...(((body.memory as Record<string, unknown> | undefined)?.goal || {}) as object), updatedAt: now }, summaryUpdatedAt: now };
+          try {
+            const updated = await updateChatMemory(threadId, input, expected);
+            json(res, updated ? 200 : 404, { code: updated ? 0 : 1, data: updated, msg: updated ? 'ok' : '对话不存在' });
+          } catch (error) {
+            if (!(error instanceof ChatConflictError)) throw error;
+            json(res, 409, { code: 1, data: error.thread, msg: '记忆已更新，请刷新后再修改' });
+          }
           return;
         }
-        json(res, 200, { code: 0, data: stored, msg: 'ok' });
+      }
+      if (pathname.startsWith('/api/chat/threads/') && pathname.endsWith('/clear') && req.method === 'POST') {
+        const threadId = pathname.slice('/api/chat/threads/'.length, -'/clear'.length);
+        await stopThreadRuns(threadId);
+        const body = await readBody(req) as Record<string, unknown>;
+        const current = await readChatThread(threadId);
+        if (!current) { json(res, 404, { code: 1, data: null, msg: '对话不存在' }); return; }
+        try {
+          const stored = await clearChatThread(threadId, typeof body.revision === 'number' ? body.revision : Number(current.revision || 0));
+          json(res, 200, { code: 0, data: stored, msg: 'ok' });
+        } catch (error) {
+          if (!(error instanceof ChatConflictError)) throw error;
+          json(res, 409, { code: 1, data: error.thread, msg: error.message });
+        }
         return;
       }
       if (pathname.startsWith('/api/chat/threads/') && req.method === 'DELETE') {
@@ -1504,6 +1913,7 @@ function readReferenceUrls(body: { referenceDataUrl?: unknown; referenceDataUrls
           json(res, 400, { code: 1, data: null, msg: '缺少线程 id' });
           return;
         }
+        await stopThreadRuns(threadId);
         await deleteChatThread(threadId);
         json(res, 200, { code: 0, data: { id: threadId }, msg: 'ok' });
         return;
@@ -1517,8 +1927,26 @@ function readReferenceUrls(body: { referenceDataUrl?: unknown; referenceDataUrls
           json(res, 400, { code: 1, data: null, msg: '缺少 threadId / canvasId / thread / assistantMessageId' });
           return;
         }
-        const runId = startChatRun(body);
-        json(res, 200, { code: 0, data: { runId }, msg: 'ok' });
+        try {
+          const runId = startChatRun(body);
+          await waitChatRunReady(runId);
+          json(res, 200, { code: 0, data: { runId }, msg: 'ok' });
+        } catch (err) {
+          json(res, 409, { code: 1, data: err instanceof ChatConflictError ? err.thread : null, msg: err instanceof Error ? err.message : '该对话已有在途任务' });
+        }
+        return;
+      }
+      if (/^\/api\/chat\/runs\/[^/]+$/.test(pathname) && req.method === 'GET') {
+        const runId = pathname.slice('/api/chat/runs/'.length);
+        const snapshot = getChatRunSnapshot(runId);
+        json(res, snapshot ? 200 : 404, { code: snapshot ? 0 : 1, data: snapshot, msg: snapshot ? 'ok' : 'run 不存在' });
+        return;
+      }
+      if (pathname.startsWith('/api/chat/runs/') && pathname.endsWith('/confirm') && req.method === 'POST') {
+        const runId = pathname.slice('/api/chat/runs/'.length, -'/confirm'.length);
+        const body = await readBody(req) as Record<string, unknown>;
+        const accepted = confirmChatRun(runId, String(body.callId || ''), body.approved === true);
+        json(res, accepted ? 200 : 409, { code: accepted ? 0 : 1, data: { accepted }, msg: accepted ? 'ok' : '确认已过期' });
         return;
       }
       if (pathname.startsWith('/api/chat/runs/') && pathname.endsWith('/events') && req.method === 'GET') {
@@ -1530,7 +1958,7 @@ function readReferenceUrls(body: { referenceDataUrl?: unknown; referenceDataUrls
       }
       if (pathname.startsWith('/api/chat/runs/') && pathname.endsWith('/stop') && req.method === 'POST') {
         const runId = decodeURIComponent(pathname.slice('/api/chat/runs/'.length, pathname.length - '/stop'.length));
-        const stopped = stopChatRun(runId);
+        const stopped = await stopChatRun(runId);
         json(res, stopped ? 200 : 404, { code: stopped ? 0 : 1, data: { stopped }, msg: stopped ? 'ok' : 'run 不存在或已结束' });
         return;
       }
@@ -1543,7 +1971,7 @@ function readReferenceUrls(body: { referenceDataUrl?: unknown; referenceDataUrls
           userMessage?: Record<string, unknown>;
           assistantMessage?: Record<string, unknown>;
         };
-        const answered = answerChatRun(runId, String(body.callId || ''), body);
+        const answered = await answerChatRun(runId, String(body.callId || ''), body);
         json(res, answered ? 200 : 409, { code: answered ? 0 : 1, data: { answered }, msg: answered ? 'ok' : '问题已过期或答案不完整' });
         return;
       }

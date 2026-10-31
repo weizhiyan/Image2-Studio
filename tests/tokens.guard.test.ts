@@ -57,7 +57,7 @@ const JS_INJECTED = new Set([
   '--image-node-width',
   '--image-aspect-ratio',
   '--image-node-height',
-  '--parameter-slider-progress',
+  '--parameter-slider-ratio',
   '--segment-count',
   '--segment-index',
   '--choice-count',

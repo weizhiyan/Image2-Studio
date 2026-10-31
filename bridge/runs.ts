@@ -4,12 +4,12 @@ import type { ServerResponse } from 'node:http';
 import { MEDIA_DIR } from './paths.js';
 import { imageExtensionOf } from './files.js';
 import { pushImage } from './hub.js';
-import { findProfile, readSettings, resolveTextProfile, type ModelProfile } from './settings.js';
+import { findProfile, readSettings, resolveTextModel, resolveTextProfile, normalizeChatRuntimeSettings, type ModelProfile } from './settings.js';
 import { generateImages, IMAGE_GENERATION_TIMEOUT_MESSAGE, IMAGE_GENERATION_TIMEOUT_MS } from './imageApi.js';
-import { detectReferenceUsage, enhancePromptDetailed, fidelityForUsage, type EnhanceParams, type PromptEnhancementResult } from './textApi.js';
-import { buildMemoryContext, memoryPromptBlock, type MemoryMessage, type PersistedMemory } from './chatMemory.js';
+import { detectReferenceUsage, enhancePromptDetailed, fidelityForUsage, buildVisualPromptRules, callTextModel, type EnhanceParams, type PromptEnhancementResult } from './textApi.js';
+import { applyMemoryCompaction, buildMemoryContext, memoryPromptBlock, type MemoryMessage, type PersistedMemory } from './chatMemory.js';
 import { appendCanvasImageNodes, readCanvasDoc, type CanvasNodeRecord } from './http.js';
-import { putChatThread, readChatThreads } from './chat.js';
+import { readChatThreads, readChatThread, writeClientThread, writeRunThread } from './chat.js';
 import { askUserToolDef, callAgentModel, generateImageToolDef, normalizeAskUserQuestions, type AgentMessage, type AgentToolCall, type AskUserQuestion } from './agent.js';
 import { normalizePromptRoleSnapshot, promptRoleContext, type PromptRoleSnapshot } from './skills.js';
 
@@ -26,19 +26,47 @@ import { normalizePromptRoleSnapshot, promptRoleContext, type PromptRoleSnapshot
 
 /* ── 事件 ── */
 
-export type RunEvent =
+export type RunStatus = 'running' | 'stopping' | 'done' | 'stopped' | 'error';
+
+export interface ImageConfirmation {
+  callId: string;
+  prompt: string;
+  model: string;
+  size: string;
+  count: number;
+  totalCount: number;
+  cost: 'unknown';
+  expiresAt: string;
+}
+
+export interface RunSnapshot {
+  type: 'snapshot';
+  runId: string;
+  messageId: string;
+  seq: number;
+  status: RunStatus;
+  thread: ThreadSnapshot;
+  generation: number;
+  pendingConfirmation?: ImageConfirmation;
+}
+
+type RunEventPayload =
   | { type: 'message_delta'; text: string }
   | { type: 'thinking'; text: string }
   | { type: 'clarification_requested'; callId: string; questions: AskUserQuestion[] }
   | { type: 'clarification_answered'; callId: string; answers: Record<string, string[]> }
+  | { type: 'confirmation_requested'; confirmation: ImageConfirmation }
+  | { type: 'confirmation_resolved'; callId: string; approved: boolean }
   | { type: 'tool_started'; callId: string; name: string; args: Record<string, unknown>; model?: string; profileName?: string; size?: string; startedAt?: string }
   | { type: 'tool_progress'; callId: string; step: string }
   | { type: 'memory_updated'; memory: PersistedMemory }
   | { type: 'context_updated'; context: ChatRunContext }
   | { type: 'image_completed'; callId: string; media: GeneratedMedia }
   | { type: 'tool_finished'; callId: string; status: 'done' | 'error' | 'stopped'; error?: string; durationMs?: number; finishedAt?: string }
-  | { type: 'message_done'; messageId: string; status: 'done' | 'stopped' }
+  | { type: 'message_done'; messageId?: string; status: 'done' | 'stopped' | 'error'; message?: Record<string, unknown>; thread?: ThreadSnapshot }
   | { type: 'error'; message: string };
+
+export type RunEvent = RunEventPayload & { seq?: number; runId?: string; messageId?: string };
 
 export interface GeneratedMedia {
   url: string;
@@ -90,8 +118,10 @@ export async function compileChatPrompt(
 }
 
 /** 前端消息快照形状（本模块只读不依赖 src/types，bridge 侧自成体系）。 */
-interface ThreadSnapshot {
+export interface ThreadSnapshot {
   id: string;
+  revision?: number;
+  generation?: number;
   canvasId?: string;
   title: string;
   messages: Array<Record<string, unknown>>;
@@ -101,6 +131,10 @@ interface ThreadSnapshot {
 }
 
 export interface StartRunRequest {
+  requestId?: string;
+  threadRevision?: number;
+  generation?: number;
+  answers?: Record<string, string[]>;
   threadId: string;
   canvasId: string;
   /** 前端权威快照：含已追加的用户消息与占位 assistant 消息（status: 'running'）。 */
@@ -112,7 +146,7 @@ export interface StartRunRequest {
   previousCanvasId?: string;
   /** 占位 assistant 消息 id：事件与最终落盘都认它。 */
   assistantMessageId: string;
-  modelSelection?: { textProfileId?: string; imageProfileId?: string; imageModel?: string };
+  modelSelection?: { textProfileId?: string; textModel?: string; imageProfileId?: string; imageModel?: string };
   /** 发送时选中的角色快照；未选择时不注入任何角色或 Skill。 */
   agentRole?: PromptRoleSnapshot;
 }
@@ -122,12 +156,19 @@ interface ChatRun {
   threadId: string;
   canvasId: string;
   assistantMessageId: string;
-  status: 'running' | 'done' | 'stopped' | 'error';
+  status: RunStatus;
   events: RunEvent[];
+  eventSeq: number;
   clients: Set<ServerResponse>;
   abort: AbortController;
   createdAt: string;
   request: StartRunRequest;
+  generation: number;
+  ownedMessageIds: Set<string>;
+  readiness: Promise<void>;
+  finish?: Promise<void>;
+  memoryRevision: number;
+  pendingConfirmation?: { value: ImageConfirmation; resolve: (approved: boolean) => void; timer: ReturnType<typeof setTimeout> };
   pendingQuestion?: {
     callId: string;
     questions: AskUserQuestion[];
@@ -138,9 +179,6 @@ interface ChatRun {
 const runs = new Map<string, ChatRun>();
 /** 事件缓冲上限：防失控线程把内存撑爆。 */
 const MAX_BUFFERED_EVENTS = 500;
-/** 单轮 agent 循环的模型回合数 / 生图次数上限（方案 §12：单轮最多 2 次生图）。 */
-const MAX_MODEL_ROUNDS = 4;
-const MAX_TOOL_CALLS_PER_RUN = 2;
 const IMAGE_TOOL_TIMEOUT_MS = IMAGE_GENERATION_TIMEOUT_MS;
 
 function withImageToolTimeout<T>(run: ChatRun, task: Promise<T>): Promise<T> {
@@ -166,86 +204,210 @@ function withImageToolTimeout<T>(run: ChatRun, task: Promise<T>): Promise<T> {
   });
 }
 
-function emit(run: ChatRun, event: RunEvent): void {
-  run.events.push(event);
-  if (run.events.length > MAX_BUFFERED_EVENTS) run.events.splice(0, run.events.length - MAX_BUFFERED_EVENTS);
-  const data = `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`;
-  for (const client of [...run.clients]) {
-    try {
-      client.write(data);
-    } catch {
-      run.clients.delete(client);
+function currentRunMessage(run: ChatRun): Record<string, unknown> | undefined {
+  return run.request.thread.messages.find((message) => message.id === run.assistantMessageId);
+}
+
+function materializeEvent(run: ChatRun, event: RunEvent): void {
+  const message = currentRunMessage(run);
+  if (!message) return;
+  const calls = (message.toolCalls || []) as Array<Record<string, unknown>>;
+  switch (event.type) {
+    case 'message_delta': message.content = `${String(message.content || '')}${event.text}`; break;
+    case 'thinking': message.reasoning = `${String(message.reasoning || '')}${event.text}`; break;
+    case 'clarification_requested':
+      message.status = 'awaiting_input';
+      message.clarifications = [...((message.clarifications || []) as Array<Record<string, unknown>>).filter((item) => item.callId !== event.callId), { callId: event.callId, questions: event.questions, status: 'awaiting_input' }];
+      break;
+    case 'clarification_answered':
+      for (const item of run.request.thread.messages) {
+        const questions = item.clarifications as Array<Record<string, unknown>> | undefined;
+        if (questions) item.clarifications = questions.map((question) => question.callId === event.callId ? { ...question, status: 'answered', answers: event.answers } : question);
+      }
+      message.status = 'running';
+      break;
+    case 'tool_started':
+      if (!calls.some((call) => call.id === event.callId)) message.toolCalls = [...calls, { id: event.callId, name: event.name, args: event.args, status: 'running', steps: [], model: event.model, profileName: event.profileName, startedAt: event.startedAt }];
+      break;
+    case 'tool_progress':
+      message.toolCalls = calls.map((call) => call.id === event.callId ? { ...call, steps: [...((call.steps || []) as string[]), event.step] } : call);
+      break;
+    case 'image_completed': {
+      const append = (items: GeneratedMedia[]) => items.some((item) => item.versionId === event.media.versionId) ? items : [...items, event.media];
+      message.media = append((message.media || []) as GeneratedMedia[]);
+      message.toolCalls = calls.map((call) => call.id === event.callId ? { ...call, media: append((call.media || []) as GeneratedMedia[]), model: event.media.model, size: event.media.size } : call);
+      break;
     }
+    case 'tool_finished':
+      message.toolCalls = calls.map((call) => call.id === event.callId ? { ...call, status: event.status, error: event.error, finishedAt: event.finishedAt, durationMs: event.durationMs } : call);
+      break;
+    case 'context_updated': message.context = event.context; break;
+    case 'memory_updated': run.request.thread.memory = event.memory; break;
+    case 'error': message.status = 'error'; message.error = event.message; break;
+    case 'message_done': message.status = event.status; break;
   }
 }
 
+function emit(run: ChatRun, event: RunEvent): void {
+  if (run.status === 'stopped' && event.type !== 'message_done') return;
+  materializeEvent(run, event);
+  const sequenced: RunEvent = { ...event, runId: run.id, messageId: event.messageId || run.assistantMessageId, seq: ++run.eventSeq };
+  run.events.push(sequenced);
+  if (run.events.length > MAX_BUFFERED_EVENTS) run.events.splice(0, run.events.length - MAX_BUFFERED_EVENTS);
+  const data = `event: ${sequenced.type}\nid: ${sequenced.seq}\ndata: ${JSON.stringify(sequenced)}\n\n`;
+  for (const client of [...run.clients]) {
+    try { client.write(data); } catch { run.clients.delete(client); }
+  }
+}
+
+export function getChatRunSnapshot(runId: string): RunSnapshot | null {
+  const run = runs.get(runId);
+  return run ? {
+    type: 'snapshot', runId: run.id, messageId: run.assistantMessageId, seq: run.eventSeq,
+    status: run.status, thread: structuredClone(run.request.thread), generation: run.generation,
+    ...(run.pendingConfirmation ? { pendingConfirmation: { ...run.pendingConfirmation.value } } : {}),
+  } : null;
+}
+
+function broadcastRunSnapshot(run: ChatRun): void {
+  run.eventSeq += 1;
+  const snapshot = getChatRunSnapshot(run.id)!;
+  for (const client of [...run.clients]) {
+    try { client.write(`event: snapshot\nid: ${snapshot.seq}\ndata: ${JSON.stringify(snapshot)}\n\n`); }
+    catch { run.clients.delete(client); }
+  }
+}
+
+function closeRunClients(run: ChatRun): void {
+  for (const client of run.clients) client.end();
+  run.clients.clear();
+  const timer = setTimeout(() => runs.delete(run.id), 30 * 60_000);
+  timer.unref();
+}
+
 export function startChatRun(request: StartRunRequest): string {
+  if (request.requestId) {
+    const existing = [...runs.values()].find((run) => run.request.requestId === request.requestId && run.threadId === request.threadId);
+    if (existing) return existing.id;
+  }
+  const active = [...runs.values()].find((run) => run.threadId === request.threadId && (run.status === 'running' || run.status === 'stopping'));
+  if (active) throw new Error('该对话已有在途任务，请先停止或等待完成');
   const runId = `run_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+  const requestCopy = structuredClone(request);
+  const initialAssistant = requestCopy.thread.messages.find((message) => message.id === requestCopy.assistantMessageId);
+  const originalUser = [...requestCopy.thread.messages].reverse().find((message) => message.role === 'user');
+  if (initialAssistant) Object.assign(initialAssistant, {
+    runId, agentRole: requestCopy.agentRole, modelSelection: requestCopy.modelSelection,
+    retrySource: { content: String(originalUser?.content || ''), attachments: originalUser?.attachments, agentRole: requestCopy.agentRole, modelSelection: requestCopy.modelSelection, answers: requestCopy.answers },
+  });
   const run: ChatRun = {
-    id: runId,
-    threadId: request.threadId,
-    canvasId: request.canvasId,
-    assistantMessageId: request.assistantMessageId,
-    status: 'running',
-    events: [],
-    clients: new Set(),
-    abort: new AbortController(),
-    createdAt: new Date().toISOString(),
-    request,
+    id: runId, threadId: requestCopy.threadId, canvasId: requestCopy.canvasId,
+    assistantMessageId: requestCopy.assistantMessageId, status: 'running', events: [], eventSeq: 0,
+    clients: new Set(), abort: new AbortController(), createdAt: new Date().toISOString(), request: requestCopy,
+    generation: Number(requestCopy.generation ?? requestCopy.thread.generation ?? 0),
+    ownedMessageIds: new Set([requestCopy.assistantMessageId]), memoryRevision: Number(requestCopy.thread.memory?.memoryRevision || 0),
+    readiness: Promise.resolve(),
   };
   runs.set(runId, run);
-  void executeRun(run, request).catch((err: unknown) => {
+  run.readiness = (async () => {
+    const stored = await writeClientThread(requestCopy.thread, requestCopy.threadRevision ?? requestCopy.thread.revision);
+    if (!stored) throw new Error('对话已删除，请新建对话');
+    const currentIdentity = requestCopy.thread.messages.find((message) => message.id === run.assistantMessageId);
+    requestCopy.thread = {
+      ...stored,
+      messages: stored.messages.map((message) => message.id === run.assistantMessageId ? { ...message, ...currentIdentity } : message),
+    } as unknown as ThreadSnapshot;
+    run.generation = Number(stored.generation || 0);
+    run.memoryRevision = Number(stored.memory?.memoryRevision || 0);
+  })();
+  void run.readiness.then(() => executeRun(run, requestCopy)).catch(async (err: unknown) => {
     if (run.status !== 'running') return;
-    run.status = 'error';
     const message = err instanceof Error ? err.message : 'Agent 运行失败';
     emit(run, { type: 'error', message });
-    finalizeMessage(request, [], [], '', 'error', undefined, message);
-    emit(run, { type: 'message_done', messageId: request.assistantMessageId, status: 'done' });
-    void persistThread(request.thread);
+    await finishRun(run, 'error').catch(() => undefined);
   });
   return runId;
 }
 
-/** SSE 订阅：先把缓冲事件补发给晚到的连接（刷新重连靠这个），再转实时推送。 */
+export async function waitChatRunReady(runId: string): Promise<void> {
+  const run = runs.get(runId);
+  if (run) await run.readiness;
+}
+
 export function subscribeChatRun(runId: string, res: ServerResponse): boolean {
   const run = runs.get(runId);
   if (!run) return false;
-  res.writeHead(200, {
-    'Content-Type': 'text/event-stream',
-    'Cache-Control': 'no-cache, no-transform',
-    Connection: 'keep-alive',
-  });
+  res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache, no-transform', Connection: 'keep-alive' });
   res.write('retry: 3000\n\n');
-  for (const event of run.events) {
-    res.write(`event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`);
-  }
-  if (run.status !== 'running') {
-    res.write('event: run_closed\ndata: {}\n\n');
-    res.end();
-    return true;
-  }
+  const snapshot = getChatRunSnapshot(runId)!;
+  res.write(`event: snapshot\nid: ${snapshot.seq}\ndata: ${JSON.stringify(snapshot)}\n\n`);
+  if (run.status !== 'running' && run.status !== 'stopping') { res.end(); return true; }
   const heartbeat = setInterval(() => res.write(': ping\n\n'), 25_000);
   run.clients.add(res);
-  res.on('close', () => {
-    clearInterval(heartbeat);
-    run.clients.delete(res);
-  });
+  res.on('close', () => { clearInterval(heartbeat); run.clients.delete(res); });
   return true;
 }
 
-export function stopChatRun(runId: string): boolean {
+async function finishRun(run: ChatRun, status: 'done' | 'stopped' | 'error'): Promise<void> {
+  if (run.finish) return run.finish;
+  run.status = 'stopping';
+  run.finish = (async () => {
+    const message = currentRunMessage(run);
+    if (message) {
+      message.status = status;
+      message.toolCalls = ((message.toolCalls || []) as Array<Record<string, unknown>>).map((call) => call.status === 'running' ? { ...call, status: status === 'done' ? 'done' : status, finishedAt: new Date().toISOString() } : call);
+      message.clarifications = ((message.clarifications || []) as Array<Record<string, unknown>>).map((question) => question.status === 'awaiting_input' ? { ...question, status: 'cancelled' } : question);
+    }
+    await run.readiness;
+    const stored = await writeRunThread(run.request.thread, { generation: run.generation, messageIds: [...run.ownedMessageIds], memoryRevision: run.memoryRevision });
+    if (stored) {
+      run.request.thread = stored as unknown as ThreadSnapshot;
+      run.memoryRevision = Number(stored.memory?.memoryRevision || run.memoryRevision);
+    }
+    run.status = status;
+    emit(run, { type: 'message_done', status, message: currentRunMessage(run), thread: run.request.thread });
+    closeRunClients(run);
+  })().catch((error: unknown) => {
+    run.status = 'error';
+    emit(run, { type: 'error', message: `对话保存失败：${error instanceof Error ? error.message : String(error)}` });
+    closeRunClients(run);
+    throw error;
+  });
+  return run.finish;
+}
+
+export async function stopChatRun(runId: string): Promise<boolean> {
   const run = runs.get(runId);
-  if (!run || run.status !== 'running') return false;
-  run.status = 'stopped';
+  if (!run || (run.status !== 'running' && run.status !== 'stopping')) return false;
+  run.status = 'stopping';
   run.abort.abort();
-  run.pendingQuestion?.resolve(null);
-  run.pendingQuestion = undefined;
-  emit(run, { type: 'message_done', messageId: run.assistantMessageId, status: 'stopped' });
+  run.pendingQuestion?.resolve(null); run.pendingQuestion = undefined;
+  if (run.pendingConfirmation) {
+    clearTimeout(run.pendingConfirmation.timer);
+    run.pendingConfirmation.resolve(false); run.pendingConfirmation = undefined;
+  }
+  await finishRun(run, 'stopped');
+  return true;
+}
+
+export async function stopThreadRuns(threadId: string): Promise<void> {
+  await Promise.all([...runs.values()].filter((run) => run.threadId === threadId && (run.status === 'running' || run.status === 'stopping')).map((run) => stopChatRun(run.id)));
+}
+
+export function confirmChatRun(runId: string, callId: string, approved: boolean): boolean {
+  const run = runs.get(runId);
+  const confirmation = run?.pendingConfirmation;
+  if (!run || run.status !== 'running' || !confirmation || confirmation.value.callId !== callId) return false;
+  clearTimeout(confirmation.timer);
+  run.pendingConfirmation = undefined;
+  const allowed = approved && Date.parse(confirmation.value.expiresAt) > Date.now();
+  emit(run, { type: 'confirmation_resolved', callId, approved: allowed });
+  confirmation.resolve(allowed);
   return true;
 }
 
 /** 唤起追问弹窗的答案由当前 run 消费；同一个问题不能重复提交。 */
-export function answerChatRun(
+export async function answerChatRun(
   runId: string,
   callId: string,
   input: {
@@ -254,7 +416,7 @@ export function answerChatRun(
     userMessage?: Record<string, unknown>;
     assistantMessage?: Record<string, unknown>;
   },
-): boolean {
+): Promise<boolean> {
   const run = runs.get(runId);
   const pending = run?.pendingQuestion;
   if (!run || run.status !== 'running' || !pending || pending.callId !== callId) return false;
@@ -271,25 +433,50 @@ export function answerChatRun(
       .map((value) => String(value || '').trim())
       .filter(Boolean);
     const permitted = new Set(question.options.map((option) => option.value));
-    const filtered = values.filter((value) => (
+    const filtered = question.type === 'text' ? values.slice(0, 1).map((value) => value.slice(0, 4000)) : values.filter((value) => (
       value.startsWith('其他：') ? Boolean(value.slice('其他：'.length).trim()) : permitted.has(value)
     ));
     const selected = question.multiple ? [...new Set(filtered)] : filtered.slice(0, 1);
-    if (selected.length === 0) return false;
+    if (selected.length === 0 && !question.optional) return false;
     answers[question.id] = selected;
   }
   const userMessage = continuationMessage(input.userMessage, 'user');
   const assistantMessage = continuationMessage(input.assistantMessage, 'assistant');
+  run.pendingQuestion = undefined;
   if (userMessage && assistantMessage) {
-    const previousAssistant = run.request.thread.messages.find((message) => String(message.id || '') === run.assistantMessageId);
+    const previousAssistant = currentRunMessage(run);
     if (previousAssistant) previousAssistant.status = 'done';
+    const retrySource = previousAssistant?.retrySource as Record<string, unknown> | undefined;
+    Object.assign(userMessage, {
+      agentRole: run.request.agentRole, modelSelection: run.request.modelSelection,
+      attachments: retrySource?.attachments,
+    });
+    Object.assign(assistantMessage, {
+      runId: run.id, agentRole: run.request.agentRole, modelSelection: run.request.modelSelection,
+      retrySource: { ...retrySource, answers: { ...((retrySource?.answers || {}) as object), ...answers } },
+    });
+    const latest = await readChatThread(run.threadId);
+    if (!latest || Number(latest.generation || 0) !== run.generation || run.status !== 'running') { pending.resolve(null); return false; }
+    try {
+      const stored = await writeClientThread({ ...latest, messages: [userMessage, assistantMessage] }, latest.revision);
+      if (!stored || run.status !== 'running') { pending.resolve(null); return false; }
+      run.request.thread.revision = stored.revision;
+    } catch (error) {
+      pending.resolve(null);
+      await stopChatRun(run.id);
+      throw error;
+    }
     const existingIds = new Set(run.request.thread.messages.map((message) => String(message.id || '')));
     if (!existingIds.has(userMessage.id)) run.request.thread.messages.push(userMessage);
     if (!existingIds.has(assistantMessage.id)) run.request.thread.messages.push(assistantMessage);
+    run.ownedMessageIds.add(userMessage.id);
+    run.ownedMessageIds.add(assistantMessage.id);
     run.assistantMessageId = assistantMessage.id;
     run.request.assistantMessageId = assistantMessage.id;
   }
   run.pendingQuestion = undefined;
+  emit(run, { type: 'clarification_answered', callId, answers });
+  broadcastRunSnapshot(run);
   pending.resolve(answers);
   return true;
 }
@@ -356,16 +543,116 @@ interface CanvasNodeLike {
   data?: Record<string, unknown>;
 }
 
-/** 在全画布范围内按版本 id 找版本（续接与 baseVersionId 都靠它）。 */
-function findVersionOnCanvas(nodes: CanvasNodeLike[], versionId: string): Record<string, unknown> | undefined {
+/** 在全画布范围内按版本 id 找版本（续接与 baseVersionId 都靠它）；同时返回所属节点，便于连线与定位。 */
+function findVersionOnCanvas(nodes: CanvasNodeLike[], versionId: string): { node: CanvasNodeLike; version: Record<string, unknown> } | undefined {
   const target = String(versionId || '');
   if (!target) return undefined;
   for (const node of nodes) {
     const versions = Array.isArray(node.data?.versions) ? node.data!.versions as Array<Record<string, unknown>> : [];
     const found = versions.find((item) => String(item.id || '') === target);
-    if (found) return found;
+    if (found) return { node, version: found };
   }
   return undefined;
+}
+
+interface CanvasBox { x: number; y: number; width: number; height: number }
+
+const CHAT_RESULT_GAP_X = 120;
+const CHAT_RESULT_GAP_Y = 48;
+const CHAT_RESULT_FALLBACK_GAP = 420;
+
+/** 与前端 aspect.ts 同口径：优先位图宽高，其次 size，比例 = 宽 / 高。 */
+function canvasNodeAspect(data: Record<string, unknown> | undefined): number {
+  const width = Number(data?.width || 0);
+  const height = Number(data?.height || 0);
+  if (width > 0 && height > 0) return width / height;
+  const size = /^(\d+(?:\.\d+)?)\s*[x×]\s*(\d+(?:\.\d+)?)$/i.exec(String(data?.size || ''));
+  if (size) {
+    const w = Number(size[1]);
+    const h = Number(size[2]);
+    if (w > 0 && h > 0) return w / h;
+  }
+  return 1;
+}
+
+/** 与前端 nodeWidthForAspect 同档：横幅放宽、竖幅收窄。 */
+function cardWidthForAspect(aspect: number): number {
+  if (aspect >= 1.55) return 400;
+  if (aspect <= 0.7) return 280;
+  return 320;
+}
+
+/** 估算画布节点盒子；只用于聊天结果的摆放，不写回节点。 */
+export function estimateCanvasBox(node: { position?: { x?: number; y?: number }; data?: Record<string, unknown> }): CanvasBox {
+  const data = node.data || {};
+  const x = Number(node.position?.x || 0);
+  const y = Number(node.position?.y || 0);
+  if (data.kind === 'text') {
+    return {
+      x,
+      y,
+      width: Math.min(600, Math.max(280, Number(data.cardWidth) || 320)),
+      height: Math.min(620, Math.max(240, Number(data.nodeHeight) || 240)),
+    };
+  }
+  const aspect = canvasNodeAspect(data);
+  const width = cardWidthForAspect(aspect);
+  return { x, y, width, height: Math.max(160, Math.round(width / aspect)) };
+}
+
+function boxesOverlap(a: CanvasBox, b: CanvasBox, padding: number): boolean {
+  return a.x < b.x + b.width + padding
+    && a.x + a.width + padding > b.x
+    && a.y < b.y + b.height + padding
+    && a.y + a.height + padding > b.y;
+}
+
+/** 结果连线来源：显式引用优先；继续编辑上一版时补上上一版结果节点。 */
+export function chatResultConnectFrom(explicit: string[], usage: 'style' | 'edit', baseNodeId: string): string[] {
+  const list = [...new Set(explicit.map((id) => String(id || '').trim()).filter(Boolean))];
+  if (list.length === 0 && usage === 'edit' && baseNodeId) list.push(baseNodeId);
+  return list;
+}
+
+/**
+ * 新结果放在参考图（或上一版结果）右侧，按列向下排，避开已有节点；
+ * 没有参考锚点时才沿用“最右节点右侧错开”的旧行为。
+ */
+export function layoutChatResultPositions(options: {
+  anchor?: CanvasBox | null;
+  count: number;
+  size?: string;
+  existing?: CanvasBox[];
+}): Array<{ x: number; y: number }> {
+  const count = Math.max(0, Math.floor(options.count));
+  if (count === 0) return [];
+  const aspect = canvasNodeAspect({ size: options.size });
+  const width = cardWidthForAspect(aspect);
+  const height = Math.max(160, Math.round(width / aspect));
+  const existing = (options.existing || []).filter((box) => Number.isFinite(box.x) && Number.isFinite(box.y));
+  const anchor = options.anchor;
+  if (anchor) {
+    const positions: Array<{ x: number; y: number }> = [];
+    let y = anchor.y;
+    for (let index = 0; index < count; index += 1) {
+      let candidate: CanvasBox = { x: anchor.x + anchor.width + CHAT_RESULT_GAP_X, y, width, height };
+      // 与已有节点重叠时整列下移；迭代上限防止异常数据死循环。
+      for (let attempt = 0; attempt < 40; attempt += 1) {
+        const blocker = existing
+          .filter((box) => boxesOverlap(candidate, box, 24))
+          .sort((a, b) => a.y - b.y)[0];
+        if (!blocker) break;
+        candidate = { ...candidate, y: blocker.y + blocker.height + CHAT_RESULT_GAP_Y };
+      }
+      positions.push({ x: candidate.x, y: candidate.y });
+      y = candidate.y + height + CHAT_RESULT_GAP_Y;
+    }
+    return positions;
+  }
+  const rightmost = existing.reduce<CanvasBox | null>((best, box) => (!best || box.x > best.x ? box : best), null);
+  const startX = rightmost ? rightmost.x + CHAT_RESULT_FALLBACK_GAP : 80;
+  const startY = rightmost ? rightmost.y : 80;
+  return Array.from({ length: count }, (_, index) => ({ x: startX + index * 40, y: startY + index * 40 }));
 }
 
 /** 解析引用图 → dataURL 数组（顺序 = 用户消息里「图 N」的顺序）。 */
@@ -418,6 +705,7 @@ function sizeForRatio(ratio: string | undefined): string | undefined {
 
 interface ExecuteImageArgs {
   prompt: string;
+  originalPrompt?: string;
   referenceImages?: number[];
   referenceUsage?: 'style' | 'edit';
   ratio?: string;
@@ -440,6 +728,7 @@ async function executeGenerateImage(
     imageModel?: string;
   },
 ): Promise<{ media: GeneratedMedia[]; context: ChatRunContext }> {
+  if (run.status !== 'running' || run.abort.signal.aborted) throw new Error('生成已停止');
   const settings = await readSettings();
   const profile = runContext.imageProfile?.kind === 'image'
     ? runContext.imageProfile
@@ -453,6 +742,11 @@ async function executeGenerateImage(
     .map((index) => Number(index))
     .filter((index) => Number.isInteger(index) && index >= 1 && index <= runContext.references.length)
     .map((index) => runContext.references[index - 1]);
+  // 用户显式引用的同画布节点，生成后每张结果都从它拉一条边；跨画布引用无法连线。
+  const explicitConnectFrom = [...new Set(picked
+    .filter((ref) => !ref.canvasId || ref.canvasId === runContext.canvasId)
+    .map((ref) => String(ref.nodeId || '').trim())
+    .filter(Boolean))];
   const explicitUsage = args.referenceUsage === 'edit' || args.referenceUsage === 'style';
   let usage: 'style' | 'edit' = explicitUsage ? (args.referenceUsage as 'style' | 'edit') : detectReferenceUsage(prompt);
   const resolved = await resolveReferenceDataUrls(picked, runContext.canvasId);
@@ -466,11 +760,19 @@ async function executeGenerateImage(
   const chainId = explicitBaseId || (picked.length === 0 && usage === 'edit' ? String(runContext.previousVersionId || '').trim() : '');
   const baseCanvasId = String(runContext.previousCanvasId || runContext.canvasId).trim() || runContext.canvasId;
   let baseVersion: Record<string, unknown> | undefined;
+  // 上一版结果所在节点：未显式引用时作为连线与摆放的参考锚点。
+  let baseNodeId = '';
   if (chainId) {
     const doc = await readCanvasDoc(baseCanvasId).catch(() => null);
     const nodes = (Array.isArray(doc?.nodes) ? doc!.nodes : []) as CanvasNodeLike[];
-    baseVersion = findVersionOnCanvas(nodes, chainId);
+    const found = findVersionOnCanvas(nodes, chainId);
+    baseVersion = found?.version;
+    if (found && baseCanvasId === runContext.canvasId) baseNodeId = String(found.node.id || '');
   }
+  // 显式引用优先；没有显式引用、且本轮是继续编辑上一版时，把上一版结果节点也连上。
+  const connectFrom = chatResultConnectFrom(explicitConnectFrom, usage, baseNodeId);
+  // 摆放锚点：显式引用的第一张图 > 上一版结果节点。
+  const anchorNodeId = explicitConnectFrom[0] || (usage === 'edit' ? baseNodeId : '');
   // 保留显式引用与编辑基准的来源，后续分别合并，避免把基准图重复传给提示词优化器。
   const explicitReferenceUrls = [...resolved.urls];
   let baseDataUrl = '';
@@ -487,25 +789,15 @@ async function executeGenerateImage(
     }
   }
 
-  const count = Math.min(4, Math.max(1, Number(args.count) || 1));
+  const count = Math.min(4, Math.max(1, Math.floor(Number(args.count) || 1)));
   const size = sizeForRatio(args.ratio);
   const apiMode = settings.direct === false && profile.imageApiMode === 'responses' ? 'responses' : 'images';
-  const enhancementReferences = Array.from(new Set([
-    ...explicitReferenceUrls,
-    ...(usage === 'edit' && baseDataUrl ? [baseDataUrl] : []),
-  ]));
-  emit(run, { type: 'tool_progress', callId, step: '正在优化提示词' });
-  const compilation = await compileChatPrompt(runContext.textProfile, {
-    prompt,
-    size: size || profile.defaultSize,
-    referenceDataUrls: enhancementReferences,
-    usage,
-    level: settings.enhanceLevel,
-    preferences: settings.preferences.enabled ? settings.preferences.entries : [],
-    signal: run.abort.signal,
-  });
-  const { prompt: usedPrompt, enhancedPrompt, warning: enhancementWarning } = compilation;
-  if (enhancementWarning) emit(run, { type: 'tool_progress', callId, step: enhancementWarning });
+  const originalPrompt = String(args.originalPrompt || '').trim() || String((currentRunMessage(run)?.retrySource as Record<string, unknown> | undefined)?.content || prompt);
+  const usedPrompt = prompt;
+  const enhancedPrompt = prompt;
+  const enhancementWarning: string | undefined = undefined;
+  emit(run, { type: 'tool_progress', callId, step: 'Agent 已按统一规则整理提示词' });
+  if (run.status !== 'running' || run.abort.signal.aborted) throw new Error('生成已停止');
   emit(run, { type: 'tool_progress', callId, step: '正在调用生图工具' });
 
   // responseId 续接与 redit 同口径：只续同一路配置、同一 Responses 主模型的版本
@@ -532,6 +824,7 @@ async function executeGenerateImage(
     signal: run.abort.signal,
   });
 
+  if (run.status !== 'running' || run.abort.signal.aborted) throw new Error('生成已停止');
   const runContextState: ChatRunContext = {
     baseVersionId: baseVersion?.id ? String(baseVersion.id) : undefined,
     responseId: String(images[0]?.responseId || previousResponseId || '') || undefined,
@@ -547,15 +840,16 @@ async function executeGenerateImage(
   // 节点 id 由 runId + callId + 序号确定性生成：重复事件不会建出重复节点。
   const doc = await readCanvasDoc(runContext.canvasId).catch(() => null);
   const nodes = (Array.isArray(doc?.nodes) ? doc!.nodes : []) as CanvasNodeLike[];
-  const rightmost = nodes.reduce<CanvasNodeLike | null>((best, node) => {
-    const x = Number(node.position?.x ?? 0);
-    const bestX = best ? Number(best.position?.x ?? 0) : -Infinity;
-    return x > bestX ? node : best;
-  }, null);
-  const anchorX = rightmost ? Number(rightmost.position?.x ?? 0) + 420 : 80;
-  const anchorY = rightmost ? Number(rightmost.position?.y ?? 0) : 80;
   const now = new Date().toISOString();
   const resolvedSize = size || String(profile.defaultSize || '');
+  const anchorNode = anchorNodeId ? nodes.find((node) => String(node.id || '') === anchorNodeId) : undefined;
+  // 最新结果放在参考图（或上一版结果）右侧，按列向下排并避开已有节点。
+  const positions = layoutChatResultPositions({
+    anchor: anchorNode ? estimateCanvasBox(anchorNode) : null,
+    count: images.length,
+    size: resolvedSize,
+    existing: nodes.map((node) => estimateCanvasBox(node)),
+  });
   const media: GeneratedMedia[] = [];
   const nodeRecords: CanvasNodeRecord[] = [];
 
@@ -565,7 +859,7 @@ async function executeGenerateImage(
     nodeRecords.push({
       id: nodeId,
       type: 'flow-image',
-      position: { x: anchorX + index * 40, y: anchorY + index * 40 },
+      position: positions[index] || { x: 80 + index * 40, y: 80 + index * 40 },
       data: {
         kind: 'image',
         label: 'AI 对话',
@@ -575,12 +869,12 @@ async function executeGenerateImage(
         imageUrl: image.url,
         fileName: image.fileName,
         size: resolvedSize,
-        model: profile.model,
+        model: runContext.imageModel || profile.model,
         source: 'chat',
         createdAt: now,
         finishedAt: now,
         enhancedPrompt,
-        originalPrompt: prompt,
+        originalPrompt,
         enhancementWarning: enhancementWarning || undefined,
         revisedPrompt: String(image.revisedPrompt || ''),
         responseId: image.responseId,
@@ -592,12 +886,12 @@ async function executeGenerateImage(
           imageUrl: image.url,
           fileName: image.fileName,
           prompt,
-          model: profile.model,
+          model: runContext.imageModel || profile.model,
           size: resolvedSize,
           createdAt: now,
           finishedAt: now,
           enhancedPrompt,
-          originalPrompt: prompt,
+          originalPrompt,
           enhancementWarning: enhancementWarning || undefined,
           revisedPrompt: String(image.revisedPrompt || ''),
           baseVersionId: usage === 'edit' && baseVersion?.id ? String(baseVersion.id) : undefined,
@@ -615,19 +909,23 @@ async function executeGenerateImage(
       nodeId,
       versionId,
       canvasId: runContext.canvasId,
-      originalPrompt: prompt,
+      originalPrompt,
       enhancedPrompt,
       prompt: usedPrompt,
       referenceUsage: usage,
       enhancementWarning: enhancementWarning || undefined,
-      model: profile.model,
+      model: runContext.imageModel || profile.model,
       size: resolvedSize,
     });
   });
 
-  await appendCanvasImageNodes(runContext.canvasId, nodeRecords);
+  if (run.status !== 'running' || run.abort.signal.aborted) throw new Error('生成已停止');
+  const existingThread = await readChatThread(run.threadId);
+  if (!existingThread || Number(existingThread.generation || 0) !== run.generation || run.status !== 'running') throw new Error('对话已清空或删除');
+  if (!await appendCanvasImageNodes(runContext.canvasId, nodeRecords, { connectFrom })) throw new Error('结果画布已删除，未写入生成节点');
+  if (run.status !== 'running' || run.abort.signal.aborted) return { media: [], context: runContextState };
   for (const item of media) {
-    pushImage({
+    await pushImage({
       type: 'image',
       canvasId: runContext.canvasId,
       nodeId: item.nodeId,
@@ -649,8 +947,8 @@ async function executeGenerateImage(
 
 /* ── 历史构建 ── */
 
-/** 当前迭代只回喂最近一张生成结果，避免把一串高清图反复带进上下文。 */
-const RECENT_MEDIA_FEED = 1;
+/** 当前迭代回喂最近一次生图的候选图（最多 4 张），让模型能比较同批结果。 */
+const MAX_RECENT_MEDIA = 4;
 
 /**
  * 把前端消息快照翻成模型上下文：
@@ -662,22 +960,25 @@ export function buildAgentHistory(
   messages: Array<Record<string, unknown>>,
   options: { inheritMode?: 'auto' | 'edit' | 'new'; baseImageUrl?: string } = {},
 ): AgentMessage[] {
-  const allMedia: Array<Record<string, unknown>> = [];
+  const mediaGroups: Array<Array<Record<string, unknown>>> = [];
   for (const message of messages) {
-    if (Array.isArray(message.media)) allMedia.push(...(message.media as Array<Record<string, unknown>>));
+    if (Array.isArray(message.media) && message.media.length > 0) {
+      mediaGroups.push(message.media as Array<Record<string, unknown>>);
+    }
     if (Array.isArray(message.toolCalls)) {
       for (const call of message.toolCalls as Array<Record<string, unknown>>) {
-        if (Array.isArray(call.media)) allMedia.push(...(call.media as Array<Record<string, unknown>>));
+        const callMedia = Array.isArray(call.media) ? call.media as Array<Record<string, unknown>> : [];
+        if (callMedia.length > 0) mediaGroups.push(callMedia);
       }
     }
   }
   const seenMedia = new Set<string>();
-  const recentUrls = allMedia.filter((item) => {
+  const recentUrls = (mediaGroups.at(-1) || []).filter((item) => {
     const key = String(item.versionId || item.nodeId || item.url || '');
     if (!key || seenMedia.has(key)) return false;
     seenMedia.add(key);
     return true;
-  }).slice(-RECENT_MEDIA_FEED).map((item) => String(item.url || '')).filter(Boolean);
+  }).slice(-MAX_RECENT_MEDIA).map((item) => String(item.url || '')).filter(Boolean);
 
   const history: AgentMessage[] = [];
   let lastUserIndex = -1;
@@ -693,9 +994,15 @@ export function buildAgentHistory(
         .map((attachment) => String(attachment.url || ''))
         .filter((url) => url.startsWith('data:') || url.startsWith('/api/files/'));
       // 用户显式引用时只看所选图片；无引用时默认带入当前任务最近结果。
+      let candidateNote = '';
       if (index === lastUserIndex && images.length === 0 && options.inheritMode !== 'new') {
-        const candidate = options.baseImageUrl ? [options.baseImageUrl] : recentUrls;
+        const candidate = [...recentUrls, ...(options.baseImageUrl && !recentUrls.includes(options.baseImageUrl) ? [options.baseImageUrl] : [])];
         images = [...images, ...candidate.filter((url) => url.startsWith('data:') || url.startsWith('/api/files/'))];
+        const latestMedia = mediaGroups.at(-1) || [];
+        candidateNote = images.map((url, visualIndex) => {
+          const media = latestMedia.find((item) => item.url === url);
+          return `视觉附件 ${visualIndex + 1}：候选 ${visualIndex + 1}，节点 ${String(media?.nodeId || '')}，版本 ${String(media?.versionId || '')}`;
+        }).join('\n');
       }
       const askResponse = message.askResponse as Record<string, unknown> | undefined;
       const askAnswers = askResponse && Array.isArray(askResponse.questions)
@@ -708,7 +1015,7 @@ export function buildAgentHistory(
       const content = askAnswers
         ? `${String(message.content || '')}\n用户对结构化询问的回答：\n${askAnswers}`.trim()
         : String(message.content || '');
-      history.push({ role: 'user', content, images: images.length > 0 ? images : undefined });
+      history.push({ role: 'user', content: candidateNote ? `${content}\n${candidateNote}` : content, images: images.length > 0 ? images : undefined });
       return;
     }
     const toolCalls = Array.isArray(message.toolCalls) ? message.toolCalls as Array<Record<string, unknown>> : [];
@@ -773,22 +1080,24 @@ export function buildAgentSystemSpec(): string {
     '4. ask_user 收到用户答案后，结合原始消息、图片和已确认答案继续本轮；不要重复问已回答的问题。用户未明确要求立即生成时，可先总结方案并征求是否开始生成；用户确认或明确要求生成后再调用 generate_image。',
     '5. 用户明确说「生成」「做一版」「按这个方向出图」或方案已聊透且用户认可时，调用 generate_image 工具。单轮最多调用 2 次生图工具。',
     '6. 用户消息里的「图 N」按引用图片的编号顺序对应；有显式引用时优先使用这些图片。没有显式引用且用户在当前任务上继续调整时，默认继承最近生成结果并用 referenceUsage=edit；用户明确提出新的生图需求时切断旧结果继承并用 style；只借鉴图片风格时也用 style。',
-    '7. generate_image.prompt 只写从完整对话中提炼出的用户意图、明确修改项和需要保留的内容；不要重复扩写成冗长的终稿提示词，bridge 会调用统一提示词优化器整理一次。',
-    '8. 生成后主动点评结果（好在哪、可调什么），并请用户提意见；不要说「我无法查看图片」——生成结果已在对话中展示。',
+    '7. 你直接按统一视觉规则把完整对话提炼为 generate_image.prompt 的最终生图提示词，保留精确文字、硬约束、必须保留和明确排除。originalPrompt 保存原始需求；不再另调用优化模型。',
+    '8. 生成后只基于本次真实视觉附件点评结果。附件读取失败或模型不支持视觉时要明确说明，不得仅看文件名和提示词假装看到了像素。',
     '9. 对话记忆只用于延续当前任务；用户开启新对话时没有任何旧消息、旧摘要或旧图片上下文。',
     '',
-    '回复要求：中文，简洁，可用基础 Markdown（段落 / 列表）。提示词要写成正面画面描述，不写「不要出现什么」。',
+    '回复要求：中文，简洁，可用基础 Markdown（段落 / 列表）。提示词优先用正面描述，用户明确的否定约束不能删除或反转。',
+    '篇幅要求：默认先给结论，正文控制在 300–400 字、最多 3 个要点，不主动罗列用户没问的扩展项；确实需要展开（完整评审、方案对比）时先问一句「要我展开吗」，或按用户要求展开。当前角色若明确要求详细输出，以角色要求为准。',
   ].join('\n');
 }
 
 /* ── 运行主循环 ── */
 
-async function persistThread(thread: ThreadSnapshot): Promise<void> {
-  try {
-    await putChatThread(thread);
-  } catch {
-    /* 持久化失败不中断事件流：前端本地副本仍在 */
-  }
+async function persistRunState(run: ChatRun): Promise<void> {
+  const stored = await writeRunThread(run.request.thread, {
+    generation: run.generation, messageIds: [...run.ownedMessageIds], memoryRevision: run.memoryRevision,
+  });
+  if (!stored) throw new Error('对话已清空或删除');
+  run.request.thread.revision = stored.revision;
+  run.memoryRevision = Number(stored.memory?.memoryRevision || run.memoryRevision);
 }
 
 /** 把运行结果写进快照里的占位 assistant 消息（前端本地副本经 SSE 已同样更新）。 */
@@ -833,37 +1142,69 @@ async function executeRun(run: ChatRun, request: StartRunRequest): Promise<void>
     && imageProfile.enabledModels.includes(request.modelSelection.imageModel)
     ? request.modelSelection.imageModel
     : imageProfile?.model;
-  if (!textProfile) {
-    run.status = 'error';
-    emit(run, { type: 'error', message: '尚未配置语言模型：请在「生图设置」里添加一路语言模型' });
-    emit(run, { type: 'message_done', messageId: request.assistantMessageId, status: 'done' });
-    return;
-  }
+  if (!textProfile) throw new Error('尚未配置语言模型：请在模型设置中添加语言模型');
+  // 对话模型按线程选具体模型；配置的默认模型只作兜底。
+  const agentTextProfile: ModelProfile = {
+    ...textProfile,
+    model: resolveTextModel(textProfile, request.modelSelection?.textModel),
+  };
 
-  const memory = buildMemoryContext(request.thread.messages as unknown as MemoryMessage[], request.thread.memory || {});
+  const runtime = normalizeChatRuntimeSettings(settings.chatRuntime || { maxModelRounds: 4, maxToolCalls: 2, maxImagesPerRun: 4, confirmImagesAbove: 1, maxOutputTokens: 4096 });
+  let memory = buildMemoryContext(request.thread.messages as unknown as MemoryMessage[], request.thread.memory || {}, settings.chatMemory);
+  let compactionStatus: 'idle' | 'complete' | 'failed' = 'idle';
+  let compactionWarning = '';
+  if (memory.enabled && memory.shouldCompact) {
+    try {
+      const output = await callTextModel(agentTextProfile, {
+        systemSpec: '你负责压缩创作对话记忆。只输出JSON {"summary":string,"goal":{"statement":string,"confirmed":string[],"preserve":string[],"change":string[],"rejected":string[],"openQuestions":string[]}}。保留用户精确文字、否定约束、已经做出决定的原因和未解决问题，最新明确要求优先，禁止把“不要改背景”当作删除背景。不要执行任何工具，不要回答创作需求。',
+        userText: JSON.stringify({ previousSummary: memory.summary, goal: memory.goal, messages: memory.compactableMessages }),
+        imageUrls: [], maxTokens: 1500, temperature: 0.2,
+        signal: AbortSignal.any([run.abort.signal, AbortSignal.timeout(20_000)]),
+      });
+      if (run.status !== 'running') return;
+      const parsed = JSON.parse(output.replace(/^```(?:json)?\s*|\s*```$/g, '')) as { summary: string; goal?: Record<string, unknown> };
+      if (typeof parsed.summary !== 'string' || !parsed.summary.trim()) throw new Error('记忆摘要未返回有效内容');
+      memory = applyMemoryCompaction(memory, { summary: parsed.summary, goal: parsed.goal }, new Date().toISOString());
+      compactionStatus = 'complete';
+    } catch (error) {
+      if (run.status !== 'running' || run.abort.signal.aborted) return;
+      compactionStatus = 'failed';
+      compactionWarning = `记忆压缩失败，仍保留未压缩原文：${error instanceof Error ? error.message : String(error)}`;
+    }
+  }
+  if (memory.requiresPause) throw new Error(memory.warning || '上下文超过安全预算，请缩减输入或新建对话');
   const messages: AgentMessage[] = buildAgentHistory(
-    memory.shortTermMessages as unknown as Array<Record<string, unknown>>,
+    memory.contextMessages as unknown as Array<Record<string, unknown>>,
     { inheritMode: memory.visualWorkingSet.inheritMode, baseImageUrl: memory.visualWorkingSet.base?.url },
   );
+  if (request.answers && Object.keys(request.answers).length) messages.push({ role: 'user', content: `已确认的补充信息：${JSON.stringify(request.answers)}` });
   await hydrateAgentHistoryImages(messages);
-  const currentUserMessage = [...messages].reverse().find((message) => message.role === 'user');
-  const visualContextImages = currentUserMessage?.images || [];
-  const memoryUpdatedAt = new Date().toISOString();
-  request.thread.memory = {
-    ...(request.thread.memory || {}),
-    version: 1,
-    summary: memory.shouldCompact ? memory.summaryDraft : memory.summary,
-    summaryMessageCount: memory.summaryMessageCount,
-    summaryUpdatedAt: memory.shouldCompact ? memoryUpdatedAt : request.thread.memory?.summaryUpdatedAt,
-    goal: memory.goal,
-    visualWorkingSet: memory.visualWorkingSet,
-    lastCompactionAt: memory.shouldCompact ? memoryUpdatedAt : request.thread.memory?.lastCompactionAt,
-  };
-  emit(run, { type: 'memory_updated', memory: request.thread.memory });
+  const currentUserMessage = [...messages].reverse().find((message) => message.role === 'user' && message.images?.length);
+  const userVisualContextImages = currentUserMessage?.images || [];
+  let visualContext = userVisualContextImages.map((url, index) => {
+    const output = memory.visualWorkingSet.recentOutputs.find((item) => item.url === (memory.visualWorkingSet.references[index]?.url));
+    return { id: output?.versionId || `reference-${index + 1}`, label: `视觉图 ${index + 1}${output?.versionId ? `，版本 ${output.versionId}` : ''}`, url };
+  });
+  const generatedVisuals: Array<{ id: string; label: string; url: string }> = [];
+  if (memory.enabled) {
+    request.thread.memory = {
+      ...(request.thread.memory || {}), version: 1,
+      summary: memory.summary,
+      summaryMessageCount: compactionStatus === 'complete' ? memory.summaryMessageCount : request.thread.memory?.summaryMessageCount,
+      summaryThroughMessageId: compactionStatus === 'complete' ? memory.summaryThroughMessageId : request.thread.memory?.summaryThroughMessageId,
+      summaryUpdatedAt: memory.lastCompactionAt || request.thread.memory?.summaryUpdatedAt,
+      goal: memory.goal, visualWorkingSet: memory.visualWorkingSet,
+      lastCompactionAt: memory.lastCompactionAt || request.thread.memory?.lastCompactionAt,
+      memoryRevision: run.memoryRevision,
+      ...({ windowMessageCount: memory.contextMessages.length, windowEstimatedTokens: memory.estimatedContextTokens, compactionStatus, warning: compactionWarning || memory.warning } as object),
+    };
+    emit(run, { type: 'memory_updated', memory: request.thread.memory });
+  }
   const toolCallRecords: Array<Record<string, unknown>> = [];
   const media: GeneratedMedia[] = [];
   let finalText = '';
   let toolCallCount = 0;
+  let imageCount = 0;
   let clarificationCount = 0;
   const clarifications: Array<{ callId: string; questions: AskUserQuestion[]; answers?: Record<string, string[]>; status: 'awaiting_input' | 'answered' | 'cancelled' }> = [];
   let chainVersionId = memory.visualWorkingSet.inheritMode === 'new' ? '' : String(request.previousVersionId || '');
@@ -872,16 +1213,21 @@ async function executeRun(run: ChatRun, request: StartRunRequest): Promise<void>
   let failureMessage = '';
 
   try {
-    for (let round = 0; round < MAX_MODEL_ROUNDS; round += 1) {
-      if (run.status !== 'running') break;
-      const turn = await callAgentModel(textProfile as ModelProfile, {
-        systemSpec: `${buildAgentSystemSpec()}\n\n${memoryPromptBlock(memory)}${rolePrompt}`,
+    for (let round = 0; round < runtime.maxModelRounds; round += 1) {
+      if (run.status !== 'running') return;
+      const finalRound = round === runtime.maxModelRounds - 1;
+      const turn = await callAgentModel(agentTextProfile, {
+        systemSpec: `${buildAgentSystemSpec()}\n\n${buildVisualPromptRules(imageProfile?.defaultSize || '', settings.enhanceLevel)}\n\n${memoryPromptBlock(memory)}${rolePrompt}${finalRound ? '\n这是最后一个回合。不要调用工具，简洁总结结果与未完成事项。' : ''}`,
         messages,
-        visualContextImages,
-        tools: [generateImageToolDef(), askUserToolDef()],
-        onTextDelta: (chunk) => emit(run, { type: 'message_delta', text: chunk }),
+        visualContext,
+        maxTokens: runtime.maxOutputTokens,
+        tools: finalRound ? [] : [generateImageToolDef(), askUserToolDef()],
+        temperature: request.agentRole?.temperature,
+        onTextDelta: (chunk) => { if (run.status === 'running') emit(run, { type: 'message_delta', text: chunk }); },
+        onReasoningDelta: (chunk) => { if (run.status === 'running') emit(run, { type: 'thinking', text: chunk }); },
         signal: run.abort.signal,
       });
+      if (run.status !== 'running') return;
       if (turn.text) {
         finalText += (finalText ? '\n' : '') + turn.text;
         messages.push({ role: 'assistant', content: turn.text });
@@ -917,17 +1263,14 @@ async function executeRun(run: ChatRun, request: StartRunRequest): Promise<void>
             run.pendingQuestion = { callId: call.id, questions, resolve };
           });
           emit(run, { type: 'clarification_requested', callId: call.id, questions });
-          await persistThread(request.thread);
+          await persistRunState(run);
           const answers = await answersPromise;
           run.pendingQuestion = undefined;
+          if (run.status !== 'running') return;
           if (!answers) {
             clarification.status = 'cancelled';
-            if (assistantMessage) assistantMessage.clarifications = clarifications;
-            run.status = 'stopped';
-            run.abort.abort();
-            messages.push({ role: 'assistant', content: '', toolCalls: [call] });
-            messages.push({ role: 'tool', toolCallId: call.id, content: '用户取消了本次需求澄清。不要生成图片。' });
-            break;
+            await stopChatRun(run.id);
+            return;
           }
           clarification.status = 'answered';
           clarification.answers = answers;
@@ -935,7 +1278,9 @@ async function executeRun(run: ChatRun, request: StartRunRequest): Promise<void>
             assistantMessage.status = 'running';
             assistantMessage.clarifications = clarifications;
           }
-          emit(run, { type: 'clarification_answered', callId: call.id, answers });
+          finalText = '';
+          toolCallRecords.length = 0;
+          media.length = 0;
           messages.push({ role: 'assistant', content: '', toolCalls: [call] });
           messages.push({ role: 'tool', toolCallId: call.id, content: JSON.stringify({ answers }, null, 2) });
           break;
@@ -945,11 +1290,37 @@ async function executeRun(run: ChatRun, request: StartRunRequest): Promise<void>
           messages.push({ role: 'tool', toolCallId: call.id, content: `错误：未知工具 ${call.name}` });
           continue;
         }
-        if (toolCallCount >= MAX_TOOL_CALLS_PER_RUN) {
-          emit(run, { type: 'tool_finished', callId: call.id, status: 'error', error: '单轮生图次数已达上限（2 次），请开新一轮' });
-          messages.push({ role: 'tool', toolCallId: call.id, content: '错误：单轮生图次数已达上限（2 次）' });
+        if (toolCallCount >= runtime.maxToolCalls) {
+          messages.push({ role: 'assistant', content: '', toolCalls: [call] });
+          messages.push({ role: 'tool', toolCallId: call.id, content: '单轮生图次数已达预算上限，请总结当前结果。' });
           continue;
         }
+        const requestedCount = Math.min(4, Math.max(1, Math.floor(Number(call.args.count) || 1)));
+        if (imageCount + requestedCount > runtime.maxImagesPerRun) {
+          messages.push({ role: 'assistant', content: '', toolCalls: [call] });
+          messages.push({ role: 'tool', toolCallId: call.id, content: `本轮最多允许 ${runtime.maxImagesPerRun} 张图，剩余 ${runtime.maxImagesPerRun - imageCount} 张；本次未生成。` });
+          continue;
+        }
+        if (imageCount + requestedCount > runtime.confirmImagesAbove) {
+          const approved = await new Promise<boolean>((resolve) => {
+            const value: ImageConfirmation = {
+              callId: call.id, prompt: String(call.args.prompt || '').slice(0, 300), model: imageModel || '',
+              size: sizeForRatio(String(call.args.ratio || '')) || imageProfile?.defaultSize || '',
+              count: requestedCount, totalCount: imageCount + requestedCount, cost: 'unknown',
+              expiresAt: new Date(Date.now() + 10 * 60_000).toISOString(),
+            };
+            const timer = setTimeout(() => {
+              if (run.pendingConfirmation?.value.callId !== call.id) return;
+              run.pendingConfirmation = undefined; resolve(false);
+            }, 10 * 60_000);
+            timer.unref();
+            run.pendingConfirmation = { value, resolve, timer };
+            emit(run, { type: 'confirmation_requested', confirmation: value });
+          });
+          if (run.status !== 'running') return;
+          if (!approved) { await stopChatRun(run.id); return; }
+        }
+        call.args.count = requestedCount;
         toolCallCount += 1;
         const record: Record<string, unknown> = {
           id: call.id,
@@ -978,11 +1349,13 @@ async function executeRun(run: ChatRun, request: StartRunRequest): Promise<void>
             references: request.references,
             previousVersionId: chainVersionId,
             previousCanvasId: request.previousCanvasId,
-            textProfile: textProfile as ModelProfile,
+            textProfile: agentTextProfile,
             imageProfile: imageProfile as ModelProfile | undefined,
             imageModel,
           }));
+          if (run.status !== 'running') return;
           const generated = generatedResult.media;
+          imageCount += generated.length;
           record.status = 'done';
           record.media = generated as unknown as Record<string, unknown>[];
           record.finishedAt = new Date().toISOString();
@@ -992,14 +1365,40 @@ async function executeRun(run: ChatRun, request: StartRunRequest): Promise<void>
             record.steps = [...(Array.isArray(record.steps) ? record.steps : []), generated[0].enhancementWarning];
           }
           media.push(...generated);
+          // 同一轮继续点评 / 再改时，把刚生成的候选图带回视觉上下文，模型才能真正看到结果。
+          const generatedUrls = await Promise.all(generated.map(async (item) => {
+            const url = String(item.url || '');
+            if (url.startsWith('data:')) return url;
+            if (url.startsWith('/api/files/')) {
+              return mediaFileToDataUrl(url.slice('/api/files/'.length)).catch(() => '');
+            }
+            return '';
+          }));
+          for (const [index, url] of generatedUrls.entries()) {
+            const item = generated[index];
+            if (url) generatedVisuals.push({ id: item.versionId, label: `批次 ${call.id} 候选 ${index + 1}，节点 ${item.nodeId}，版本 ${item.versionId}`, url });
+          }
+          const selectedVisuals = generatedVisuals.slice(-MAX_RECENT_MEDIA);
+          visualContext = [
+            ...userVisualContextImages.map((url, index) => ({ id: `user-reference-${index + 1}`, label: `用户引用图 ${index + 1}`, url })),
+            ...selectedVisuals,
+          ];
           messageContext = generatedResult.context;
           if (generated[0]) chainVersionId = generated[0].versionId;
           emit(run, { type: 'tool_finished', callId: call.id, status: 'done', durationMs: record.durationMs as number, finishedAt: record.finishedAt as string });
           messages.push({ role: 'assistant', content: '', toolCalls: [call] });
-          messages.push({ role: 'tool', toolCallId: call.id, content: `已生成 ${generated.length} 张图，落在画布节点上，已在对话中展示。` });
+          const candidateLines = generated.map((item, index) => (
+            `候选 ${index + 1}：${item.fileName || item.url}（节点 ${item.nodeId}，版本 ${item.versionId}，模型 ${item.model}，尺寸 ${item.size}）`
+          ));
+          messages.push({
+            role: 'tool',
+            toolCallId: call.id,
+            content: `已生成 ${generated.length} 张候选图，批次 ${call.id}。只有提供的视觉附件实际可见时才能点评；缺失图片不得猜测。\n${candidateLines.join('\n')}\n最终提示词：${String(call.args.prompt || '')}`,
+          });
         } catch (err) {
+          if (run.status !== 'running') return;
           const message = err instanceof Error ? err.message : '生图失败';
-          const stopped = run.status !== 'running' || run.abort.signal.aborted && message === 'This operation was aborted';
+          const stopped = run.abort.signal.aborted && message === 'This operation was aborted';
           record.status = stopped ? 'stopped' : 'error';
           record.error = stopped ? '已停止' : message;
           record.finishedAt = new Date().toISOString();
@@ -1012,33 +1411,21 @@ async function executeRun(run: ChatRun, request: StartRunRequest): Promise<void>
       if (failureMessage) break;
     }
 
-    if (run.status !== 'running') {
-      // 被停止：终态写 stopped，不再回写结果（终态不被晚到事件覆盖）
-      finalizeMessage(request, toolCallRecords, media, finalText, 'stopped', messageContext, undefined, clarifications);
-      emit(run, { type: 'message_done', messageId: request.assistantMessageId, status: 'stopped' });
-      await persistThread(request.thread);
-      return;
-    }
+    if (run.status !== 'running') return;
     if (failureMessage) {
-      // 生图失败：消息落 error 终态，错误留在对话里可回看，不伪装成完成
       finalizeMessage(request, toolCallRecords, media, finalText, 'error', messageContext, failureMessage, clarifications);
-      run.status = 'error';
-      emit(run, { type: 'message_done', messageId: request.assistantMessageId, status: 'done' });
-      await persistThread(request.thread);
+      emit(run, { type: 'error', message: failureMessage });
+      await finishRun(run, 'error');
       return;
     }
     finalizeMessage(request, toolCallRecords, media, finalText, 'done', messageContext, undefined, clarifications);
-    run.status = 'done';
-    emit(run, { type: 'message_done', messageId: request.assistantMessageId, status: 'done' });
-    await persistThread(request.thread);
+    await finishRun(run, 'done');
   } catch (err) {
     if (run.status !== 'running') return;
-    run.status = 'error';
     const message = err instanceof Error ? err.message : 'Agent 运行失败';
-    emit(run, { type: 'error', message });
     finalizeMessage(request, toolCallRecords, media, finalText, 'error', messageContext, message, clarifications);
-    emit(run, { type: 'message_done', messageId: request.assistantMessageId, status: 'done' });
-    await persistThread(request.thread);
+    emit(run, { type: 'error', message });
+    await finishRun(run, 'error');
   }
 }
 
@@ -1053,7 +1440,10 @@ export async function reconcileLostRuns(): Promise<void> {
       return { ...message, status: 'unknown' as const };
     });
     if (touched) {
-      await putChatThread({ ...thread, messages, updatedAt: new Date().toISOString() }).catch(() => null);
+      await writeRunThread({ ...thread, messages, updatedAt: new Date().toISOString() }, {
+        generation: Number(thread.generation || 0),
+        messageIds: messages.filter((message) => message.status === 'unknown').map((message) => String(message.id || '')),
+      });
     }
   }
 }

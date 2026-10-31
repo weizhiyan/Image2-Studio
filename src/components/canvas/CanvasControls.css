@@ -138,6 +138,23 @@
   box-shadow: var(--shadow-sm);
   backdrop-filter: var(--surface-popover-glass-blur);
   -webkit-backdrop-filter: var(--surface-popover-glass-blur);
+  transition:
+    opacity var(--motion-slow) var(--ease-in-out),
+    transform var(--motion-slow) var(--ease-in-out),
+    visibility 0s linear;
+}
+
+/* 历史面板从左缘展开时，工具轨先让位：整条轨淡出并向内收。
+   visibility 延迟到动画结束再隐藏，反向关闭时立刻恢复可见。 */
+.canvas-rail.is-dismissed {
+  opacity: 0;
+  transform: translateY(-50%) translateX(calc(0px - var(--spacing-3))) scale(0.96);
+  visibility: hidden;
+  pointer-events: none;
+  transition:
+    opacity var(--motion-slow) var(--ease-in-out),
+    transform var(--motion-slow) var(--ease-in-out),
+    visibility 0s linear var(--motion-slow);
 }
 
 .canvas-rail-btn {

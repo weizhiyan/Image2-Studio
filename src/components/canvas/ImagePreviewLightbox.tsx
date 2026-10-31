@@ -1,12 +1,35 @@
 import { createPortal } from 'react-dom';
-import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent, type WheelEvent as ReactWheelEvent } from 'react';
-import { postPreferenceAction, revealLocalFile } from '@/lib/bridge';
-import { useSettingsStore } from '@/stores/settingsStore';
+import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from 'react';
+import { createAsset, getAssets, moveAssetToFolder, revealLocalFile, type AssetLibrary } from '@/lib/bridge';
+import { AssetGlyphIcon } from './NodeChrome';
 import './ImagePreviewLightbox.css';
 
 const MIN_PREVIEW_ZOOM = 0.5;
 const MAX_PREVIEW_ZOOM = 4;
 const PREVIEW_ZOOM_STEP = 0.25;
+const PREVIEW_PROMPT_HEIGHTS_KEY = 'huiban-preview-prompt-heights';
+const DEFAULT_PROMPT_HEIGHT = 160;
+const MIN_PROMPT_HEIGHT = 96;
+const MAX_PROMPT_HEIGHT = 480;
+
+function clampPromptHeight(value: number): number {
+  if (!Number.isFinite(value)) return DEFAULT_PROMPT_HEIGHT;
+  return Math.min(MAX_PROMPT_HEIGHT, Math.max(MIN_PROMPT_HEIGHT, Math.round(value)));
+}
+
+function readPromptHeights(): Record<string, number> {
+  try {
+    const raw = localStorage.getItem(PREVIEW_PROMPT_HEIGHTS_KEY);
+    const parsed = raw ? JSON.parse(raw) as Record<string, unknown> : {};
+    const result: Record<string, number> = {};
+    for (const [key, value] of Object.entries(parsed || {})) {
+      if (typeof value === 'number') result[key] = clampPromptHeight(value);
+    }
+    return result;
+  } catch {
+    return {};
+  }
+}
 
 export interface ImagePreviewDetails {
   /** 用户提示词。 */
@@ -28,6 +51,8 @@ export interface ImagePreviewDetails {
   /** 生成完成的时间。 */
   createdAt?: string;
   fileName?: string;
+  /** 资产去重键：同一张图从历史、资产库或节点预览再次收藏时定位到同一条资产。 */
+  assetSourceKey?: string;
 }
 
 export interface ImagePreviewItem {
@@ -53,54 +78,104 @@ export default function ImagePreviewLightbox({
   const [zoom, setZoom] = useState(1);
   const [pan, setPan] = useState({ x: 0, y: 0 });
   const [copiedKey, setCopiedKey] = useState('');
-  /** 「喜欢」：把这条提示词收进偏好档案；再点一次取消（线框 → 实心红心） */
-  const [liked, setLiked] = useState(false);
-  const dragRef = useRef<{ pointerId: number; startX: number; startY: number; originX: number; originY: number; dragged: boolean } | null>(null);
+  const [smoothZoom, setSmoothZoom] = useState(false);
+  const [promptHeights, setPromptHeights] = useState<Record<string, number>>(readPromptHeights);
+  const promptHeightsRef = useRef(promptHeights);
+  promptHeightsRef.current = promptHeights;
+  const [assetLibrary, setAssetLibrary] = useState<AssetLibrary>({ folders: [], items: [] });
+  const [assetPickerOpen, setAssetPickerOpen] = useState(false);
+  const [assetPickerPosition, setAssetPickerPosition] = useState<CSSProperties | null>(null);
+  const [assetPickerLoading, setAssetPickerLoading] = useState(false);
+  const [assetSavingFolderId, setAssetSavingFolderId] = useState('');
+  const [assetSavedFolderId, setAssetSavedFolderId] = useState('');
+  const [assetError, setAssetError] = useState('');
+  const dragRef = useRef<{ pointerId: number; startX: number; startY: number; originX: number; originY: number; dragged: boolean; lastX: number; lastY: number } | null>(null);
   const copyTimerRef = useRef(0);
+  const smoothTimerRef = useRef(0);
+  const stageRef = useRef<HTMLDivElement>(null);
+  const assetButtonRef = useRef<HTMLButtonElement>(null);
+  const assetPickerRef = useRef<HTMLDivElement>(null);
+  const previewCloseBlockedUntilRef = useRef(0);
+  const panFrameRef = useRef(0);
+  const resizeRef = useRef<{ key: string; pointerId: number; startY: number; startHeight: number } | null>(null);
   const [natural, setNatural] = useState({ width: 0, height: 0 });
   const [imgMissing, setImgMissing] = useState(false);
-  const likedIdRef = useRef('');
-
-  /** 喜欢 / 取消喜欢：手动条目写进偏好档案，取消时按 id 精确移除。 */
-  const toggleLike = async () => {
-    const text = String(details?.prompt || item?.title || '').trim();
-    if (!text) return;
-    try {
-      if (liked) {
-        if (likedIdRef.current) await postPreferenceAction('remove', { id: likedIdRef.current });
-        likedIdRef.current = '';
-        setLiked(false);
-        void useSettingsStore.getState().load();
-        return;
-      }
-      const profile = await postPreferenceAction('add', {
-        prompt: text,
-        model: String(details?.model || ''),
-        size: String(details?.size || ''),
-      });
-      // 重复喜欢同一条时 bridge 会去重，这里按文本把已存在的那条 id 找回来，取消时才删得掉
-      const entry = profile.entries.find((item) => item.text === text.slice(0, 120) && item.source === 'manual');
-      likedIdRef.current = entry?.id || '';
-      setLiked(true);
-      void useSettingsStore.getState().load();
-    } catch {
-      /* 失败不打断看图：心保持原样，用户可再点一次 */
-    }
-  };
 
   useEffect(() => {
     setZoom(1);
     setPan({ x: 0, y: 0 });
+    setSmoothZoom(false);
     setCopiedKey('');
     setNatural({ width: 0, height: 0 });
     setImgMissing(false);
-    // 换图重置喜欢态：档案里已有同文本的手动条目时，心直接是实的
-    const text = String(item?.details?.prompt || item?.title || '').trim();
-    const existing = useSettingsStore.getState().settings?.preferences.entries
-      .find((entry) => entry.text === text.slice(0, 120) && entry.source === 'manual');
-    likedIdRef.current = existing?.id || '';
-    setLiked(Boolean(existing));
+    setAssetPickerOpen(false);
+    setAssetPickerPosition(null);
+    setAssetSavingFolderId('');
+    setAssetSavedFolderId('');
+    setAssetError('');
   }, [item]);
+
+  useLayoutEffect(() => {
+    if (!assetPickerOpen || !assetButtonRef.current) return undefined;
+    const updatePosition = () => {
+      if (!assetButtonRef.current) return;
+      setAssetPickerPosition(assetPickerStyle(assetButtonRef.current));
+    };
+    updatePosition();
+    window.addEventListener('resize', updatePosition);
+    window.addEventListener('scroll', updatePosition, true);
+    return () => {
+      window.removeEventListener('resize', updatePosition);
+      window.removeEventListener('scroll', updatePosition, true);
+    };
+  }, [assetPickerOpen]);
+
+  useEffect(() => {
+    if (!assetPickerOpen) return undefined;
+    const closeOnOutsidePointer = (event: PointerEvent) => {
+      const target = event.target as Node | null;
+      if (!target) return;
+      if (assetButtonRef.current?.contains(target) || assetPickerRef.current?.contains(target)) return;
+      previewCloseBlockedUntilRef.current = Date.now() + 320;
+      setAssetPickerOpen(false);
+    };
+    document.addEventListener('pointerdown', closeOnOutsidePointer, true);
+    return () => document.removeEventListener('pointerdown', closeOnOutsidePointer, true);
+  }, [assetPickerOpen]);
+
+  // 滚轮缩放走原生非 passive 监听 + rAF 合并：React 合成事件是 passive 的，
+  // 且每个 wheel 都 setState 会让长文本面板跟着重渲染，表现就是卡帧。
+  useEffect(() => {
+    const stage = stageRef.current;
+    if (!stage || item?.mediaType === 'video') return undefined;
+    let frame = 0;
+    let total = 0;
+    const onWheel = (event: WheelEvent) => {
+      event.preventDefault();
+      total += event.deltaY;
+      if (frame) return;
+      frame = window.requestAnimationFrame(() => {
+        frame = 0;
+        const delta = total;
+        total = 0;
+        if (!delta) return;
+        const notches = Math.min(3, Math.max(1, Math.round(Math.abs(delta) / 80)));
+        setSmoothZoom(false);
+        setZoom((current) => clampZoom(current + (delta > 0 ? -0.1 : 0.1) * notches));
+      });
+    };
+    stage.addEventListener('wheel', onWheel, { passive: false });
+    return () => {
+      stage.removeEventListener('wheel', onWheel);
+      if (frame) window.cancelAnimationFrame(frame);
+    };
+  }, [item]);
+
+  useEffect(() => () => {
+    window.clearTimeout(copyTimerRef.current);
+    window.clearTimeout(smoothTimerRef.current);
+    window.cancelAnimationFrame(panFrameRef.current);
+  }, []);
 
   /* 左右切图：闭包走 ref，避免每次渲染都重绑键盘事件 */
   const stepRef = useRef<(delta: number) => void>(() => {});
@@ -135,6 +210,11 @@ export default function ImagePreviewLightbox({
       }
       if (event.key === 'Escape') {
         event.preventDefault();
+        if (assetPickerOpen) {
+          setAssetPickerOpen(false);
+          assetButtonRef.current?.focus();
+          return;
+        }
         onClose();
         return;
       }
@@ -156,9 +236,7 @@ export default function ImagePreviewLightbox({
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [item, onClose]);
-
-  useEffect(() => () => window.clearTimeout(copyTimerRef.current), []);
+  }, [assetPickerOpen, item, onClose]);
 
   if (!item) return null;
 
@@ -181,8 +259,58 @@ export default function ImagePreviewLightbox({
     : '-';
   const generatedAt = formatPreviewTime(details.createdAt);
   const elapsed = formatElapsed(details.startedAt, details.createdAt);
+  const assetFileName = String(details.fileName || '').trim();
+  const savedAssetFolderName = assetLibrary.folders.find((folder) => folder.id === assetSavedFolderId)?.name || '';
+
+  const toggleAssetPicker = async () => {
+    if (assetPickerOpen) {
+      setAssetPickerOpen(false);
+      return;
+    }
+    setAssetPickerOpen(true);
+    setAssetError('');
+    setAssetPickerLoading(true);
+    try {
+      setAssetLibrary(await getAssets());
+    } catch (reason) {
+      setAssetError(reason instanceof Error ? reason.message : '读取资产文件夹失败');
+    } finally {
+      setAssetPickerLoading(false);
+    }
+  };
+
+  const saveImageToAsset = async (folderId: string) => {
+    if (isVideo || !assetFileName) return;
+    setAssetSavingFolderId(folderId);
+    setAssetError('');
+    try {
+      const asset = await createAsset({
+        folderId,
+        fileName: assetFileName,
+        prompt: String(details.prompt || item.title || ''),
+        model: String(details.model || ''),
+        size: String(details.size || ''),
+        sourceKey: String(details.assetSourceKey || assetFileName),
+      });
+      // bridge 按 sourceKey 去重时只返回原资产，不会自动换文件夹。
+      if (asset.folderId !== folderId) await moveAssetToFolder(asset.id, folderId);
+      setAssetSavedFolderId(folderId);
+      setAssetPickerOpen(false);
+    } catch (reason) {
+      setAssetError(reason instanceof Error ? reason.message : '添加到资产库失败');
+    } finally {
+      setAssetSavingFolderId('');
+    }
+  };
+
+  const markSmoothZoom = () => {
+    setSmoothZoom(true);
+    window.clearTimeout(smoothTimerRef.current);
+    smoothTimerRef.current = window.setTimeout(() => setSmoothZoom(false), 220);
+  };
 
   const zoomBy = (delta: number) => {
+    setSmoothZoom(false);
     setZoom((current) => clampZoom(current + delta));
     if (delta < 0) setPan({ x: 0, y: 0 });
   };
@@ -217,13 +345,9 @@ export default function ImagePreviewLightbox({
 
   const handleStageClick = () => {
     if (dragRef.current?.dragged) return;
+    markSmoothZoom();
     setZoom((current) => (current < 1 ? 1 : current === 1 ? 1.6 : 1));
     setPan({ x: 0, y: 0 });
-  };
-
-  const handleStageWheel = (event: ReactWheelEvent<HTMLDivElement>) => {
-    event.preventDefault();
-    setZoom((current) => clampZoom(current + (event.deltaY > 0 ? -PREVIEW_ZOOM_STEP : PREVIEW_ZOOM_STEP)));
   };
 
   const handlePointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
@@ -236,6 +360,8 @@ export default function ImagePreviewLightbox({
       originX: pan.x,
       originY: pan.y,
       dragged: false,
+      lastX: pan.x,
+      lastY: pan.y,
     };
   };
 
@@ -245,15 +371,67 @@ export default function ImagePreviewLightbox({
     const dx = event.clientX - drag.startX;
     const dy = event.clientY - drag.startY;
     drag.dragged = Math.abs(dx) + Math.abs(dy) > 4;
-    setPan({ x: drag.originX + dx, y: drag.originY + dy });
+    drag.lastX = drag.originX + dx;
+    drag.lastY = drag.originY + dy;
+    // 拖拽按帧合并：每个 pointermove 都 setState 会跟着重渲染长文本面板
+    if (panFrameRef.current) return;
+    panFrameRef.current = window.requestAnimationFrame(() => {
+      panFrameRef.current = 0;
+      const current = dragRef.current;
+      if (current) setPan({ x: current.lastX, y: current.lastY });
+    });
   };
 
   const handlePointerUp = (event: ReactPointerEvent<HTMLDivElement>) => {
-    if (dragRef.current?.pointerId === event.pointerId) {
-      window.setTimeout(() => {
-        dragRef.current = null;
-      }, 0);
+    const drag = dragRef.current;
+    if (drag?.pointerId !== event.pointerId) return;
+    window.cancelAnimationFrame(panFrameRef.current);
+    panFrameRef.current = 0;
+    setPan({ x: drag.lastX, y: drag.lastY });
+    window.setTimeout(() => {
+      dragRef.current = null;
+    }, 0);
+  };
+
+  const persistPromptHeights = () => {
+    try {
+      localStorage.setItem(PREVIEW_PROMPT_HEIGHTS_KEY, JSON.stringify(promptHeightsRef.current));
+    } catch {
+      /* 隐私模式写不进去不影响当前拖拽 */
     }
+  };
+
+  const startPromptResize = (event: ReactPointerEvent<HTMLSpanElement>, key: string) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const panel = event.currentTarget.closest('.image-generation-preview-prompt') as HTMLElement | null;
+    const startHeight = panel?.getBoundingClientRect().height || promptHeightsRef.current[key] || DEFAULT_PROMPT_HEIGHT;
+    event.currentTarget.setPointerCapture(event.pointerId);
+    resizeRef.current = { key, pointerId: event.pointerId, startY: event.clientY, startHeight };
+  };
+
+  const movePromptResize = (event: ReactPointerEvent<HTMLSpanElement>) => {
+    const resize = resizeRef.current;
+    if (!resize || resize.pointerId !== event.pointerId) return;
+    event.preventDefault();
+    const next = clampPromptHeight(resize.startHeight + event.clientY - resize.startY);
+    setPromptHeights((current) => ({ ...current, [resize.key]: next }));
+  };
+
+  const endPromptResize = (event: ReactPointerEvent<HTMLSpanElement>) => {
+    if (resizeRef.current?.pointerId !== event.pointerId) return;
+    resizeRef.current = null;
+    persistPromptHeights();
+  };
+
+  const nudgePromptHeight = (key: string, delta: number, reset = false) => {
+    const next = {
+      ...promptHeightsRef.current,
+      [key]: reset ? DEFAULT_PROMPT_HEIGHT : clampPromptHeight((promptHeightsRef.current[key] || DEFAULT_PROMPT_HEIGHT) + delta),
+    };
+    promptHeightsRef.current = next;
+    setPromptHeights(next);
+    persistPromptHeights();
   };
 
   return createPortal(
@@ -262,14 +440,17 @@ export default function ImagePreviewLightbox({
       role="dialog"
       aria-modal="true"
       aria-label={isVideo ? '生成视频预览' : '生成图片预览'}
-      onClick={onClose}
+      onClick={() => {
+        if (Date.now() < previewCloseBlockedUntilRef.current) return;
+        onClose();
+      }}
     >
       <section className="image-generation-preview" onClick={(event) => event.stopPropagation()}>
         <main className="image-generation-preview-main">
           <div
+            ref={stageRef}
             className={`image-generation-preview-stage${isVideo ? ' is-video' : ''}`}
             onClick={isVideo ? undefined : handleStageClick}
-            onWheel={isVideo ? undefined : handleStageWheel}
             onPointerDown={isVideo ? undefined : handlePointerDown}
             onPointerMove={isVideo ? undefined : handlePointerMove}
             onPointerUp={isVideo ? undefined : handlePointerUp}
@@ -302,6 +483,7 @@ export default function ImagePreviewLightbox({
               <img
                 src={item.url}
                 alt={item.title}
+                className={smoothZoom ? 'is-smooth-zoom' : undefined}
                 draggable={false}
                 loading="eager"
                 decoding="async"
@@ -381,6 +563,7 @@ export default function ImagePreviewLightbox({
                 disabled={zoom === 1 && pan.x === 0 && pan.y === 0}
                 onClick={(event) => {
                   event.stopPropagation();
+                  markSmoothZoom();
                   setZoom(1);
                   setPan({ x: 0, y: 0 });
                 }}
@@ -408,6 +591,7 @@ export default function ImagePreviewLightbox({
             <div
               key={panel.key}
               className={`image-generation-preview-panel image-generation-preview-prompt is-${panel.key}`}
+              style={{ height: `${promptHeights[panel.key] || DEFAULT_PROMPT_HEIGHT}px` }}
             >
               <span>{panel.label}</span>
               <button
@@ -421,6 +605,24 @@ export default function ImagePreviewLightbox({
                 <span>{copiedKey === panel.key ? '已复制' : '复制'}</span>
               </button>
               <p>{panel.text}</p>
+              <span
+                className="image-generation-preview-prompt-resize"
+                role="separator"
+                aria-orientation="horizontal"
+                aria-label={`调整${panel.label}高度`}
+                title="拖拽调整高度（↑/↓ 微调，双击复位）"
+                tabIndex={0}
+                onPointerDown={(event) => startPromptResize(event, panel.key)}
+                onPointerMove={movePromptResize}
+                onPointerUp={endPromptResize}
+                onPointerCancel={endPromptResize}
+                onDoubleClick={() => nudgePromptHeight(panel.key, 0, true)}
+                onKeyDown={(event) => {
+                  if (event.key !== 'ArrowUp' && event.key !== 'ArrowDown') return;
+                  event.preventDefault();
+                  nudgePromptHeight(panel.key, event.key === 'ArrowUp' ? -16 : 16);
+                }}
+              />
             </div>
           ))}
           <div className="image-generation-preview-panel image-generation-preview-info">
@@ -434,22 +636,71 @@ export default function ImagePreviewLightbox({
               <div><dt>生成时间</dt><dd>{generatedAt}</dd></div>
               <div><dt>文件</dt><dd title={details.fileName}>{details.fileName || '-'}</dd></div>
             </dl>
-            {/* 喜欢：手动沉淀偏好，线框 → 实心红心，再点一次取消 */}
-            <button
-              type="button"
-              className={`image-generation-preview-like ${liked ? 'is-liked' : ''}`}
-              onClick={() => void toggleLike()}
-              disabled={!String(details.prompt || item.title || '').trim()}
-              aria-pressed={liked}
-              title={liked
-                ? '已喜欢：这条提示词在偏好档案里，优化时会作为长期偏好参考。再点一次取消'
-                : '喜欢：把这条提示词收进偏好档案，之后优化提示词时作为长期偏好参考'}
-            >
-              <svg viewBox="0 0 24 24" aria-hidden="true">
-                <path d="M12 20.2s-7.4-4.5-7.4-9.3a4.1 4.1 0 0 1 7.4-2.4 4.1 4.1 0 0 1 7.4 2.4c0 4.8-7.4 9.3-7.4 9.3Z" strokeLinejoin="round" />
-              </svg>
-              <span>{liked ? '已喜欢' : '喜欢'}</span>
-            </button>
+            {!isVideo ? (
+              <div className="image-generation-preview-asset">
+                <button
+                  ref={assetButtonRef}
+                  type="button"
+                  className={`image-generation-preview-asset-add${savedAssetFolderName ? ' is-saved' : ''}`}
+                  onClick={() => void toggleAssetPicker()}
+                  disabled={!assetFileName || Boolean(assetSavingFolderId)}
+                  aria-expanded={assetPickerOpen}
+                  aria-controls="image-preview-asset-folders"
+                  title={!assetFileName
+                    ? '没有可复制的本地图片文件'
+                    : savedAssetFolderName
+                      ? `已收藏到「${savedAssetFolderName}」，点击切换文件夹`
+                      : '选择文件夹并添加到资产库'}
+                >
+                  <AssetGlyphIcon />
+                  <span>{savedAssetFolderName || '添加到资产库'}</span>
+                  <ChevronDownIcon />
+                </button>
+              </div>
+            ) : null}
+            {assetPickerOpen && assetPickerPosition ? createPortal(
+              <div
+                ref={assetPickerRef}
+                className="image-generation-preview-asset-picker"
+                id="image-preview-asset-folders"
+                style={assetPickerPosition}
+                role="group"
+                aria-label="选择资产文件夹"
+                onClick={(event) => event.stopPropagation()}
+                onPointerDown={(event) => event.stopPropagation()}
+              >
+                <span className="image-generation-preview-asset-picker-title">选择文件夹</span>
+                {assetPickerLoading ? (
+                  <p className="image-generation-preview-asset-picker-note">正在读取文件夹…</p>
+                ) : null}
+                {!assetPickerLoading && assetLibrary.folders.length === 0 ? (
+                  <p className="image-generation-preview-asset-picker-note">还没有资产文件夹</p>
+                ) : null}
+                {!assetPickerLoading ? assetLibrary.folders.map((folder) => {
+                  const count = assetLibrary.items.filter((asset) => asset.folderId === folder.id).length;
+                  const saving = assetSavingFolderId === folder.id;
+                  return (
+                    <button
+                      type="button"
+                      key={folder.id}
+                      className="image-generation-preview-asset-folder"
+                      disabled={Boolean(assetSavingFolderId)}
+                      onClick={() => void saveImageToAsset(folder.id)}
+                    >
+                      <FolderIcon />
+                      <span>{folder.name}</span>
+                      <span className="image-generation-preview-asset-count">
+                        {saving ? '保存中…' : count}
+                      </span>
+                    </button>
+                  );
+                }) : null}
+                {assetError ? (
+                  <p className="image-generation-preview-asset-error" role="alert">{assetError}</p>
+                ) : null}
+              </div>,
+              document.body,
+            ) : null}
           </div>
           <div className="image-generation-preview-actions">
             <button type="button" onClick={downloadMedia}>
@@ -472,6 +723,44 @@ export default function ImagePreviewLightbox({
     </div>,
     document.body,
   );
+}
+
+function FolderIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M3.5 7.5A1.5 1.5 0 0 1 5 6h4.2l1.8 2.2H19a1.5 1.5 0 0 1 1.5 1.5v7.8A1.5 1.5 0 0 1 19 19H5a1.5 1.5 0 0 1-1.5-1.5v-10Z" />
+    </svg>
+  );
+}
+
+function ChevronDownIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="m7 9.5 5 5 5-5" />
+    </svg>
+  );
+}
+
+function assetPickerStyle(anchor: HTMLElement): CSSProperties {
+  const rect = anchor.getBoundingClientRect();
+  const viewportWidth = window.innerWidth;
+  const viewportHeight = window.innerHeight;
+  const margin = 12;
+  const gap = 6;
+  const width = Math.min(Math.max(rect.width, 204), viewportWidth - margin * 2);
+  const left = Math.min(Math.max(margin, rect.left), viewportWidth - margin - width);
+  const spaceBelow = viewportHeight - rect.bottom - margin - gap;
+  const spaceAbove = rect.top - margin - gap;
+  const openAbove = spaceBelow < 210 && spaceAbove > spaceBelow;
+  const maxHeight = Math.max(112, Math.min(240, openAbove ? spaceAbove : spaceBelow));
+  return {
+    left,
+    width,
+    maxHeight,
+    ...(openAbove
+      ? { bottom: viewportHeight - rect.top + gap }
+      : { top: rect.bottom + gap }),
+  };
 }
 
 function clampZoom(value: number): number {

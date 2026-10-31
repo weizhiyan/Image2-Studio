@@ -16,6 +16,6 @@ describe('画布添加菜单', () => {
     );
     const labels = Array.from(html.matchAll(/<strong>(.*?)<\/strong>/g), (match) => match[1]);
 
-    expect(labels).toEqual(['上传图片', '图像生成', '视频生成', 'Markdown 文本']);
+    expect(labels).toEqual(['上传图片', '图像生成', '视频生成', '文本']);
   });
 });

@@ -9,10 +9,14 @@ process.env.HUIBAN_DATA_ROOT = TEST_DATA_ROOT;
 const {
   activeProfile,
   createProfile,
+  imageModelReadiness,
   normalizeSettings,
+  defaultChatRuntimeSettings,
+  normalizeChatRuntimeSettings,
   publicView,
   readSettings,
   resolveDefaultModel,
+  resolveTextModel,
   resolveTextProfile,
   resolveVideoProfile,
   videoProfilesOf,
@@ -31,6 +35,46 @@ function textProfile(id: string, enabled?: boolean) {
 function videoProfile(id: string, enabled?: boolean) {
   return { ...createProfile(id, 'video' as const), id, enabled };
 }
+
+describe('对话记忆与运行预算设置', () => {
+  it('migrates old settings and publishes distinct memory/runtime defaults', () => {
+    for (const raw of [{}, { profiles: [] }, { profiles: [imageProfile('defaults')] }]) {
+      const settings = normalizeSettings(raw);
+      expect(settings.chatMemory).toMatchObject({ enabled: true, shortTermMessageLimit: 12, shortTermTokenBudget: 4500 });
+      expect(publicView(settings).chatRuntime).toEqual(defaultChatRuntimeSettings());
+    }
+    expect(normalizeChatRuntimeSettings({ maxModelRounds: 99, maxToolCalls: 0, maxImagesPerRun: 99, confirmImagesAbove: 99, maxOutputTokens: 1 })).toEqual({ maxModelRounds: 8, maxToolCalls: 1, maxImagesPerRun: 8, confirmImagesAbove: 1, maxOutputTokens: 2048 });
+  });
+
+  it('saves partial globals without replacing profiles, keys, other budgets or preferences', async () => {
+    const profile = { ...imageProfile('partial-global'), apiKey: 'partial-secret' };
+    const first = await writeSettings({ profiles: [profile], activeProfileId: profile.id, chatMemory: { shortTermMessageLimit: 20 }, chatRuntime: { maxModelRounds: 6 } });
+    const saved = await writeSettings({ chatMemory: { enabled: false }, chatRuntime: { maxImagesPerRun: 7 } });
+    expect(saved.profiles).toEqual(first.profiles);
+    expect(saved.chatMemory).toMatchObject({ enabled: false, shortTermMessageLimit: 20 });
+    expect(saved.chatRuntime).toMatchObject({ maxModelRounds: 6, maxImagesPerRun: 7 });
+    expect(publicView(saved).chatMemory.enabled).toBe(false);
+    expect(JSON.stringify(publicView(saved))).not.toContain('partial-secret');
+  });
+
+  it('updates the active profile with a partial global save', async () => {
+    const first = await writeSettings({ profiles: [imageProfile('partial-a'), imageProfile('partial-b')], activeProfileId: 'partial-a' });
+    const secondId = first.profiles[1].id;
+    const saved = await writeSettings({ activeProfileId: secondId });
+    expect(saved.activeProfileId).toBe(secondId);
+    expect(saved.profiles).toHaveLength(2);
+  });
+
+  it('serializes read-merge-write for concurrent independent global patches', async () => {
+    await Promise.all([
+      writeSettings({ chatMemory: { summaryTargetTokens: 1100 } }),
+      writeSettings({ chatRuntime: { maxModelRounds: 7 } }),
+    ]);
+    const saved = await readSettings();
+    expect(saved.chatMemory.summaryTargetTokens).toBe(1100);
+    expect(saved.chatRuntime.maxModelRounds).toBe(7);
+  });
+});
 
 describe('配置启停（enabled）', () => {
   it('老配置没有 enabled 字段时一律按启用处理', () => {
@@ -59,16 +103,33 @@ describe('配置启停（enabled）', () => {
     expect(activeProfile(allOff).id).toBe('imgA');
   });
 
-  it('textProfilesOf 过滤停用，显式指定仍可解析', () => {
+  it('语言配置不再有配置级停用，textProfilesOf 包含全部', () => {
     const settings = normalizeSettings({
       profiles: [textProfile('txtA', false), textProfile('txtB')],
       textProfileId: '',
     });
-    expect(textProfilesOf(settings).map((profile) => profile.id)).toEqual(['txtB']);
-    // resolveTextProfile 显式按 id 指到停用那路时仍返回它（用户/agent 显式指定优先）
+    expect(settings.profiles.filter((profile) => profile.kind === 'text').map((profile) => profile.enabled)).toEqual([true, true]);
+    expect(textProfilesOf(settings).map((profile) => profile.id)).toEqual(['txtA', 'txtB']);
     expect(resolveTextProfile(settings, 'txtA')?.id).toBe('txtA');
-    // 缺省回落只走可用的
-    expect(resolveTextProfile(settings)?.id).toBe('txtB');
+    expect(resolveTextProfile(settings)?.id).toBe('txtA');
+  });
+
+  it('selectedModels 与 enabledModels 分开持久化', () => {
+    const base = textProfile('txt');
+    const settings = normalizeSettings({
+      profiles: [{ ...base, selectedModels: ['m-a', 'm-b'], enabledModels: ['m-a'] }],
+      textProfileId: 'txt',
+    });
+    expect(settings.profiles[0].selectedModels).toEqual(['m-a', 'm-b']);
+    expect(settings.profiles[0].enabledModels).toEqual(['m-a']);
+  });
+
+  it('resolveTextModel 只认 enabledModels 里的具体模型，否则回退配置默认', () => {
+    const profile = { ...textProfile('txt'), model: 'm-default', enabledModels: ['m-a', 'm-b'] };
+    expect(resolveTextModel(profile, 'm-b')).toBe('m-b');
+    expect(resolveTextModel(profile, 'm-x')).toBe('m-default');
+    expect(resolveTextModel(profile)).toBe('m-default');
+    expect(resolveTextModel(null, 'm-a')).toBe('');
   });
 
   it('writeSettings 透传 enabled，publicView 不回 Key 但带启停状态', async () => {
@@ -162,6 +223,48 @@ describe('配置启停（enabled）', () => {
     const saved = await writeSettings({ profiles: [profile], activeProfileId: profile.id, direct: false });
 
     expect(saved.preferences).toEqual(preferences);
+  });
+});
+
+describe('启动模型就绪状态', () => {
+  it('检查当前启用的生图模型配置和已拉取列表，不泄露 Key', () => {
+    const profile = {
+      ...imageProfile('image-ready'),
+      baseUrl: 'https://images.example.test/v1',
+      apiKey: 'private-key',
+      model: 'image-model',
+      models: ['image-model'],
+    };
+    const settings = normalizeSettings({ profiles: [profile], activeProfileId: profile.id });
+    const status = imageModelReadiness(settings);
+
+    expect(status).toEqual({
+      configured: true,
+      modelsLoaded: true,
+      profileName: 'image-ready',
+      modelName: 'image-model',
+    });
+    expect(JSON.stringify(status)).not.toContain('private-key');
+  });
+
+  it('缺少必要配置或模型列表时明确标记为未就绪', () => {
+    const profile = { ...imageProfile('image-empty'), model: '', models: [] };
+    const settings = normalizeSettings({ profiles: [profile], activeProfileId: profile.id });
+
+    expect(imageModelReadiness(settings)).toMatchObject({ configured: false, modelsLoaded: false });
+  });
+
+  it('不会把停用的配置报告为可用模型', () => {
+    const profile = {
+      ...imageProfile('image-disabled', false),
+      baseUrl: 'https://images.example.test/v1',
+      apiKey: 'private-key',
+      model: 'image-model',
+      models: ['image-model'],
+    };
+    const settings = normalizeSettings({ profiles: [profile], activeProfileId: profile.id });
+
+    expect(imageModelReadiness(settings).configured).toBe(false);
   });
 });
 

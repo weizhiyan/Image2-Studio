@@ -14,6 +14,10 @@ const CANVAS_PAGE_SOURCE = readFileSync(
   fileURLToPath(new URL('../src/pages/CanvasPage.tsx', import.meta.url)),
   'utf8',
 );
+const COMPONENT_SOURCE = readFileSync(
+  fileURLToPath(new URL('../src/components/canvas/CanvasTextNode.tsx', import.meta.url)),
+  'utf8',
+);
 
 function renderTextNode(extra: Partial<CanvasNodeData> = {}): string {
   const data = {
@@ -70,6 +74,14 @@ describe('文本节点视觉结构', () => {
     const editing = renderTextNode({ textEditing: true });
     expect(editing).toContain('class="canvas-text-node-input nodrag nowheel nopan"');
     expect(editing).toContain('class="image-node-resize-handle nodrag nowheel"');
+  });
+
+  it('编辑期间只维护本地草稿，防抖提交，避免回写抢走光标', () => {
+    expect(COMPONENT_SOURCE).toContain('编辑期间只认本地草稿');
+    expect(COMPONENT_SOURCE).toContain('if (editing) return;');
+    expect(COMPONENT_SOURCE).toContain('const updateDraft');
+    expect(COMPONENT_SOURCE).toContain('}, 300);');
+    expect(COMPONENT_SOURCE).toContain('onBlur={commitDraft}');
   });
 
   it('始终渲染 Markdown 文档，不显示编辑入口或空态提示', () => {

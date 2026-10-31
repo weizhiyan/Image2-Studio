@@ -1,11 +1,16 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { ChatImageRef, ChatModelSelection, ChatRoleSnapshot, ChatThread } from '@/types';
+import { confirmChatRun, type ChatRunConfirmation } from '@/lib/bridge';
 import { activeThreadOf, allThreads, useChatStore } from '@/stores/chatStore';
 import ChatComposer from './ChatComposer';
 import ChatMessageList from './ChatMessageList';
 import ClarificationModal from './ClarificationModal';
-import { ChevronGlyphIcon, CloseGlyphIcon, NewThreadGlyphIcon, PencilGlyphIcon, TrashGlyphIcon } from './ChatIcons';
-import { getChatPanelResizeFrame } from '@/lib/chatPanelResize';
+import { ChevronGlyphIcon, CollapseRightGlyphIcon, NewThreadGlyphIcon, TrashGlyphIcon } from './ChatIcons';
+import {
+  getChatPanelResizeWidth,
+  getNextChatPanelResizePhase,
+  type ChatPanelResizePhase,
+} from '@/lib/chatPanelResize';
 import './ChatPanel.css';
 
 /** 面板宽度可调范围（方案 §5.2）。 */
@@ -24,7 +29,6 @@ export default function ChatPanel({
   onLocate,
   onPreview,
   onRetry,
-  onApplyVideoScript,
   onAnswerClarification,
   onWidthChange,
 }: {
@@ -35,7 +39,6 @@ export default function ChatPanel({
   onLocate: (ref: { canvasId: string; nodeId: string; versionId?: string; force?: boolean }) => void;
   onPreview: (url: string, title: string) => void;
   onRetry: (messageId: string) => void;
-  onApplyVideoScript: (prompt: string, references?: ChatImageRef[]) => void;
   onAnswerClarification: (runId: string, callId: string, answers: Record<string, string[]> | null) => Promise<boolean>;
   onWidthChange?: (width: number) => void;
 }) {
@@ -54,6 +57,7 @@ export default function ChatPanel({
     : null;
 
   const [historyOpen, setHistoryOpen] = useState(false);
+  const syncError = useChatStore((state) => state.syncError);
   const [renamingId, setRenamingId] = useState('');
   const [renameValue, setRenameValue] = useState('');
   const [leaving, setLeaving] = useState(false);
@@ -61,11 +65,20 @@ export default function ChatPanel({
   const [viewportWidth, setViewportWidth] = useState(() => typeof window === 'undefined' ? 1280 : window.innerWidth);
   const [isResizing, setIsResizing] = useState(false);
   const [hasResized, setHasResized] = useState(false);
+  const [resizePhase, setResizePhase] = useState<ChatPanelResizePhase>('expanded');
   const resizeCleanupRef = useRef<(() => void) | null>(null);
-  const headerRef = useRef<HTMLElement>(null);
+  const resizePhaseRef = useRef<ChatPanelResizePhase>('expanded');
+  const closeAfterCollapseRef = useRef(false);
+  const titleWrapRef = useRef<HTMLDivElement>(null);
   const sideInset = viewportWidth > 640 && viewportWidth <= 900 ? 32 : 24;
-  const panelWidth = Math.min(width, Math.max(8, Math.min(MAX_WIDTH, viewportWidth - sideInset)));
-  const resizeFrame = getChatPanelResizeFrame(panelWidth, MIN_WIDTH);
+  const maxPanelWidth = Math.max(8, Math.min(MAX_WIDTH, viewportWidth - sideInset));
+  const minPanelWidth = Math.min(MIN_WIDTH, maxPanelWidth);
+  const panelWidth = getChatPanelResizeWidth(width, minPanelWidth, maxPanelWidth, resizePhase);
+
+  const updateResizePhase = (phase: ChatPanelResizePhase) => {
+    resizePhaseRef.current = phase;
+    setResizePhase(phase);
+  };
 
   useEffect(() => {
     const onViewportResize = () => setViewportWidth(window.innerWidth);
@@ -80,8 +93,8 @@ export default function ChatPanel({
   }, [leaving, setOpen]);
 
   useEffect(() => {
-    onWidthChange?.(Math.max(0, panelWidth));
-  }, [onWidthChange, panelWidth]);
+    onWidthChange?.(resizePhase === 'collapsed' ? 0 : Math.max(0, panelWidth));
+  }, [onWidthChange, panelWidth, resizePhase]);
 
   // 收起动画播完再真正卸载：期间面板不拦截画布点击
   useEffect(() => {
@@ -93,7 +106,10 @@ export default function ChatPanel({
   }, [leaving]);
 
   useEffect(() => {
-    if (!open && !leaving) setHasResized(false);
+    if (!open && !leaving) {
+      setHasResized(false);
+      if (resizePhaseRef.current !== 'expanded') updateResizePhase('expanded');
+    }
   }, [leaving, open]);
 
   useEffect(() => () => resizeCleanupRef.current?.(), []);
@@ -101,8 +117,8 @@ export default function ChatPanel({
   // 菜单外点击 / Escape 关闭历史菜单（方案 §7）
   useEffect(() => {
     if (!historyOpen) return undefined;
-    const onPointerDown = (event: MouseEvent) => {
-      if (!headerRef.current?.contains(event.target as Node)) {
+    const onPointerDown = (event: PointerEvent) => {
+      if (!titleWrapRef.current?.contains(event.target as Node)) {
         setHistoryOpen(false);
       }
     };
@@ -111,10 +127,10 @@ export default function ChatPanel({
         setHistoryOpen(false);
       }
     };
-    window.addEventListener('mousedown', onPointerDown);
+    document.addEventListener('pointerdown', onPointerDown, true);
     window.addEventListener('keydown', onKeyDown);
     return () => {
-      window.removeEventListener('mousedown', onPointerDown);
+      document.removeEventListener('pointerdown', onPointerDown, true);
       window.removeEventListener('keydown', onKeyDown);
     };
   }, [historyOpen]);
@@ -128,16 +144,27 @@ export default function ChatPanel({
     const startX = event.clientX;
     const pointerId = event.pointerId;
     const startWidth = panelWidth;
-    let finalWidth = startWidth;
+    const collapseWidth = minPanelWidth / 2;
     handle.setPointerCapture(pointerId);
+    closeAfterCollapseRef.current = false;
     setHasResized(true);
     setIsResizing(true);
     const updateWidth = (clientX: number) => {
-      const next = startWidth - (clientX - startX);
-      const nextWidth = Math.min(Math.min(MAX_WIDTH, window.innerWidth - sideInset), Math.max(-window.innerWidth, next));
-      finalWidth = nextWidth;
+      const desiredWidth = startWidth - (clientX - startX);
+      const nextPhase = getNextChatPanelResizePhase(
+        resizePhaseRef.current,
+        desiredWidth,
+        minPanelWidth,
+      );
+      if (nextPhase !== resizePhaseRef.current) updateResizePhase(nextPhase);
+      const nextWidth = getChatPanelResizeWidth(
+        desiredWidth,
+        minPanelWidth,
+        maxPanelWidth,
+        nextPhase,
+      );
       setWidth(nextWidth);
-      onWidthChange?.(Math.max(0, nextWidth));
+      onWidthChange?.(nextPhase === 'collapsed' ? 0 : nextWidth);
     };
     const onMove = (move: PointerEvent) => {
       if (move.pointerId !== pointerId) return;
@@ -148,7 +175,13 @@ export default function ChatPanel({
       if (up.type === 'pointerup') updateWidth(up.clientX);
       resizeCleanupRef.current?.();
       setIsResizing(false);
-      if (finalWidth <= 0) setOpen(false);
+      const finalPhase = resizePhaseRef.current;
+      if (finalPhase === 'collapsed') {
+        setWidth(collapseWidth);
+        setOpen(false);
+      } else if (finalPhase === 'collapsing') {
+        closeAfterCollapseRef.current = true;
+      }
     };
     const cleanup = () => {
       window.removeEventListener('pointermove', onMove);
@@ -164,6 +197,31 @@ export default function ChatPanel({
   };
 
   const threadGroups = groupThreads(threads);
+  const commitThreadRename = () => {
+    if (!thread) {
+      setRenamingId('');
+      return;
+    }
+    const title = renameValue.trim();
+    if (title && title !== thread.title) {
+      useChatStore.getState().renameThread(thread.id, title);
+    }
+    setRenamingId('');
+  };
+
+  const onPanelAnimationEnd = (event: React.AnimationEvent<HTMLElement>) => {
+    if (event.target !== event.currentTarget) return;
+    if (event.animationName === 'hb-chat-panel-leave' && resizePhaseRef.current === 'collapsing') {
+      updateResizePhase('collapsed');
+      if (closeAfterCollapseRef.current) {
+        closeAfterCollapseRef.current = false;
+        setWidth(minPanelWidth / 2);
+        setOpen(false);
+      }
+    } else if (event.animationName === 'hb-chat-panel-enter' && resizePhaseRef.current === 'expanding') {
+      updateResizePhase('expanded');
+    }
+  };
 
   if (!open && !leaving) {
     return (
@@ -172,9 +230,10 @@ export default function ChatPanel({
           type="button"
           className="hb-chat-fab"
           onClick={() => {
-            if (width <= MIN_WIDTH / 2) {
+            if (width <= MIN_WIDTH / 2 || resizePhaseRef.current === 'collapsed') {
               setWidth(360);
             }
+            updateResizePhase('expanded');
             setOpen(true);
           }}
           title="AI 对话"
@@ -192,15 +251,12 @@ export default function ChatPanel({
 
   return (
     <aside
-      className={`hb-chat-panel ${leaving ? 'is-leaving' : ''} ${isResizing ? 'is-resizing' : ''} ${hasResized ? 'is-resized' : ''} ${resizeFrame.contentHidden ? 'is-content-hidden' : ''} ${panelWidth < MIN_WIDTH / 2 ? 'is-collapsed-drag' : ''}`}
+      className={`hb-chat-panel ${leaving ? 'is-leaving' : ''} ${isResizing ? 'is-resizing' : ''} ${hasResized ? 'is-resized' : ''} ${resizePhase === 'collapsing' ? 'is-drag-collapsing' : ''} ${resizePhase === 'expanding' ? 'is-drag-expanding' : ''} ${resizePhase === 'collapsed' ? 'is-drag-collapsed' : ''}`}
       style={{
-        ['--hb-chat-width' as string]: `${resizeFrame.shellWidth}px`,
-        ['--hb-chat-min-width' as string]: `${MIN_WIDTH}px`,
-        ['--hb-chat-collapse-x' as string]: `${resizeFrame.collapseOffset}px`,
-        ['--hb-chat-shell-opacity' as string]: resizeFrame.shellOpacity,
-        ['--hb-chat-content-opacity' as string]: resizeFrame.contentOpacity,
+        ['--hb-chat-width' as string]: `${panelWidth}px`,
       }}
       aria-label="AI 对话"
+      onAnimationEnd={onPanelAnimationEnd}
     >
       <div
         className="hb-chat-resize"
@@ -209,22 +265,112 @@ export default function ChatPanel({
         title="拖拽调整宽度"
         onPointerDown={onResizeStart}
       />
-      <header className="hb-chat-header" ref={headerRef}>
-        <button
-          type="button"
-          className="hb-chat-title-btn"
-          aria-expanded={historyOpen}
-          onClick={() => {
-            setHistoryOpen((value) => {
-              const next = !value;
-              if (!next) setRenamingId('');
-              return next;
-            });
-          }}
-        >
-            <strong>{thread?.title || '新对话'}</strong>
-          <ChevronGlyphIcon up={historyOpen} />
-        </button>
+      <header className="hb-chat-header">
+        <div className="hb-chat-title-wrap" ref={titleWrapRef}>
+          <div className="hb-chat-title-control">
+            {thread && renamingId === thread.id ? (
+              <input
+                className="hb-chat-title-input"
+                value={renameValue}
+                autoFocus
+                aria-label="对话新标题"
+                onChange={(event) => setRenameValue(event.target.value)}
+                onBlur={commitThreadRename}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter') event.currentTarget.blur();
+                  if (event.key === 'Escape') {
+                    event.preventDefault();
+                    setRenameValue(thread.title);
+                    setRenamingId('');
+                  }
+                }}
+              />
+            ) : (
+              <button
+                type="button"
+                className="hb-chat-title-name"
+                title={thread ? '重命名对话' : '新对话'}
+                onClick={() => {
+                  if (!thread) return;
+                  setHistoryOpen(false);
+                  setRenameValue(thread.title || '新对话');
+                  setRenamingId(thread.id);
+                }}
+              >
+                <strong>{thread?.title || '新对话'}</strong>
+              </button>
+            )}
+            <button
+              type="button"
+              className={`hb-chat-title-menu-btn ${historyOpen ? 'open' : ''}`}
+              title="切换对话"
+              aria-label="切换对话"
+              aria-expanded={historyOpen}
+              onClick={() => {
+                setHistoryOpen((value) => !value);
+                setRenamingId('');
+              }}
+            >
+              <ChevronGlyphIcon up={historyOpen} />
+            </button>
+          </div>
+          {historyOpen ? (
+            <div className="hb-chat-thread-menu" role="menu" aria-label="历史对话">
+              <button
+                type="button"
+                className="hb-chat-thread-new"
+                role="menuitem"
+                onClick={() => {
+                  useChatStore.getState().createThread(activeCanvasId);
+                  setRenamingId('');
+                  setHistoryOpen(false);
+                }}
+              >
+                <NewThreadGlyphIcon />
+                新建对话
+              </button>
+              <div className="hb-chat-thread-list">
+                {threadGroups.length === 0 ? (
+                  <p className="hb-chat-menu-empty">还没有历史对话，发一句话就自动开一条</p>
+                ) : threadGroups.map((group) => (
+                  <section key={group.label} className="hb-chat-thread-group" aria-label={group.label}>
+                    <h3 className="hb-chat-thread-group-label">{group.label}</h3>
+                    {group.items.map((item) => (
+                      <div key={item.id} className={`hb-chat-thread-row ${item.id === thread?.id ? 'is-active' : ''}`}>
+                        <button
+                          type="button"
+                          className="hb-chat-thread-item-main"
+                          role="menuitem"
+                          aria-current={item.id === thread?.id ? 'true' : undefined}
+                          onClick={() => {
+                            useChatStore.getState().switchThread(item.id);
+                            setHistoryOpen(false);
+                          }}
+                        >
+                          <strong>{item.title}</strong>
+                        </button>
+                        <div className="hb-chat-thread-actions" aria-label={`对话「${item.title}」的操作`}>
+                          <button
+                            type="button"
+                            className="hb-chat-thread-action-button is-danger"
+                            title="删除对话"
+                            aria-label={`删除对话「${item.title}」`}
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              void useChatStore.getState().deleteThread(item.id);
+                            }}
+                          >
+                            <TrashGlyphIcon />
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                  </section>
+                ))}
+              </div>
+            </div>
+          ) : null}
+        </div>
         <div className="hb-chat-actions">
           <button
             type="button"
@@ -233,124 +379,60 @@ export default function ChatPanel({
             aria-label="收起对话"
             onClick={closePanel}
           >
-            <CloseGlyphIcon />
+            <CollapseRightGlyphIcon />
           </button>
         </div>
-        {historyOpen ? (
-          <div className="hb-chat-thread-menu" role="menu" aria-label="历史对话">
-            <button
-              type="button"
-              className="hb-chat-thread-new"
-              role="menuitem"
-              onClick={() => {
-                useChatStore.getState().createThread(activeCanvasId);
-                setRenamingId('');
-                setHistoryOpen(false);
-              }}
-            >
-              <NewThreadGlyphIcon />
-              新建对话
-            </button>
-            <div className="hb-chat-thread-list">
-              {threadGroups.length === 0 ? (
-                <p className="hb-chat-menu-empty">还没有历史对话，发一句话就自动开一条</p>
-              ) : threadGroups.map((group) => (
-                <section key={group.label} className="hb-chat-thread-group" aria-label={group.label}>
-                  <h3 className="hb-chat-thread-group-label">{group.label}</h3>
-                  {group.items.map((item) => (
-                    <div key={item.id} className={`hb-chat-thread-row ${item.id === thread?.id ? 'is-active' : ''} ${renamingId === item.id ? 'is-renaming' : ''}`}>
-                      {renamingId === item.id ? (
-                        <div className="hb-chat-thread-rename">
-                          <input
-                            value={renameValue}
-                            autoFocus
-                            aria-label="对话新标题"
-                            onChange={(event) => setRenameValue(event.target.value)}
-                            onKeyDown={(event) => {
-                              if (event.key === 'Enter') {
-                                useChatStore.getState().renameThread(item.id, renameValue);
-                                setRenamingId('');
-                              } else if (event.key === 'Escape') {
-                                setRenamingId('');
-                              }
-                            }}
-                          />
-                          <button
-                            type="button"
-                            onClick={() => {
-                              useChatStore.getState().renameThread(item.id, renameValue);
-                              setRenamingId('');
-                            }}
-                          >
-                            保存
-                          </button>
-                        </div>
-                      ) : (
-                        <>
-                          <button
-                            type="button"
-                            className="hb-chat-thread-item-main"
-                            role="menuitem"
-                            aria-current={item.id === thread?.id ? 'true' : undefined}
-                            onClick={() => {
-                              useChatStore.getState().switchThread(item.id);
-                              setHistoryOpen(false);
-                            }}
-                          >
-                            <strong>{item.title}</strong>
-                          </button>
-                          <div className="hb-chat-thread-actions" aria-label={`对话「${item.title}」的操作`}>
-                            <button
-                              type="button"
-                              className="hb-chat-thread-action-button"
-                              title="编辑对话名称"
-                              aria-label={`编辑对话「${item.title}」名称`}
-                              onClick={() => {
-                                setRenamingId(item.id);
-                                setRenameValue(item.title);
-                              }}
-                            >
-                              <PencilGlyphIcon />
-                            </button>
-                            <button
-                              type="button"
-                              className="hb-chat-thread-action-button is-danger"
-                              title="删除对话"
-                              aria-label={`删除对话「${item.title}」`}
-                              onClick={() => useChatStore.getState().deleteThread(item.id)}
-                            >
-                              <TrashGlyphIcon />
-                            </button>
-                          </div>
-                        </>
-                      )}
-                    </div>
-                  ))}
-                </section>
-              ))}
-            </div>
-          </div>
-        ) : null}
       </header>
       <div className="hb-chat-panel-body">
+        {syncError ? <p className="hb-chat-error hb-chat-panel-notice" role="alert">{syncError}</p> : null}
         <ChatMessageList
           onLocate={onLocate}
           onPreview={onPreview}
           onRetry={onRetry}
-          onApplyVideoScript={onApplyVideoScript}
         />
-        {pendingClarification && threadRun ? (
+        {threadRun?.pendingConfirmation ? <ImageConfirmation key={`${threadRun.runId}:${threadRun.pendingConfirmation.callId}`} runId={threadRun.runId} confirmation={threadRun.pendingConfirmation} /> : pendingClarification && threadRun ? (
           <ClarificationModal
             request={pendingClarification}
             onSubmit={(answers) => onAnswerClarification(threadRun.runId, pendingClarification.callId, answers)}
             onCancel={() => onAnswerClarification(threadRun.runId, pendingClarification.callId, null)}
           />
         ) : (
-          <ChatComposer onSend={onSend} onStop={onStop} running={Boolean(threadRun)} submitting={submitting} />
+          <ChatComposer onSend={onSend} onStop={onStop} running={Boolean(activeRun)} submitting={submitting} />
         )}
       </div>
     </aside>
   );
+}
+
+function ImageConfirmation({ runId, confirmation }: { runId: string; confirmation: ChatRunConfirmation }) {
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState('');
+  const [expired, setExpired] = useState(() => Date.parse(confirmation.expiresAt) <= Date.now());
+  useEffect(() => {
+    const delay = Math.max(0, Date.parse(confirmation.expiresAt) - Date.now());
+    const timer = window.setTimeout(() => setExpired(true), delay);
+    return () => window.clearTimeout(timer);
+  }, [confirmation.expiresAt]);
+  const respond = async (approved: boolean) => {
+    if (pending || (approved && expired)) return;
+    setPending(true); setError('');
+    try {
+      if (!await confirmChatRun(runId, confirmation.callId, approved)) { setError('确认已失效，请等待任务状态刷新'); setPending(false); }
+      // Keep disabled until the authoritative event/snapshot removes the request.
+    } catch (err) { setError(err instanceof Error ? err.message : '确认失败，请重试'); setPending(false); }
+  };
+  return <section className="hb-chat-confirmation" aria-label="确认图像生成">
+    <strong>确认生成图片</strong>
+    <p>{confirmation.prompt}</p>
+    <p>{confirmation.model} · {confirmation.size}</p>
+    <p>本次 {confirmation.count} 张 · 累计 {confirmation.totalCount} 张 · 费用未知</p>
+    <small>{expired ? '确认已过期，不能生成' : '只有确认后才会请求生成；取消不会请求生图。'}</small>
+    {error ? <p role="alert" className="hb-chat-error">{error}</p> : null}
+    <div className="hb-chat-confirmation-actions">
+      <button type="button" disabled={pending} onClick={() => void respond(false)}>取消生成</button>
+      <button type="button" disabled={pending || expired} onClick={() => void respond(true)}>{pending ? '处理中…' : '确认生成'}</button>
+    </div>
+  </section>;
 }
 
 interface ThreadGroup {

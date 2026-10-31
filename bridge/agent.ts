@@ -1,5 +1,11 @@
 import type { ModelProfile } from './settings.js';
-import { callTextModel } from './textApi.js';
+import { callTextModel, isUnsupportedTemperatureError } from './textApi.js';
+
+/** 角色温度统一收口到 0-1；旧快照里的越界值不直接发给上游。 */
+function normalizeRoleTemperature(value: number | undefined): number | undefined {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return undefined;
+  return Math.min(1, Math.max(0, value));
+}
 
 /**
  * Agent 调用链：给语言模型挂上 generate_image 工具，让它自己判断
@@ -43,6 +49,54 @@ export interface AgentTurn {
 }
 
 const AGENT_MAX_OUTPUT_TOKENS = 4096;
+const TRANSIENT_NETWORK_CODES = new Set([
+  'ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'ENOTFOUND', 'EAI_AGAIN',
+  'UND_ERR_CONNECT_TIMEOUT', 'UND_ERR_HEADERS_TIMEOUT', 'UND_ERR_SOCKET',
+]);
+
+function networkErrorCode(error: unknown): string {
+  const value = error as { code?: unknown; cause?: { code?: unknown; errors?: Array<{ code?: unknown }> } } | null;
+  const direct = value?.code;
+  const cause = value?.cause?.code;
+  const nested = value?.cause?.errors?.[0]?.code;
+  return String(cause || nested || direct || '');
+}
+
+function isTransientNetworkError(error: unknown): boolean {
+  const code = networkErrorCode(error);
+  if (TRANSIENT_NETWORK_CODES.has(code)) return true;
+  const message = error instanceof Error ? error.message : String(error || '');
+  return /fetch failed|ECONNRESET|ECONNREFUSED|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|UND_ERR_(?:CONNECT|HEADERS|SOCKET)/i.test(message);
+}
+
+function networkErrorMessage(error: unknown): string {
+  const code = networkErrorCode(error);
+  return `语言模型请求失败：无法连接上游或代理${code ? `（${code}）` : ''}。请检查模型 Base URL、系统代理和网络后重试。`;
+}
+
+/** 只对请求建立阶段的瞬时网络失败重试一次；流中断与已收到响应的情况不在这里重试。 */
+async function fetchAgent(url: string, init: RequestInit): Promise<Response> {
+  try {
+    return await fetch(url, init);
+  } catch (error) {
+    if (init.signal?.aborted || !isTransientNetworkError(error)) throw error;
+    await new Promise<void>((resolve, reject) => {
+      if (init.signal?.aborted) { reject(error); return; }
+      const timer = setTimeout(resolve, 500);
+      init.signal?.addEventListener('abort', () => {
+        clearTimeout(timer);
+        reject(error);
+      }, { once: true });
+    });
+    try {
+      return await fetch(url, init);
+    } catch (retryError) {
+      const wrapped = new Error(networkErrorMessage(retryError)) as Error & { networkFailure?: boolean };
+      wrapped.networkFailure = true;
+      throw wrapped;
+    }
+  }
+}
 
 class AgentToolProtocolError extends Error {}
 
@@ -65,6 +119,8 @@ export interface AskUserQuestion {
   id: string;
   title: string;
   description?: string;
+  type?: 'single' | 'multiple' | 'text';
+  optional?: boolean;
   multiple: boolean;
   options: Array<{ label: string; value: string; description?: string; recommended?: boolean }>;
 }
@@ -91,14 +147,18 @@ export function normalizeAskUserQuestions(value: unknown): AskUserQuestion[] {
         ...(option.recommended === true || option.badge === '推荐' ? { recommended: true } : {}),
       }];
     });
-    if (!title || options.length < 2) return [];
-    const type = String(item.type || item.kind || item.mode || '').toLowerCase();
+    const rawType = String(item.type || item.kind || item.mode || '').toLowerCase();
+    const multiple = item.multiple === true || ['multiple', 'multi', 'checkbox'].includes(rawType);
+    const type: 'single' | 'multiple' | 'text' = rawType === 'text' ? 'text' : multiple ? 'multiple' : 'single';
+    if (!title || (type !== 'text' && options.length < 2)) return [];
     return [{
       id: String(item.id || `question_${questionIndex + 1}`).trim().slice(0, 80) || `question_${questionIndex + 1}`,
       title,
       ...(String(item.description || item.hint || '').trim() ? { description: String(item.description || item.hint).trim().slice(0, 320) } : {}),
-      multiple: item.multiple === true || ['multiple', 'multi', 'checkbox'].includes(type),
-      options,
+      type,
+      ...(typeof item.optional === 'boolean' ? { optional: item.optional } : {}),
+      multiple: type === 'multiple',
+      options: type === 'text' ? [] : options,
     }];
   });
 }
@@ -106,7 +166,7 @@ export function normalizeAskUserQuestions(value: unknown): AskUserQuestion[] {
 export function askUserToolDef(): AgentToolDef {
   return {
     name: 'ask_user',
-    description: '当用户表达了视觉设计/生图意图，但尚未明确要求立即生成，而且关键创作选择存在实质歧义时，向用户发起结构化澄清。一次提出 1 到 4 个互不重复、能影响结果的问题（如主体、用途、风格、参考图用途、画面文字或构图）；已有信息不要重复询问。闲聊、纯分析和用户已明确要求立即生成时不要调用。收到答案后继续本轮对话，不直接调用提示词优化逻辑。',
+    description: '普通歧义优先用自然语言追问；只有关键多项创作决策存在实质歧义时才向用户发起结构化澄清，一次 1 到 4 个互不重复的问题。type=single/multiple 时提供至少2个选项，type=text 为开放输入、不需要 options；optional=true 允许跳过本题，跳过不等于取消整个任务。已有信息不要重复询问；闲聊、纯分析和用户已明确要求立即生成时不要调用。收到答案后继续本轮对话。',
     parameters: {
       type: 'object',
       properties: {
@@ -120,10 +180,11 @@ export function askUserToolDef(): AgentToolDef {
               id: { type: 'string' },
               title: { type: 'string', description: '简短、具体的问题' },
               description: { type: 'string', description: '可选的补充说明' },
-              type: { type: 'string', enum: ['single', 'multiple'] },
+              type: { type: 'string', enum: ['single', 'multiple', 'text'] },
+              optional: { type: 'boolean', description: '允许用户跳过本题，不取消整个任务' },
               options: {
                 type: 'array',
-                minItems: 2,
+                description: 'single/multiple 至少2个选项；text 开放输入可省略或为空',
                 maxItems: 8,
                 items: {
                   type: 'object',
@@ -137,7 +198,7 @@ export function askUserToolDef(): AgentToolDef {
                 },
               },
             },
-            required: ['title', 'options'],
+            required: ['title'],
           },
         },
       },
@@ -149,12 +210,18 @@ export function askUserToolDef(): AgentToolDef {
 export interface AgentCallParams {
   systemSpec: string;
   messages: AgentMessage[];
-  /** 当前这一轮的视觉上下文；Responses JSON 回退不能仅靠历史中的文字占位。 */
+  /** 当前视觉工作集，标签区分用户引用、生成候选与编辑基准；显式 [] 表示不发送图片。 */
+  visualContext?: Array<{ id: string; label: string; url: string }>;
+  /** 兼容旧调用方；新调用方应提供带身份和标签的 visualContext。 */
   visualContextImages?: string[];
   tools: AgentToolDef[];
   maxTokens?: number;
+  /** 角色温度 0-1；chat 缺省 0.6，responses 仅在显式设置时发送。 */
+  temperature?: number;
   /** 流式文字增量（chat 格式可用时逐段回调）。 */
   onTextDelta?: (chunk: string) => void;
+  /** 上游显式返回的思考/推理增量；不伪造隐藏推理。 */
+  onReasoningDelta?: (chunk: string) => void;
   signal?: AbortSignal;
 }
 
@@ -169,7 +236,11 @@ export function generateImageToolDef(): AgentToolDef {
       properties: {
         prompt: {
           type: 'string',
-          description: '把多轮对话中已经确认的设计意图、主体、风格、构图、比例，以及“保留什么 / 修改什么”写清楚，作为提示词优化器的输入；不要堆砌过度细节，也不要写「不要出现什么」。',
+          description: '由当前 Agent 按系统中的统一视觉规则直接整理的最终生图提示词，将原样交给生图模型，不再调用其它优化模型。完整保留多轮已确认的主体、风格、构图、精确图中文字、否定约束，以及必须保留和只修改的内容。',
+        },
+        originalPrompt: {
+          type: 'string',
+          description: '用户原始意图与本次修改要求，用于留档追溯；不要用它代替最终 prompt。',
         },
         referenceImages: {
           type: 'array',
@@ -209,11 +280,42 @@ interface ChatToolCallDelta {
   function?: { name?: string; arguments?: string };
 }
 
-function toChatMessages(systemSpec: string, messages: AgentMessage[]): unknown[] {
-  const out: unknown[] = [{ role: 'system', content: systemSpec }];
-  for (const message of messages) {
+/** 三条协议共用同一当前视觉工作集；历史消息不重复携带旧图。 */
+function prepareVisualMessages(params: AgentCallParams): {
+  messages: AgentMessage[];
+  visualIndex: number;
+  visuals: Array<{ id: string; label: string; url: string }>;
+} {
+  const lastUserIndex = params.messages.map((message) => message.role).lastIndexOf('user');
+  const legacyImages = params.visualContextImages ?? params.messages[lastUserIndex]?.images ?? [];
+  const visuals = (params.visualContext ?? legacyImages.map((url, index) => ({
+    id: `legacy-image-${index + 1}`,
+    label: params.visualContextImages === undefined ? `用户引用图 ${index + 1}` : `当前视觉图片 ${index + 1}`,
+    url,
+  }))).filter((item) => /^(?:data:image\/|https?:\/\/)/i.test(item.url));
+  const messages = params.messages.map(({ images: _images, ...message }) => ({ ...message }));
+  if (visuals.length === 0) return { messages, visualIndex: -1, visuals };
+  // 新生成候选发生在工具结果之后，不能写回之前的 user 消息，亦不能插进 tool_calls/results 中间。
+  let visualIndex = lastUserIndex;
+  if (lastUserIndex < 0 || messages.slice(lastUserIndex + 1).some((message) => message.role === 'tool' || message.toolCalls?.length)) {
+    messages.push({ role: 'user', content: '当前视觉上下文（在上述工具结果之后提供）。' });
+    visualIndex = messages.length - 1;
+  }
+  const note = [
+    '视觉附件按以下顺序与图片一一对应；用户引用编号和生成候选编号是独立的，不得混用：',
+    ...visuals.map((item, index) => `视觉附件 ${index + 1}：${item.label}；ID=${item.id}`),
+    '请实际查看图片内容后再回答，不要仅凭文字描述推测。',
+  ].join('\n');
+  messages[visualIndex] = { ...messages[visualIndex], content: `${messages[visualIndex].content}\n\n${note}` };
+  return { messages, visualIndex, visuals };
+}
+
+function toChatMessages(params: AgentCallParams): unknown[] {
+  const { messages, visualIndex, visuals } = prepareVisualMessages(params);
+  const out: unknown[] = [{ role: 'system', content: params.systemSpec }];
+  for (const [index, message] of messages.entries()) {
     if (message.role === 'user') {
-      const images = message.images || [];
+      const images = index === visualIndex ? visuals.map((item) => item.url) : [];
       out.push({
         role: 'user',
         content: images.length > 0
@@ -244,10 +346,11 @@ function toChatMessages(systemSpec: string, messages: AgentMessage[]): unknown[]
   return out;
 }
 
-/** 解析 chat 流式块：文字增量 + tool_calls 增量（按 index 归并）。 */
+/** 解析 chat 流式块：文字增量 + 思考增量 + tool_calls 增量（按 index 归并）。 */
 function applyChatChunk(
   chunk: unknown,
   text: { value: string },
+  reasoning: { value: string },
   calls: Map<number, { id: string; name: string; args: string }>,
 ): void {
   const choices = (chunk as { choices?: Array<{ delta?: Record<string, unknown> }> })?.choices;
@@ -255,6 +358,17 @@ function applyChatChunk(
   if (!delta) return;
   const content = delta.content;
   if (typeof content === 'string' && content) text.value += content;
+  const directReasoning = delta.reasoning_content ?? delta.reasoning ?? delta.thinking;
+  if (typeof directReasoning === 'string' && directReasoning) {
+    reasoning.value += directReasoning;
+  } else if (Array.isArray(delta.reasoning_details)) {
+    for (const part of delta.reasoning_details) {
+      if (!part || typeof part !== 'object') continue;
+      const value = part as { text?: unknown; content?: unknown };
+      const chunkText = typeof value.text === 'string' ? value.text : typeof value.content === 'string' ? value.content : '';
+      if (chunkText) reasoning.value += chunkText;
+    }
+  }
   const toolCalls = delta.tool_calls as ChatToolCallDelta[] | undefined;
   if (Array.isArray(toolCalls)) {
     for (const item of toolCalls) {
@@ -277,65 +391,103 @@ async function callChatWithTools(
   const base = profile.baseUrl.replace(/\/+$/, '');
   const model = String(profile.model || '').trim();
   if (!model) throw new Error(`语言模型「${profile.name}」还没填模型名`);
-  const response = await fetch(`${base}/chat/completions`, {
+  const temperature = normalizeRoleTemperature(params.temperature) ?? 0.6;
+  const body: Record<string, unknown> = {
+    model,
+    messages: toChatMessages(params),
+    ...(params.tools.length > 0 ? {
+      tools: params.tools.map((tool) => ({ type: 'function', function: { name: tool.name, description: tool.description, parameters: tool.parameters } })),
+      tool_choice: 'auto',
+    } : {}),
+    temperature,
+    max_tokens: params.maxTokens || AGENT_MAX_OUTPUT_TOKENS,
+    stream: true,
+  };
+  const signal = params.signal ? AbortSignal.any([params.signal, AbortSignal.timeout(120_000)]) : AbortSignal.timeout(120_000);
+  const send = () => fetchAgent(`${base}/chat/completions`, {
     method: 'POST',
     headers: { Authorization: `Bearer ${profile.apiKey}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      model,
-      messages: toChatMessages(params.systemSpec, params.messages),
-      tools: params.tools.map((tool) => ({
-        type: 'function',
-        function: { name: tool.name, description: tool.description, parameters: tool.parameters },
-      })),
-      tool_choice: 'auto',
-      temperature: 0.6,
-      max_tokens: params.maxTokens || AGENT_MAX_OUTPUT_TOKENS,
-      stream: true,
-    }),
-    signal: params.signal ? AbortSignal.any([params.signal, AbortSignal.timeout(120_000)]) : AbortSignal.timeout(120_000),
+    body: JSON.stringify(body),
+    signal,
   });
+  let response = await send();
+  let failureDetail = '';
+  if (!response.ok) {
+    failureDetail = await response.text().catch(() => '');
+    if (response.status === 400 && isUnsupportedTemperatureError(failureDetail)) {
+      delete body.temperature;
+      response = await send();
+      failureDetail = '';
+    }
+  }
   if (!response.ok || !response.body) {
-    const detail = await response.text().catch(() => '');
+    const detail = failureDetail || await response.text().catch(() => '');
     const error = new Error(`模型接口报错（HTTP ${response.status}）：${detail.slice(0, 300) || '无响应内容'}`);
     (error as Error & { status?: number }).status = response.status;
     throw error;
   }
-  // 流式读取：文字增量回调 + tool_calls 归并
   const text = { value: '' };
+  const reasoning = { value: '' };
   const calls = new Map<number, { id: string; name: string; args: string }>();
   const decoder = new TextDecoder();
   let buffer = '';
-  const reader = response.body.getReader();
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    const lines = buffer.split('\n');
-    buffer = lines.pop() || '';
-    for (const line of lines) {
-      const trimmed = line.trim();
-      if (!trimmed.startsWith('data:')) continue;
-      const payload = trimmed.slice(5).trim();
-      if (!payload || payload === '[DONE]') continue;
-      let chunk: unknown;
-      try {
-        chunk = JSON.parse(payload);
-      } catch {
-        continue;
-      }
-      const before = text.value.length;
-      applyChatChunk(chunk, text, calls);
-      if (text.value.length > before && params.onTextDelta) {
-        params.onTextDelta(text.value.slice(before));
-      }
+  let completed = false;
+  const applyLine = (line: string) => {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith('data:')) return;
+    const payload = trimmed.slice(5).trim();
+    if (!payload) return;
+    if (payload === '[DONE]') { completed = true; return; }
+    let chunk: { choices?: Array<{ finish_reason?: string }>; error?: unknown };
+    try {
+      chunk = JSON.parse(payload);
+    } catch {
+      throw new AgentToolProtocolError('语言模型流包含损坏的数据，本次未提交生成。请重试。');
     }
+    if (!chunk || chunk.error) throw new AgentToolProtocolError('语言模型流返回错误，本次未提交生成。请重试。');
+    const finishReason = chunk.choices?.[0]?.finish_reason;
+    if (finishReason === 'length' || finishReason === 'content_filter') {
+      throw new AgentToolProtocolError(`语言模型输出被截断或过滤（finish_reason=${finishReason}），本次未提交生成。请重试。`);
+    }
+    if (finishReason === 'stop' || finishReason === 'tool_calls' || finishReason === 'function_call') completed = true;
+    const before = text.value.length;
+    const beforeReasoning = reasoning.value.length;
+    applyChatChunk(chunk, text, reasoning, calls);
+    if (reasoning.value.length > beforeReasoning) params.onReasoningDelta?.(reasoning.value.slice(beforeReasoning));
+    if (text.value.length > before && !looksLikeToolSource(text.value)) params.onTextDelta?.(text.value.slice(before));
+  };
+  const reader = response.body.getReader();
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
+      for (const line of lines) applyLine(line);
+    }
+    buffer += decoder.decode();
+    if (buffer.trim()) applyLine(buffer);
+  } catch (error) {
+    if (error instanceof AgentToolProtocolError || params.signal?.aborted) throw error;
+    throw new AgentToolProtocolError(`语言模型流中断，输出不完整，本次未提交生成：${error instanceof Error ? error.message : String(error)}`);
+  } finally {
+    reader.releaseLock();
   }
+  if (!completed) throw new AgentToolProtocolError('语言模型流缺少结束标记，输出不完整，本次未提交生成。请重试。');
   const toolCalls: AgentToolCall[] = [];
+  const availableTools = new Set(params.tools.map((tool) => tool.name));
   for (const call of calls.values()) {
-    if (!call.name) continue;
+    if (!call.name || !availableTools.has(call.name)) throw new AgentToolProtocolError('语言模型返回了不完整或不支持的工具调用，本次未提交生成。');
     const args = parseToolArguments(call.args);
     toolCalls.push({ id: call.id || `call_${Math.random().toString(36).slice(2, 10)}`, name: call.name, args });
   }
+  if (looksLikeToolSource(text.value)) {
+    const parsed = parseTextToolReply(text.value, { ...params, onTextDelta: undefined });
+    if (toolCalls.length && parsed.toolCalls.length) throw new AgentToolProtocolError('语言模型混用了多套工具协议，本次未提交生成。');
+    if (!toolCalls.length) return parsed;
+  }
+  if (!text.value.trim() && toolCalls.length === 0) throw new AgentToolProtocolError('语言模型未返回正文或完整工具调用，本次未提交生成。');
   return { text: text.value.trim(), toolCalls, protocol: 'tools' };
 }
 
@@ -343,11 +495,9 @@ async function callResponsesWithTools(profile: ModelProfile, params: AgentCallPa
   const base = profile.baseUrl.replace(/\/+$/, '');
   const model = String(profile.model || '').trim();
   if (!model) throw new Error(`语言模型「${profile.name}」还没填模型名`);
-  const lastUserIndex = params.messages.map((message) => message.role).lastIndexOf('user');
-  const imageUrls = (params.visualContextImages ?? params.messages[lastUserIndex]?.images ?? [])
-    .filter((url) => url.startsWith('data:image/'));
+  const { messages, visualIndex, visuals } = prepareVisualMessages(params);
   const input: unknown[] = [];
-  for (const [index, message] of params.messages.entries()) {
+  for (const [index, message] of messages.entries()) {
     if (message.role === 'tool') {
       input.push({ type: 'function_call_output', call_id: message.toolCallId, output: message.content });
       continue;
@@ -357,7 +507,7 @@ async function callResponsesWithTools(profile: ModelProfile, params: AgentCallPa
         role: 'user',
         content: [
           { type: 'input_text', text: message.content },
-          ...(index === lastUserIndex ? imageUrls.map((url) => ({ type: 'input_image', image_url: url })) : []),
+          ...(index === visualIndex ? visuals.map((item) => ({ type: 'input_image', image_url: item.url })) : []),
         ],
       });
       continue;
@@ -367,20 +517,40 @@ async function callResponsesWithTools(profile: ModelProfile, params: AgentCallPa
       input.push({ type: 'function_call', call_id: call.id, name: call.name, arguments: JSON.stringify(call.args) });
     }
   }
-  const response = await fetch(`${base}/responses`, {
+  const requestSignal = params.signal
+    ? AbortSignal.any([params.signal, AbortSignal.timeout(120_000)])
+    : AbortSignal.timeout(120_000);
+  const temperature = normalizeRoleTemperature(params.temperature);
+  const requestBody = (includeTemperature: boolean) => JSON.stringify({
+    model,
+    instructions: params.systemSpec,
+    input,
+    tools: params.tools.map((tool) => ({ type: 'function', name: tool.name, description: tool.description, parameters: tool.parameters })),
+    max_output_tokens: params.maxTokens || AGENT_MAX_OUTPUT_TOKENS,
+    ...(includeTemperature && typeof temperature === 'number' ? { temperature } : {}),
+  });
+  let response = await fetchAgent(`${base}/responses`, {
     method: 'POST',
     headers: { Authorization: `Bearer ${profile.apiKey}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      model,
-      instructions: params.systemSpec,
-      input,
-      tools: params.tools.map((tool) => ({ type: 'function', name: tool.name, description: tool.description, parameters: tool.parameters })),
-      max_output_tokens: params.maxTokens || AGENT_MAX_OUTPUT_TOKENS,
-    }),
-    signal: params.signal ? AbortSignal.any([params.signal, AbortSignal.timeout(120_000)]) : AbortSignal.timeout(120_000),
+    body: requestBody(true),
+    signal: requestSignal,
   });
+  let failureDetail = '';
   if (!response.ok) {
-    const detail = await response.text().catch(() => '');
+    failureDetail = await response.text().catch(() => '');
+    // 部分推理模型不接受 temperature：去掉后重试一次，别让角色温度把整轮打断。
+    if (response.status === 400 && typeof temperature === 'number' && isUnsupportedTemperatureError(failureDetail)) {
+      response = await fetchAgent(`${base}/responses`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${profile.apiKey}`, 'Content-Type': 'application/json' },
+        body: requestBody(false),
+        signal: requestSignal,
+      });
+      failureDetail = '';
+    }
+  }
+  if (!response.ok) {
+    const detail = failureDetail || await response.text().catch(() => '');
     const error = new Error(`模型接口报错（HTTP ${response.status}）：${detail.slice(0, 300) || '无响应内容'}`);
     (error as Error & { status?: number }).status = response.status;
     throw error;
@@ -396,6 +566,7 @@ async function callResponsesWithTools(profile: ModelProfile, params: AgentCallPa
       name?: string;
       arguments?: unknown;
       status?: string;
+      summary?: Array<{ type?: string; text?: string }>;
       content?: Array<{ type?: string; text?: string }>;
     }>;
   };
@@ -405,6 +576,15 @@ async function callResponsesWithTools(profile: ModelProfile, params: AgentCallPa
   if (payload.status === 'failed' || payload.error) {
     throw new AgentToolProtocolError(`语言模型调用失败：${payload.error?.message || '未返回有效结果'}`);
   }
+  const reasoning = (payload.output || [])
+    .filter((item) => item.type === 'reasoning')
+    .flatMap((item) => [
+      ...(item.summary || []).map((part) => part.text || ''),
+      ...(item.content || []).filter((part) => part.type === 'reasoning_text').map((part) => part.text || ''),
+    ])
+    .join('\n')
+    .trim();
+  if (reasoning) params.onReasoningDelta?.(reasoning);
   const availableTools = new Set(params.tools.map((tool) => tool.name));
   const toolCalls: AgentToolCall[] = [];
   for (const item of payload.output || []) {
@@ -428,7 +608,8 @@ async function callResponsesWithTools(profile: ModelProfile, params: AgentCallPa
     if (!text.trim()) throw new AgentToolProtocolError('语言模型未返回正文或完整工具调用，本次未提交生成。');
     return parseTextToolReply(text, params);
   }
-  const visibleText = new RegExp(DSML_MARKER_PATTERN, 'i').test(text) ? '' : text.trim();
+  if (looksLikeToolSource(text)) throw new AgentToolProtocolError('语言模型混用或截断了工具协议，本次未提交生成。');
+  const visibleText = text.trim();
   if (visibleText) params.onTextDelta?.(visibleText);
   return { text: visibleText, toolCalls, protocol: 'tools' };
 }
@@ -497,10 +678,10 @@ export function jsonProtocolSpec(): string {
     '需要向用户结构化追问时，输出 ask_user JSON；决定生图时输出 generate_image JSON。每次只输出一个动作代码块。',
     '不要输出 XML、DSML 或其他工具调用源码；工具动作只使用下面的 JSON 格式。',
     '```json',
-    '{"action": "generate_image", "args": {"prompt": "整理后的用户设计意图与修改要求", "referenceImages": [1], "referenceUsage": "style", "ratio": "1:1", "count": 1}}',
+    '{"action": "generate_image", "args": {"prompt": "按统一视觉规则整理、可直接执行的最终生图提示词", "originalPrompt": "用户原始意图与本次修改要求", "referenceImages": [1], "referenceUsage": "style", "ratio": "1:1", "count": 1}}',
     '```',
-    'prompt 是提示词优化器的输入：写清楚已确认的需求与修改项，不要自行扩写成最终长提示词；生图前 bridge 会统一优化一次。',
-    '需要澄清时使用以下结构，questions 必须是 1-4 个问题，每题至少 2 个选项：',
+    'prompt 是由当前 Agent 按系统统一视觉规则整理的最终生图提示词，原样提交生图模型，不再另调优化模型。完整保留精确图中文字、否定约束、必须保留项与修改边界；originalPrompt 可选，用于留档原始意图。',
+    '普通歧义优先自然语言追问；仅关键多项决策使用 ask_user。questions 为1-4题；type=single/multiple 时至少2选项；type=text 为开放输入、可省略 options；optional=true 允许只跳过该题，不取消整个任务。',
     '```json',
     '{"action":"ask_user","args":{"questions":[{"id":"subject","title":"画面主体是什么？","type":"single","options":[{"label":"产品本身"},{"label":"使用场景"}]}]}}',
     '```',
@@ -587,6 +768,7 @@ export function extractDsmlToolCalls(raw: string): { text: string; toolCalls: Ag
     }
     callsClosePattern.lastIndex = invokeClose.index + invokeClose[0].length;
     const callsClose = callsClosePattern.exec(content);
+    if (callsStart >= 0 && !callsClose) return null;
     ranges.push({
       start: callsStart >= 0 ? callsStart : invokeMatch.index,
       end: callsClose ? callsClose.index + callsClose[0].length : invokeClose.index + invokeClose[0].length,
@@ -616,16 +798,10 @@ async function callWithJsonProtocol(
   profile: ModelProfile,
   params: AgentCallParams,
 ): Promise<AgentTurn> {
-  const imageUrls = (params.visualContextImages || []).filter((url) => url.startsWith('data:image/'));
-  const history = params.messages
+  const { messages, visuals } = prepareVisualMessages(params);
+  const history = messages
     .map((message) => {
-      if (message.role === 'user') {
-        const images = message.images || [];
-        const head = images.length > 0
-          ? `${message.content}\n（附 ${images.length} 张参考图：${images.map((_, index) => `图 ${index + 1}`).join('、')}）`
-          : message.content;
-        return `用户：${head}`;
-      }
+      if (message.role === 'user') return `用户：${message.content}`;
       if (message.role === 'assistant') {
         const calls = (message.toolCalls || []).map((call) => `调用工具 ${call.name}：${JSON.stringify(call.args)}`).join('\n');
         return `你：${message.content}${calls ? `\n${calls}` : ''}`;
@@ -633,18 +809,22 @@ async function callWithJsonProtocol(
       return `工具结果：${message.content}`;
     })
     .join('\n\n');
-  const visualNote = imageUrls.length > 0
-    ? `\n\n视觉附件：本次附上最近一条含图用户消息中的 ${imageUrls.length} 张图片，顺序对应该消息中的图 1 至图 ${imageUrls.length}。请实际查看图片内容后再回答，不要仅凭文字描述推测。`
-    : '';
-  const userText = `${history || '（无历史）'}${visualNote}`;
+  const userText = history || '（无历史）';
   const reply = await callTextModel(profile, {
-    systemSpec: `${params.systemSpec}\n\n${jsonProtocolSpec()}`,
+    systemSpec: params.tools.length > 0 ? `${params.systemSpec}\n\n${jsonProtocolSpec()}` : params.systemSpec,
     userText,
-    imageUrls,
+    imageUrls: visuals.map((item) => item.url),
     maxTokens: params.maxTokens || AGENT_MAX_OUTPUT_TOKENS,
+    temperature: normalizeRoleTemperature(params.temperature),
     signal: params.signal,
   });
   return parseTextToolReply(reply, params);
+}
+
+function looksLikeToolSource(text: string): boolean {
+  return /<\s*\/?\s*(?:\|{1,2}|｜{1,2})\s*DSML/i.test(text)
+    || /\{[\s\S]*?["']action["']\s*:/i.test(text)
+    || /\{\s*["']act(?:i(?:o(?:n)?)?)?$/i.test(text);
 }
 
 function parseTextToolReply(reply: string, params: AgentCallParams): AgentTurn {
@@ -663,17 +843,19 @@ function parseTextToolReply(reply: string, params: AgentCallParams): AgentTurn {
     throw new AgentToolProtocolError('模型返回的工具调用不完整或格式无法识别，本次未提交生成。请重试。');
   }
   const action = extractJsonAction(reply);
-  if (action && (action.action === 'generate_image' || action.action === 'ask_user')) {
-    if (!params.tools.some((tool) => tool.name === action.action)) {
+  if (action) {
+    if (typeof action.action !== 'string' || !params.tools.some((tool) => tool.name === action.action)) {
       throw new AgentToolProtocolError('模型返回了不支持的工具调用，本次未提交生成。');
     }
     const args = parseToolArguments(action.args);
     // 剥掉 JSON 块才是给用户看的文字；非流式路径整段补一次 delta，前端才收得到
-    const text = stripJsonAction(reply);
+    const text = stripJsonAction(reply).replace(/```(?:json)?/gi, '').trim();
+    if (looksLikeToolSource(text)) throw new AgentToolProtocolError('模型返回了额外或不完整的动作，本次未提交生成。');
     if (text && params.onTextDelta) params.onTextDelta(text);
-    const name = action.action === 'ask_user' ? 'ask_user' : 'generate_image';
+    const name = action.action;
     return { text, toolCalls: [{ id: `call_${Math.random().toString(36).slice(2, 10)}`, name, args }], protocol: 'json' };
   }
+  if (looksLikeToolSource(reply)) throw new AgentToolProtocolError('模型返回的动作不完整或不是有效 JSON，本次未提交生成。请重试。');
   const text = reply.trim();
   if (text && params.onTextDelta) params.onTextDelta(text);
   return { text, toolCalls: [], protocol: 'json' };
@@ -685,6 +867,10 @@ function parseTextToolReply(reply: string, params: AgentCallParams): AgentTurn {
  * 一个 agent 回合：按配置优先使用 chat / responses 原生 tools；
  * 遇到 tools 不支持 / 路由错误时回落 JSON 指令协议（复用 textApi 的格式回落链）。
  */
+function isUnsupportedToolsError(message: string): boolean {
+  return /(?:tools?|function(?:_calling| calls?| calling)?)\b[\s'":=-]*(?:(?:is|are)\s+)?(?:not supported|unsupported|not allowed)|(?:does not support|not support)\s+(?:the\s+)?(?:tools?|function(?:_calling| calls?| calling)?)\b|(?:unsupported|unrecognized|unknown)\s+(?:parameter|argument|field)\s*:?\s*['"]?tools?\b/i.test(message);
+}
+
 export async function callAgentModel(profile: ModelProfile, params: AgentCallParams): Promise<AgentTurn> {
   const preferResponses = profile.textFormat === 'responses';
   if (preferResponses && params.tools.length > 0) {
@@ -694,7 +880,7 @@ export async function callAgentModel(profile: ModelProfile, params: AgentCallPar
       if (error instanceof AgentToolProtocolError || params.signal?.aborted) throw error;
       const status = (error as Error & { status?: number }).status;
       const message = error instanceof Error ? error.message : '';
-      if (![404, 405, 501].includes(status || 0) && !(status === 400 && /tools?|function/i.test(message))) throw error;
+      if (![404, 405, 501].includes(status || 0) && !(status === 400 && isUnsupportedToolsError(message))) throw error;
     }
   }
   if (!preferResponses) {
@@ -705,10 +891,17 @@ export async function callAgentModel(profile: ModelProfile, params: AgentCallPar
       const status = (err as Error & { status?: number }).status;
       const message = err instanceof Error ? err.message : '';
       // 5xx / 超时 / 解析失败（无状态码）值得换协议重来；
-      // 400 里只有「不支持 tools」一类才回落，鉴权 / 参数错误换了也是同样结果
-      const retriable = status === undefined || status >= 500 || (status === 400 && /tool/i.test(message));
+      // 400 里只有「不支持 tools」一类才回落，鉴权 / 参数错误换了也是同样结果。
+      // 网络失败已经重试过且明确无法连接，不再换成 JSON 协议重复打一遍。
+      const retriable = !(err as Error & { networkFailure?: boolean }).networkFailure
+        && (status === undefined || status >= 500 || (status === 400 && isUnsupportedToolsError(message)));
       if (!retriable) throw err;
     }
   }
-  return callWithJsonProtocol(profile, params);
+  try {
+    return await callWithJsonProtocol(profile, params);
+  } catch (error) {
+    if (isTransientNetworkError(error)) throw new Error(networkErrorMessage(error));
+    throw error;
+  }
 }

@@ -1,0 +1,34 @@
+.thread-memory-editor {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--work-dialog-text-primary);
+  font-size: var(--font-size-base);
+  line-height: var(--line-height-normal);
+}
+.thread-memory-editor-head, .thread-memory-editor-footer { flex: none; display: flex; align-items: center; gap: var(--spacing-3); padding: var(--spacing-3) var(--spacing-4); }
+.thread-memory-editor-head h3 { margin: 0; font-size: var(--font-size-md); font-weight: var(--font-weight-medium); }
+.thread-memory-editor-footer { justify-content: flex-end; border-top: 1px solid var(--divider-subtle); }
+.thread-memory-editor-scroll { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: var(--spacing-4); display: grid; align-content: start; gap: var(--spacing-6); }
+.thread-memory-editor p { margin: 0; color: var(--work-dialog-text-secondary); }
+.thread-memory-editor-stats { display: grid; gap: var(--spacing-2); margin: 0; color: var(--work-dialog-text-secondary); font-size: var(--font-size-sm); }
+.thread-memory-editor-stats > div { display: flex; align-items: baseline; flex-wrap: wrap; justify-content: space-between; gap: var(--spacing-2); }
+.thread-memory-editor-stats dd { margin: 0; overflow-wrap: anywhere; }
+.thread-memory-editor-field { display: grid; gap: var(--spacing-2); }
+.thread-memory-editor :is(input, textarea) { box-sizing: border-box; width: 100%; min-width: 0; padding: var(--spacing-2) var(--spacing-3); border: 1px solid var(--control-border); border-radius: var(--radius-sm); background: var(--control-bg); color: var(--work-dialog-text-primary); font-family: var(--font-sans); font-size: var(--font-size-base); line-height: var(--line-height-normal); }
+.thread-memory-editor textarea { min-height: var(--spacing-12); resize: vertical; }
+.thread-memory-editor input { min-height: var(--control-height); }
+.thread-memory-editor button { min-height: var(--control-height); padding: 0 var(--spacing-3); border: 1px solid var(--control-border); border-radius: var(--radius-sm); background: var(--control-bg); color: var(--work-dialog-text-primary); font-size: var(--font-size-sm); cursor: pointer; }
+.thread-memory-editor button:hover:not(:disabled) { background: var(--control-bg-hover); }
+.thread-memory-editor :is(button, input, textarea):focus-visible { outline: 1px solid var(--control-border-focus); outline-offset: var(--spacing-1); }
+.thread-memory-editor :disabled { opacity: 0.45; cursor: not-allowed; }
+.thread-memory-editor-clear { display: grid; justify-items: start; gap: var(--spacing-3); padding-top: var(--spacing-4); border-top: 1px solid var(--divider-subtle); }
+.thread-memory-editor-clear > div { display: flex; gap: var(--spacing-2); flex-wrap: wrap; }
+.thread-memory-editor-clear > div > p { flex-basis: 100%; }
+.thread-memory-editor .thread-memory-editor-save { background: var(--color-text-primary); color: var(--color-text-inverse); }
+.thread-memory-editor .thread-memory-editor-save:hover:not(:disabled) { background: var(--color-text-secondary); }
+.thread-memory-editor .thread-memory-editor-error { color: var(--color-accent-red); }
+.thread-memory-editor .thread-memory-editor-warning { color: var(--color-accent-amber); }

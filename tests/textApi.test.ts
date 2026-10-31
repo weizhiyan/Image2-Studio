@@ -111,6 +111,39 @@ describe('文本接口连通测试', () => {
   });
 });
 
+describe('文本温度兼容与输出完整性', () => {
+  const input = { systemSpec: 'reply', userText: 'OK', imageUrls: [], maxTokens: 64, temperature: 0.8 };
+  it.each(['chat', 'responses'] as const)('%s 不支持温度时仅删除 temperature', async (textFormat) => {
+    const fetch = vi.fn().mockResolvedValueOnce(new Response(JSON.stringify({ error: { message: 'temperature is not supported' } }), { status: 400 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(textFormat === 'chat' ? { choices: [{ message: { content: 'OK' } }] } : { output_text: 'OK' })));
+    vi.stubGlobal('fetch', fetch);
+    await expect(callTextModel({ ...responsesProfile, textFormat }, input)).resolves.toBe('OK');
+    expect(fetch).toHaveBeenCalledTimes(2);
+    const first = JSON.parse(fetch.mock.calls[0][1].body);
+    const second = JSON.parse(fetch.mock.calls[1][1].body);
+    expect(first.temperature).toBe(0.8);
+    delete first.temperature;
+    expect(second).toEqual(first);
+  });
+
+  it.each(['chat', 'responses'] as const)('%s 其它400不因提到 temperature 就重试', async (textFormat) => {
+    const fetch = vi.fn(async () => new Response(JSON.stringify({ error: { message: 'invalid model; temperature=0.8' } }), { status: 400 }));
+    vi.stubGlobal('fetch', fetch);
+    await expect(callTextModel({ ...responsesProfile, textFormat }, input)).rejects.toThrow('invalid model');
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(['length', 'content_filter'])('chat %s 不把部分文本当成功', async (finish_reason) => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ choices: [{ message: { content: '{"action":"generate_image"' }, finish_reason }] }))));
+    await expect(callTextModel(chatProfile, input)).rejects.toThrow(/截断|不完整|过滤/);
+  });
+
+  it('Responses incomplete 即使有 output_text 仍然拒绝', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ status: 'incomplete', output_text: '半句话' }))));
+    await expect(callTextModel(responsesProfile, input)).rejects.toThrow(/incomplete|最终回答/);
+  });
+});
+
 describe('视频脚本优化', () => {
   it('通过已有语言模型生成短视频提示词并带入当前参数', async () => {
     const fetchMock = vi.fn(async (_url: string, _init?: RequestInit) => new Response(JSON.stringify({
@@ -136,7 +169,9 @@ describe('视频脚本优化', () => {
   it('规则明确要求保持用户原意且不假装识别图片', () => {
     const spec = buildVideoPromptSpec({ referenceMode: 'first_frame' });
     expect(spec).toContain('不能替换主体');
-    expect(spec).toContain('不要声称看到了图片内容');
+    expect(spec).toContain('不要声称识别或看到了图片的具体内容');
+    expect(spec).toContain('如提供参考图片');
+    expect(spec).not.toContain('连接图片');
   });
 
   it('保留简短英文视频提示词，不套用图片优化的最小词数门槛', async () => {

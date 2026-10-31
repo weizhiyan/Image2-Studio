@@ -25,7 +25,7 @@ import {
 } from '@/lib/events';
 import { nodeAspectRatio, nodeBoxFor, nodeWidthFor } from '@/lib/aspect';
 import { hasUsableTextReference } from '@/lib/references';
-import { activeVersionOf, newestVersionsFirst, normalizeVersions, versionIndexOf, versionLabel } from '@/lib/versions';
+import { activePromptOf, activeVersionOf, newestVersionsFirst, normalizeVersions, versionIndexOf, versionLabel } from '@/lib/versions';
 import { videoPlaybackStore } from '@/lib/videoPlayback';
 import CanvasImage from './CanvasImage';
 import { AiGlyphIcon } from './NodeToolbarIcons';
@@ -276,6 +276,48 @@ function formatVideoTime(seconds: number): string {
   return `${minutes}:${String(remainder).padStart(2, '0')}`;
 }
 
+function CopyPromptIcon() {
+  return (
+    <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <rect x="5.6" y="2.2" width="8.2" height="9.6" rx="2" stroke="currentColor" strokeWidth="1.3" />
+      <path d="M10.4 13.8H5a2 2 0 0 1-2-2V6.4" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function CopiedPromptIcon() {
+  return (
+    <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <path d="M3.2 8.4 6.4 11.6 12.8 4.8" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+/** 局域网 HTTP 下 Clipboard API 可能不可用，保留 execCommand 兜底。 */
+async function copyTextWithFallback(text: string): Promise<boolean> {
+  try {
+    if (!navigator.clipboard?.writeText) throw new Error('clipboard unavailable');
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch {
+    const field = document.createElement('textarea');
+    field.value = text;
+    field.setAttribute('readonly', '');
+    field.style.position = 'fixed';
+    field.style.left = '-9999px';
+    field.style.opacity = '0';
+    document.body.appendChild(field);
+    field.select();
+    try {
+      return document.execCommand('copy');
+    } catch {
+      return false;
+    } finally {
+      field.remove();
+    }
+  }
+}
+
 export default function FlowImageNode({ id, data, selected }: NodeProps) {
   const d = data as unknown as CanvasNodeData;
   const kind = d.kind;
@@ -290,6 +332,9 @@ export default function FlowImageNode({ id, data, selected }: NodeProps) {
   const videoRunning = isVideo && d.videoStatus === 'running';
   const videoDone = isVideo && d.videoStatus === 'done' && Boolean(videoUrl);
   const showTypeLabel = isVideo || isComposer || kind === 'image' || kind === 'reference';
+  const promptText = activePromptOf(d) || String(d.prompt || '').trim();
+  const promptPreview = promptText.length > 36 ? `${promptText.slice(0, 36)}…` : promptText;
+  const kindLabel = isVideo ? '视频' : '图片';
   const videoFailed = isVideo && d.videoStatus === 'error';
   const videoProgress = Math.max(0, Math.min(100, Number(d.videoProgress || 0)));
   const isRunning = d.status === 'running';
@@ -312,7 +357,9 @@ export default function FlowImageNode({ id, data, selected }: NodeProps) {
   // 展开 → 收起之间留一段退场：宫格卡片先散着消失，节点再缩回单图尺寸
   const [versionsRendered, setVersionsRendered] = useState(false);
   const [imageCopied, setImageCopied] = useState(false);
+  const [promptCopied, setPromptCopied] = useState(false);
   const copyTimerRef = useRef<number | null>(null);
+  const promptCopyTimerRef = useRef<number | null>(null);
   const videoPlayerRef = useRef<HTMLVideoElement>(null);
   const videoNearViewport = useNearViewport(videoPlayerRef, videoDone);
   const [videoCurrentTime, setVideoCurrentTime] = useState(0);
@@ -389,7 +436,16 @@ export default function FlowImageNode({ id, data, selected }: NodeProps) {
 
   useEffect(() => () => {
     if (copyTimerRef.current !== null) window.clearTimeout(copyTimerRef.current);
+    if (promptCopyTimerRef.current !== null) window.clearTimeout(promptCopyTimerRef.current);
   }, []);
+
+  const copyPrompt = async () => {
+    if (!promptText) return;
+    if (!await copyTextWithFallback(promptText)) return;
+    setPromptCopied(true);
+    if (promptCopyTimerRef.current !== null) window.clearTimeout(promptCopyTimerRef.current);
+    promptCopyTimerRef.current = window.setTimeout(() => setPromptCopied(false), 1400);
+  };
 
   const copyImage = async (event: ReactPointerEvent<HTMLButtonElement>) => {
     event.stopPropagation();
@@ -596,9 +652,24 @@ export default function FlowImageNode({ id, data, selected }: NodeProps) {
       </Handle>
       <div className={`image-node-body ${sizeLabel ? 'has-size-badge' : ''}`}>
         {showTypeLabel ? (
-          <div className="image-node-kind-label">
+          <div className="image-node-kind-label" title={promptText || kindLabel}>
             {videoDone ? <VideoTypeIcon /> : isVideo ? <VideoTypeIcon /> : <ImageTypeIcon />}
-            <span>{isVideo ? '视频' : '图片'}</span>
+            <span className="image-node-kind-text">{promptPreview || kindLabel}</span>
+            {promptText ? (
+              <button
+                type="button"
+                className={`image-node-kind-copy nodrag${promptCopied ? ' is-copied' : ''}`}
+                aria-label={promptCopied ? '已复制提示词' : '复制提示词'}
+                title={promptCopied ? '已复制提示词' : '复制提示词'}
+                onPointerDown={(event) => event.stopPropagation()}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  void copyPrompt();
+                }}
+              >
+                {promptCopied ? <CopiedPromptIcon /> : <CopyPromptIcon />}
+              </button>
+            ) : null}
           </div>
         ) : null}
         {isGenerator && !imageUrl && !videoDone ? (
@@ -818,7 +889,7 @@ export default function FlowImageNode({ id, data, selected }: NodeProps) {
             </div>
             {composerError ? (
               <em
-                className={`image-node-composer-error${isRunning ? ' is-pending' : ''}`}
+                className={`image-node-composer-error${isRunning ? ' is-pending' : ''}${isVideo ? ' is-video' : ''}`}
                 role={isRunning ? 'note' : 'alert'}
               >{composerError}</em>
             ) : null}

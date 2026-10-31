@@ -31,16 +31,6 @@ export function AiGlyphIcon() {
   );
 }
 
-/** 复制提示词：双层文档与文字行，和「复制图片」的介质语义区分开。 */
-export function CopyPromptGlyphIcon() {
-  return (
-    <svg width={18} height={18} viewBox="0 0 18 18" fill="none" aria-hidden="true">
-      <rect x="6.25" y="5.25" width="8.5" height="10" rx="1.75" stroke="currentColor" strokeWidth="1.4" />
-      <path d="M4.35 12.8h-.85A1.75 1.75 0 0 1 1.75 11.05V5a1.75 1.75 0 0 1 1.75-1.75h5.3" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
-    </svg>
-  );
-}
-
 /** 删除节点：工具栏危险操作使用，形状与现有 18×18 图标集一致。 */
 export function DeleteGlyphIcon() {
   return (

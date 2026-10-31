@@ -1,10 +1,9 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent, type KeyboardEvent, type MouseEvent as ReactMouseEvent } from 'react';
 import { useCanvasStore } from '@/stores/canvasStore';
-import { draftKeyOf, useChatStore } from '@/stores/chatStore';
+import { activeThreadOf, draftKeyOf, useChatStore } from '@/stores/chatStore';
 import { activeVersionOf, normalizeVersions } from '@/lib/versions';
-import { pickTextProfile } from '@/lib/enhance';
-import { imageModelOptionsOf } from '@/lib/imageModelOptions';
-import { activeProfileOf, useSettingsStore } from '@/stores/settingsStore';
+import { chatImageModelOptions, chatTextModelOptions, isChatTextModelLocked, resolveChatImageSelection, resolveChatTextSelection, type ChatModelOption } from '@/lib/chatModels';
+import { useSettingsStore } from '@/stores/settingsStore';
 import type { ChatImageRef, ChatModelSelection, ChatRoleSnapshot } from '@/types';
 import { createPortal } from 'react-dom';
 import { ModelGlyphIcon } from '@/components/canvas/NodeToolbarIcons';
@@ -394,16 +393,30 @@ export default function ChatComposer({
   const [expandedNodeId, setExpandedNodeId] = useState('');
   const [modelMenu, setModelMenu] = useState(false);
   const [modelMenuStyle, setModelMenuStyle] = useState<CSSProperties>({});
+  const [textMenuOpen, setTextMenuOpen] = useState(false);
+  const [textMenuStyle, setTextMenuStyle] = useState<CSSProperties>({});
+  const [pendingText, setPendingText] = useState<ChatModelOption | null>(null);
+  const [pendingImage, setPendingImage] = useState<ChatModelOption | null>(null);
   const [inlinePreview, setInlinePreview] = useState<InlinePreview | null>(null);
   const [roles, setRoles] = useState<PromptSkill[]>([]);
   const [rolesLoaded, setRolesLoaded] = useState(false);
-  const defaultImage = activeProfileOf(settings);
-  const defaultText = pickTextProfile(settings);
-  const [imageProfileId, setImageProfileId] = useState(defaultImage?.id || '');
-  const [imageModel, setImageModel] = useState(defaultImage?.model || '');
+  const thread = useChatStore(activeThreadOf);
+  const textOptions = useMemo(() => chatTextModelOptions(settings), [settings]);
+  const imageOptions = useMemo(() => chatImageModelOptions(settings), [settings]);
+  const textModelLocked = isChatTextModelLocked(thread);
+  const selectedText = thread
+    ? resolveChatTextSelection(settings, thread)
+    : (pendingText || resolveChatTextSelection(settings, undefined));
+  const selectedImage = thread
+    ? resolveChatImageSelection(settings, thread)
+    : (pendingImage || resolveChatImageSelection(settings, undefined));
+  const textModelLabel = selectedText?.model || '对话模型';
+  const imageModelLabel = selectedImage?.model || '生图模型';
   const textareaRef = useRef<HTMLDivElement>(null);
   const modelActionsRef = useRef<HTMLDivElement>(null);
   const modelMenuRef = useRef<HTMLDivElement>(null);
+  const textMenuRef = useRef<HTMLDivElement>(null);
+  const textMenuCloseTimer = useRef(0);
   const editorSignatureRef = useRef('');
   const composerRef = useRef<HTMLDivElement>(null);
   const composingRef = useRef(false);
@@ -440,17 +453,22 @@ export default function ChatComposer({
   };
 
   useEffect(() => {
-    if (!imageProfileId && defaultImage?.id) setImageProfileId(defaultImage.id);
-  }, [defaultImage?.id, imageProfileId]);
-
-  useEffect(() => {
     if (!modelMenu) return undefined;
     const close = (event: globalThis.KeyboardEvent) => {
-      if (event.key === 'Escape') setModelMenu(false);
+      if (event.key === 'Escape') {
+        setModelMenu(false);
+        setTextMenuOpen(false);
+      }
     };
     const outside = (event: globalThis.MouseEvent) => {
       const target = event.target as Node;
-      if (!modelActionsRef.current?.contains(target) && !modelMenuRef.current?.contains(target)) setModelMenu(false);
+      const inside = modelActionsRef.current?.contains(target)
+        || modelMenuRef.current?.contains(target)
+        || textMenuRef.current?.contains(target);
+      if (!inside) {
+        setModelMenu(false);
+        setTextMenuOpen(false);
+      }
     };
     window.addEventListener('keydown', close);
     window.addEventListener('mousedown', outside);
@@ -460,17 +478,81 @@ export default function ChatComposer({
     };
   }, [modelMenu]);
 
+  useEffect(() => () => window.clearTimeout(textMenuCloseTimer.current), []);
+
+  const menuStyleFrom = (event: ReactMouseEvent<HTMLButtonElement>): CSSProperties => {
+    const rect = event.currentTarget.getBoundingClientRect();
+    return {
+      left: rect.left,
+      bottom: Math.max(12, window.innerHeight - rect.top + 8),
+    };
+  };
+
   const toggleModelMenu = (event: ReactMouseEvent<HTMLButtonElement>) => {
     if (modelMenu) {
       setModelMenu(false);
+      setTextMenuOpen(false);
       return;
     }
-    const rect = event.currentTarget.getBoundingClientRect();
-    setModelMenuStyle({
-      left: rect.left,
-      bottom: Math.max(12, window.innerHeight - rect.top + 8),
-    });
+    setModelMenuStyle(menuStyleFrom(event));
+    setTextMenuOpen(false);
     setModelMenu(true);
+  };
+
+  const openTextMenu = (event: ReactMouseEvent<HTMLElement>) => {
+    window.clearTimeout(textMenuCloseTimer.current);
+    const rect = event.currentTarget.getBoundingClientRect();
+    const mainMenu = modelMenuRef.current?.getBoundingClientRect();
+    const width = 240;
+    const gap = 8;
+    const right = (mainMenu?.right || rect.right) + gap;
+    // 右侧放不下就翻到主菜单左侧，避免二级菜单压在主菜单上。
+    const left = right + width <= window.innerWidth - 12
+      ? right
+      : Math.max(12, (mainMenu?.left || rect.left) - width - gap);
+    setTextMenuStyle({
+      left,
+      bottom: Math.max(12, window.innerHeight - rect.bottom),
+      width,
+    });
+    setTextMenuOpen(true);
+  };
+
+  const scheduleCloseTextMenu = () => {
+    window.clearTimeout(textMenuCloseTimer.current);
+    textMenuCloseTimer.current = window.setTimeout(() => setTextMenuOpen(false), 180);
+  };
+
+  const cancelCloseTextMenu = () => window.clearTimeout(textMenuCloseTimer.current);
+
+  const chooseTextModel = (option: ChatModelOption) => {
+    setModelMenu(false);
+    setTextMenuOpen(false);
+    if (!thread) {
+      setPendingText(option);
+      return;
+    }
+    if (textModelLocked) {
+      // 对话已经开始：换模型等于换上下文，直接带着当前草稿和 Agent 生图模型新建一条对话。
+      useChatStore.getState().createThread(canvasId, {
+        textProfileId: option.profileId,
+        textModel: option.model,
+        imageProfileId: selectedImage?.profileId,
+        imageModel: selectedImage?.model,
+        preserveDraft: true,
+      });
+      return;
+    }
+    useChatStore.getState().setThreadTextProfile(thread.id, option.profileId, option.model);
+  };
+
+  const chooseImageModel = (option: ChatModelOption) => {
+    setModelMenu(false);
+    if (!thread) {
+      setPendingImage(option);
+      return;
+    }
+    useChatStore.getState().setThreadImageModel(thread.id, option.profileId, option.model);
   };
 
   useLayoutEffect(() => {
@@ -488,24 +570,18 @@ export default function ChatComposer({
     if (caretOffset !== null) setEditorCaretInlineOffset(editor, Math.min(caretOffset, inlineLengthFromNode(editor)));
   }, [activeRole, attachments, draft]);
 
-  const imageProfiles = (settings?.profiles || []).filter((profile) => profile.kind === 'image' && profile.enabled !== false);
-  const imageModelOptions = imageModelOptionsOf(settings?.profiles);
-  const selectedImage = imageProfiles.find((profile) => profile.id === imageProfileId) || defaultImage;
-  const selectedImageOption = imageModelOptions.find((option) => option.profileId === imageProfileId && option.model === imageModel)
-    || imageModelOptions.find((option) => option.profileId === imageProfileId)
-    || imageModelOptions[0];
-  const imageModelLabel = selectedImageOption?.model || selectedImage?.model || selectedImage?.name || '生图模型';
   const modelSelection: ChatModelSelection = {
-    textProfileId: defaultText?.id,
-    imageProfileId: selectedImageOption?.profileId || selectedImage?.id,
-    imageModel: selectedImageOption?.model,
+    textProfileId: selectedText?.profileId,
+    textModel: selectedText?.model,
+    imageProfileId: selectedImage?.profileId,
+    imageModel: selectedImage?.model,
   };
 
   useEffect(() => {
-    if (!selectedImageOption) return;
-    if (imageProfileId !== selectedImageOption.profileId) setImageProfileId(selectedImageOption.profileId);
-    if (imageModel !== selectedImageOption.model) setImageModel(selectedImageOption.model);
-  }, [imageModel, imageModelOptions.length, imageProfileId, selectedImageOption?.key]);
+    // 换线程 / 新建线程后，临时选择让位给线程保存的值。
+    setPendingText(null);
+    setPendingImage(null);
+  }, [thread?.id]);
 
   const canSend = draft.trim().length > 0 || attachments.length > 0 || Boolean(draftBase);
 
@@ -841,11 +917,12 @@ export default function ChatComposer({
         <div className="hb-chat-composer-model-actions" aria-label="模型选择" ref={modelActionsRef}>
           <button
             type="button"
-            className={`hb-chat-image-model-button ${modelMenu ? 'is-open' : ''}`}
-            title={selectedImage ? `${selectedImage.name} · ${imageModelLabel}` : '未配置图像模型'}
-            aria-label={`选择图像模型，当前 ${imageModelLabel}`}
+            className={`hb-chat-model-pill ${modelMenu ? 'is-open' : ''}`}
+            title={`Agent 生图模型 ${imageModelLabel} · 对话模型 ${textModelLabel}${textModelLocked ? '（对话模型已锁定，切换会新建对话）' : ''}`}
+            aria-label={`选择生图模型，当前 ${imageModelLabel}；对话模型 ${textModelLabel}`}
             aria-haspopup="menu"
             aria-expanded={modelMenu}
+            disabled={running}
             onClick={toggleModelMenu}
           >
             <ModelGlyphIcon />
@@ -857,35 +934,102 @@ export default function ChatComposer({
               className="hb-chat-model-menu hb-chat-composer-model-menu"
               style={modelMenuStyle}
               role="menu"
-              aria-label="选择图像模型"
+              aria-label="选择模型"
             >
-              {imageModelOptions.map((option) => (
-                <button
-                  type="button"
-                  role="menuitemradio"
-                  aria-checked={selectedImageOption?.key === option.key}
-                  className={`hb-chat-model-option ${selectedImageOption?.key === option.key ? 'is-active' : ''}`}
-                  key={option.key}
-                  onClick={() => {
-                    setImageProfileId(option.profileId);
-                    setImageModel(option.model);
-                    setModelMenu(false);
-                  }}
-                >
-                  <span className="hb-chat-model-option-text">
-                    <span>{option.model}</span>
-                    <small>{option.profileName}</small>
-                  </span>
-                  {selectedImageOption?.key === option.key ? (
-                    <span className="hb-chat-model-option-check" aria-hidden="true">
-                      <svg viewBox="0 0 16 16" fill="none">
-                        <path d="m3.5 8.5 3 3 6-7" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
-                      </svg>
+              <p className="hb-chat-model-section-title">Agent 生图模型</p>
+              {imageOptions.map((option) => {
+                const active = selectedImage?.key === option.key;
+                return (
+                  <button
+                    type="button"
+                    role="menuitemradio"
+                    aria-checked={active}
+                    className={`hb-chat-model-option ${active ? 'is-active' : ''}`}
+                    key={option.key}
+                    onClick={() => chooseImageModel(option)}
+                  >
+                    <span className="hb-chat-model-option-text">
+                      <span>{option.model}</span>
+                      <small>{option.profileName}</small>
                     </span>
-                  ) : null}
-                </button>
-              ))}
-              {imageModelOptions.length === 0 ? <p className="hb-chat-menu-empty">暂无可用模型，请到模型设置添加并勾选</p> : null}
+                    {active ? (
+                      <span className="hb-chat-model-option-check" aria-hidden="true">
+                        <svg viewBox="0 0 16 16" fill="none">
+                          <path d="m3.5 8.5 3 3 6-7" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+                        </svg>
+                      </span>
+                    ) : null}
+                  </button>
+                );
+              })}
+              {imageOptions.length === 0 ? <p className="hb-chat-menu-empty">暂无可用生图模型，请到模型设置启用</p> : null}
+
+              <div className="hb-chat-model-divider" aria-hidden="true" />
+              <button
+                type="button"
+                className={`hb-chat-model-group-row ${textMenuOpen ? 'is-open' : ''}`}
+                aria-haspopup="menu"
+                aria-expanded={textMenuOpen}
+                onMouseEnter={openTextMenu}
+                onMouseLeave={scheduleCloseTextMenu}
+                onClick={(event) => {
+                  if (textMenuOpen) {
+                    setTextMenuOpen(false);
+                    return;
+                  }
+                  openTextMenu(event);
+                }}
+              >
+                <span className="hb-chat-model-group-copy">
+                  <span>对话模型</span>
+                  <small>
+                    {selectedText ? `${selectedText.model} · ${selectedText.profileName}` : '未配置'}
+                    {textModelLocked ? ' · 已锁定' : ''}
+                  </small>
+                </span>
+                <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                  <path d="m6 3.5 4.5 4.5L6 12.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
+              </button>
+            </div>,
+            document.body,
+          ) : null}
+          {modelMenu && textMenuOpen ? createPortal(
+            <div
+              ref={textMenuRef}
+              className="hb-chat-model-menu hb-chat-composer-model-menu hb-chat-model-submenu"
+              style={textMenuStyle}
+              role="menu"
+              aria-label="选择对话模型"
+              onMouseEnter={cancelCloseTextMenu}
+              onMouseLeave={scheduleCloseTextMenu}
+            >
+              {textOptions.map((option) => {
+                const active = selectedText?.key === option.key;
+                return (
+                  <button
+                    type="button"
+                    role="menuitemradio"
+                    aria-checked={active}
+                    className={`hb-chat-model-option ${active ? 'is-active' : ''}`}
+                    key={option.key}
+                    onClick={() => chooseTextModel(option)}
+                  >
+                    <span className="hb-chat-model-option-text">
+                      <span>{option.model}</span>
+                      <small>{option.profileName}{textModelLocked ? ' · 新建对话' : ''}</small>
+                    </span>
+                    {active ? (
+                      <span className="hb-chat-model-option-check" aria-hidden="true">
+                        <svg viewBox="0 0 16 16" fill="none">
+                          <path d="m3.5 8.5 3 3 6-7" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+                        </svg>
+                      </span>
+                    ) : null}
+                  </button>
+                );
+              })}
+              {textOptions.length === 0 ? <p className="hb-chat-menu-empty">暂无可用对话模型，请到模型设置启用</p> : null}
             </div>,
             document.body,
           ) : null}

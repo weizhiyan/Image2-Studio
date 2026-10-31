@@ -22,6 +22,10 @@ function role(overrides: Partial<PromptSkill> = {}): PromptSkill {
 }
 
 describe('对话角色快照', () => {
+  it('温度随角色快照固化', () => {
+    expect(chatRoleSnapshotOf(role({ temperature: 0.9 }))).toMatchObject({ temperature: 0.9 });
+  });
+
   it('固化发送时的头像、分类、系统提示词和 Skill，不携带旧简介', () => {
     const snapshot = chatRoleSnapshotOf(role());
     expect(snapshot).toEqual({

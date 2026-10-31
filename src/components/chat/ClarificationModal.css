@@ -290,7 +290,28 @@
   border-color: var(--control-border-focus);
 }
 
+.hb-clarification-text {
+  width: 100%;
+  box-sizing: border-box;
+  min-height: 96px;
+  margin-bottom: var(--spacing-3);
+  padding: var(--spacing-3);
+  resize: vertical;
+  border: 1px solid var(--control-border);
+  border-radius: var(--radius-sm);
+  background: var(--control-bg);
+  color: var(--color-text-primary);
+  font: inherit;
+  font-size: var(--font-size-base);
+  line-height: var(--line-height-normal);
+}
+
+.hb-clarification-text:focus-visible {
+  outline: 1px solid var(--control-border-focus);
+}
+
 .hb-clarification-footer {
+  flex-wrap: wrap;
   flex: 0 0 auto;
   display: flex;
   justify-content: flex-end;

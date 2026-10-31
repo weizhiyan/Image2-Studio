@@ -13,6 +13,7 @@ import {
 } from '@/lib/bridge';
 import { notifyChatRolesUpdated } from '@/lib/chatRoles';
 import { ROLE_AVATARS } from '@/lib/roleAvatars';
+import ParameterSlider from '@/components/ParameterSlider';
 import { TrashIcon } from '@/components/canvas/NodeChrome';
 import './ChatRolesSettings.css';
 
@@ -31,6 +32,7 @@ interface RoleDraft {
   avatarDataUrl: string;
   content: string;
   skills: RoleSkill[];
+  temperature: number;
   enabled: boolean;
 }
 
@@ -43,6 +45,7 @@ const emptyDraft = (): RoleDraft => ({
   avatarDataUrl: '',
   content: '',
   skills: [],
+  temperature: 0.6,
   enabled: true,
 });
 
@@ -56,6 +59,7 @@ function draftOfRole(role: PromptSkill): RoleDraft {
     avatarDataUrl: '',
     content: role.content,
     skills: role.skills.map((skill) => ({ ...skill })),
+    temperature: typeof role.temperature === 'number' ? role.temperature : 0.6,
     enabled: true,
   };
 }
@@ -342,6 +346,7 @@ export default function ChatRolesSettings({ onDetailChange }: ChatRolesSettingsP
         avatarUrl,
         content,
         skills: draft.skills,
+        temperature: draft.temperature,
         enabled: true,
       });
       setRoles((current) => [saved, ...current.filter((role) => role.id !== saved.id)].slice(0, MAX_ROLES));
@@ -500,10 +505,26 @@ export default function ChatRolesSettings({ onDetailChange }: ChatRolesSettingsP
                 </div>, document.body
               ) : null}
             </div>
-            <label className="model-config-field chat-role-name-field">
-              <span className="model-config-field-label">角色名称</span>
-              <input className="model-config-input" value={roleDraft.name} maxLength={100} placeholder="例如：创意设计" onChange={(event) => setDraft({ ...roleDraft, name: event.target.value })} />
-            </label>
+            <div className="chat-role-identity-fields">
+              <label className="model-config-field chat-role-name-field">
+                <span className="model-config-field-label">角色名称</span>
+                <input className="model-config-input" value={roleDraft.name} maxLength={100} placeholder="例如：创意设计" onChange={(event) => setDraft({ ...roleDraft, name: event.target.value })} />
+              </label>
+              <div className="model-config-field chat-role-temperature">
+                <span className="model-config-field-label">角色温度</span>
+                <ParameterSlider
+                  ariaLabel="角色温度"
+                  value={Math.round(roleDraft.temperature * 10)}
+                  min={0}
+                  max={10}
+                  valueLabel={roleDraft.temperature.toFixed(1)}
+                  minLabel="稳定"
+                  maxLabel="发散"
+                  scaleInside
+                  onChange={(value) => setDraft({ ...roleDraft, temperature: value / 10 })}
+                />
+              </div>
+            </div>
             <label className="model-config-field">
               <span className="model-config-field-label">简介（可选）</span>
               <input className="model-config-input" value={roleDraft.description} maxLength={400} placeholder="简短介绍这个角色" onChange={(event) => setDraft({ ...roleDraft, description: event.target.value })} />

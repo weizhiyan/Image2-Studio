@@ -304,24 +304,7 @@
 }
 
 .agent-connect-btn.is-connected {
-  border-color: color-mix(in srgb, var(--color-accent-green) 42%, transparent);
-  background: color-mix(in srgb, var(--color-accent-green-subtle) 42%, transparent);
   color: var(--color-accent-green);
-}
-
-.agent-connect-btn-dot {
-  position: absolute;
-  right: 6px;
-  bottom: 5px;
-  width: 6px;
-  height: 6px;
-  border-radius: var(--radius-full);
-  background: var(--color-text-tertiary);
-}
-
-.agent-connect-btn.is-connected .agent-connect-btn-dot {
-  background: var(--color-accent-green);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-accent-green) 18%, transparent);
 }
 
 /* 顶栏 Agent 入口的悬停说明：气泡从按钮内侧向下展开。 */
@@ -364,6 +347,15 @@
 
 @media (prefers-reduced-motion: reduce) {
   .agent-connect-btn::after {
+    transition: none;
+  }
+
+  .workflow-menu,
+  .workflow-menu-list {
+    animation: none;
+  }
+
+  .top-nav-workflow-menu-btn svg {
     transition: none;
   }
 }
@@ -451,12 +443,16 @@
   cursor: pointer;
 }
 
-/* 展开过渡：从切换按钮下方弹出（共享 spring-in，原点钉在控件左上角，缩放不飘） */
+.top-nav-workflow-menu-btn svg {
+  transition: transform var(--motion-fast) var(--ease-out);
+}
+
+.top-nav-workflow-menu-btn.open svg {
+  transform: rotate(180deg);
+}
+
+/* 展开过渡：从切换按钮下方按内容高度展开。 */
 .workflow-menu {
-  --enter-y: -6px;
-  --enter-scale: 0.96;
-  transform-origin: top left;
-  animation: spring-in var(--motion-normal) var(--ease-emphasized);
   position: absolute;
   top: calc(100% + 8px);
   /* 贴控件左边缘展开：画布页这个选择器就在最左侧，
@@ -464,7 +460,8 @@
   left: 0;
   width: 260px;
   max-width: calc(100vw - 24px);
-  transform: none;
+  display: flex;
+  flex-direction: column;
   overflow: hidden;
   padding: var(--spacing-2);
   border-radius: var(--radius-lg);
@@ -474,6 +471,7 @@
   backdrop-filter: var(--surface-popover-glass-blur);
   -webkit-backdrop-filter: var(--surface-popover-glass-blur);
   box-shadow: var(--surface-popover-glass-shadow);
+  animation: fade-in var(--motion-slow) var(--ease-out) both;
 }
 
 .workflow-menu-new, .workflow-menu-item-main {
@@ -516,7 +514,7 @@
 }
 
 .workflow-menu-item {
-  min-height: 38px;
+  min-height: 44px;
   border-radius: var(--radius-xs);
   background: transparent;
   display: flex;
@@ -535,8 +533,8 @@
 .workflow-menu-item-main {
   min-width: 0;
   flex: 1;
-  min-height: 38px;
-  padding: 0 var(--spacing-3);
+  min-height: 44px;
+  padding: var(--spacing-1) var(--spacing-2);
   background: transparent;
   color: var(--color-text-primary);
   text-align: left;
@@ -546,10 +544,30 @@
   white-space: nowrap;
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--spacing-2);
 }
 
-.workflow-menu-item-main span:first-child {
+.workflow-menu-item-thumb {
+  width: 32px;
+  height: 32px;
+  flex: 0 0 32px;
+  overflow: hidden;
+  border-radius: var(--radius-2xs);
+  background: var(--color-ui-control-active);
+}
+
+.workflow-menu-item-thumb img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.workflow-menu-item-thumb.is-empty {
+  box-shadow: inset 0 0 0 1px var(--color-ui-border-subtle);
+}
+
+.workflow-menu-item-name {
   min-width: 0;
   flex: 1;
   overflow: hidden;
@@ -561,21 +579,7 @@
   cursor: default;
 }
 
-/* 行内重命名输入框：接管这一行的主按钮位置 */
-.workflow-menu-item-input {
-  flex: 1;
-  min-width: 0;
-  height: 38px;
-  padding: 0 var(--spacing-3);
-  border: none;
-  outline: none;
-  background: transparent;
-  color: var(--color-text-primary);
-  font-family: var(--font-sans);
-  font-size: var(--font-size-sm);
-}
-
-/* 重命名 / 删除：只有悬停（或键盘 focus 在这一行）时才浮出，平时只留画布名 */
+/* 删除：只有悬停（或键盘 focus 在这一行）时才浮出，平时只留缩略图和画布名 */
 .workflow-menu-item-actions {
   display: flex;
   align-items: center;
@@ -591,7 +595,6 @@
   opacity: 1;
 }
 
-.workflow-menu-edit,
 .workflow-menu-delete {
   width: 28px;
   height: 28px;
@@ -606,13 +609,11 @@
   transition: color var(--motion-fast) var(--ease-out), background var(--motion-fast) var(--ease-out);
 }
 
-.workflow-menu-edit:hover,
 .workflow-menu-delete:hover {
   background: var(--color-ui-control-active);
   color: var(--color-text-primary);
 }
 
-.workflow-menu-edit svg,
 .workflow-menu-delete svg {
   width: 15px;
   height: 15px;
@@ -625,9 +626,10 @@
   display: grid;
   place-items: center;
   padding: var(--spacing-6);
-  background: var(--surface-popover-glass-bg);
-  backdrop-filter: var(--surface-popover-glass-blur);
-  -webkit-backdrop-filter: var(--surface-popover-glass-blur);
+  /* 与 Agent / 模型设置弹窗共用同一层遮罩。 */
+  background: var(--dialog-scrim);
+  backdrop-filter: var(--surface-modal-backdrop-blur);
+  -webkit-backdrop-filter: var(--surface-modal-backdrop-blur);
 }
 
 .canvas-delete-confirm {

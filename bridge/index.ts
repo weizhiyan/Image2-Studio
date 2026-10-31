@@ -1,6 +1,7 @@
 import fs from 'node:fs';
-import { DATA_DIR, MEDIA_DIR } from './paths.js';
+import { DATA_DIR, MEDIA_DIR, PORT } from './paths.js';
 import { listenHttpServer } from './http.js';
+import { setBroadcastForwardBase } from './hub.js';
 import { createMcpServer } from './mcp.js';
 import { reconcileLostRuns } from './runs.js';
 import { startVideoPoller } from './videoTasks.js';
@@ -54,10 +55,12 @@ async function main(): Promise<void> {
   fs.mkdirSync(MEDIA_DIR, { recursive: true });
 
   const ownsPort = await listenHttpServer();
+  // MCP stdio 进程拿不到端口时，本进程的 clients 是空的：推图 / 定位转发给真正的 HTTP 进程
+  if (!ownsPort) setBroadcastForwardBase(`http://127.0.0.1:${PORT}`);
 
   // bridge 重启后内存里的 run 全丢了：把上次未结束的消息标记成「运行状态未知」，
   // 不伪装成完成（方案 §17）
-  await reconcileLostRuns();
+  if (ownsPort) await reconcileLostRuns();
 
   // 视频是长任务：重启后接着轮询上次没出结果的那些。
   // 只有绑住端口的那个进程跑——MCP stdio 进程起来时端口常被占用，它也跑就会重复查询。

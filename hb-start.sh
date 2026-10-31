@@ -61,7 +61,7 @@ print('bridge pid', bridge.pid, flush=True)
 with open(w, 'wb', 0):
     signal.pause()
 PY
-  wait_http "http://127.0.0.1:$BRIDGE_PORT/api/canvases" bridge 15
+  wait_http "http://127.0.0.1:$BRIDGE_PORT/api/health" bridge 15
 }
 
 start_vite() {
@@ -78,7 +78,15 @@ log.close()
 open('/tmp/huiban-vite.pid', 'w').write(str(vite.pid))
 print('vite pid', vite.pid, flush=True)
 PY
-  wait_http "http://127.0.0.1:$VITE_PORT/" vite 30
+  if ! wait_http "http://127.0.0.1:$VITE_PORT/" vite 30; then
+    return 1
+  fi
+  local pid
+  pid=$(cat /tmp/huiban-vite.pid 2>/dev/null)
+  if [[ -z "$pid" ]] || ! kill -0 "$pid" 2>/dev/null; then
+    print "✗ vite 启动进程已退出，可能是端口 $VITE_PORT 被其他程序占用"
+    return 1
+  fi
 }
 
 wait_http() {
@@ -98,8 +106,8 @@ status_all() {
   local ok=0
   curl -fs -o /dev/null --max-time 2 "http://127.0.0.1:$VITE_PORT/" 2>/dev/null \
     && print "✓ vite    http://127.0.0.1:$VITE_PORT/" || { print "✗ vite    http://127.0.0.1:$VITE_PORT/"; ok=1; }
-  curl -fs -o /dev/null --max-time 2 "http://127.0.0.1:$BRIDGE_PORT/api/canvases" 2>/dev/null \
-    && print "✓ bridge  http://127.0.0.1:$BRIDGE_PORT/api/canvases" || { print "✗ bridge  http://127.0.0.1:$BRIDGE_PORT/api/canvases"; ok=1; }
+  curl -fs -o /dev/null --max-time 2 "http://127.0.0.1:$BRIDGE_PORT/api/health" 2>/dev/null \
+    && print "✓ bridge  http://127.0.0.1:$BRIDGE_PORT/api/health" || { print "✗ bridge  http://127.0.0.1:$BRIDGE_PORT/api/health"; ok=1; }
   return $ok
 }
 
@@ -125,14 +133,14 @@ fi
 print "→ 清理存量实例（单例：只留最新这一份）"
 stop_all
 print "→ 启动 bridge（3788）与 vite（5199）"
-rc=0
-start_bridge || rc=1
-start_vite || rc=1
-if [[ $rc -eq 0 ]]; then
-  print ""
-  print "绘板已启动：浏览器打开 http://127.0.0.1:5199/"
-else
-  print ""
-  print "有服务没起来，看日志：$LOG/huiban.log / $LOG/vite-5199.log"
+if ! start_bridge; then
+  print "✗ 后台未就绪，因此没有启动前端。请先查看后台日志后重试。"
+  print "日志：$LOG/huiban.log / $LOG/hb-start.log"
+  exit 1
 fi
-exit $rc
+if ! start_vite; then
+  print "✗ 前端启动失败。请查看日志：$LOG/vite-5199.log"
+  exit 1
+fi
+print ""
+print "绘板已启动：浏览器打开 http://127.0.0.1:5199/"

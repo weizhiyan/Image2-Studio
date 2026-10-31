@@ -3,7 +3,7 @@
  * 启动合并按 updatedAt 取新的一侧、删除线程不碰画布节点。
  * 图片本体在画布节点上，这里只存引用。
  */
-import { beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { activeThreadOf, allThreads, normalizeLocalThread, useChatStore } from '@/stores/chatStore';
 import type { ChatThread } from '@/types';
 
@@ -17,13 +17,21 @@ const emptyState = {
   draftAttachments: [],
   draftBase: null,
   activeRun: null,
+  runEventCursors: {},
   unread: false,
   messageScrollTop: 0,
 };
 
 beforeEach(() => {
   useChatStore.setState(emptyState);
+  vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+    const id = decodeURIComponent(url.split('/')[4] || '');
+    const current = useChatStore.getState().threads.find((item) => item.id === id);
+    return new Response(JSON.stringify({ data: current ? { ...current, messages: [], generation: (current.generation || 0) + 1 } : {} }), { status: 200 });
+  }));
 });
+
+afterEach(() => vi.unstubAllGlobals());
 
 describe('chatStore 线程与消息', () => {
   it('首条消息建线程并按内容起标题', () => {
@@ -55,9 +63,9 @@ describe('chatStore 线程与消息', () => {
     expect(useChatStore.getState().threads[0]).toBe(before);
   });
 
-  it('clearThread 清空消息但留线程；deleteThread 整条删', () => {
+  it('clearThread 清空消息但留线程；deleteThread 整条删', async () => {
     useChatStore.getState().appendMessage('thread-1', { role: 'user', content: 'x' });
-    useChatStore.getState().clearThread('thread-1');
+    await useChatStore.getState().clearThread('thread-1');
     expect(useChatStore.getState().threads[0].messages).toHaveLength(0);
     useChatStore.setState({
       activeThreadId: 'thread-1',
@@ -66,7 +74,7 @@ describe('chatStore 线程与消息', () => {
       draftBase: { canvasId: 'canvas-1', nodeId: 'n1', versionId: 'v1', url: '/api/files/a.png' },
       messageScrollTop: 120,
     });
-    useChatStore.getState().deleteThread('thread-1');
+    await useChatStore.getState().deleteThread('thread-1');
     expect(useChatStore.getState().threads).toHaveLength(0);
     expect(useChatStore.getState().draft).toBe('');
     expect(useChatStore.getState().draftAttachments).toHaveLength(0);
@@ -74,11 +82,11 @@ describe('chatStore 线程与消息', () => {
     expect(useChatStore.getState().messageScrollTop).toBe(0);
   });
 
-  it('删当前线程后落到最近更新的线程', () => {
+  it('删当前线程后落到最近更新的线程', async () => {
     useChatStore.getState().appendMessage('thread-a', { role: 'user', content: 'a' });
     useChatStore.getState().appendMessage('thread-b', { role: 'user', content: 'b' });
     useChatStore.setState({ activeThreadId: 'thread-a' });
-    useChatStore.getState().deleteThread('thread-a');
+    await useChatStore.getState().deleteThread('thread-a');
     expect(useChatStore.getState().activeThreadId).toBe('thread-b');
   });
 
@@ -88,6 +96,88 @@ describe('chatStore 线程与消息', () => {
     expect(useChatStore.getState().threads[0].title).toBe('咖啡杯迭代');
     useChatStore.getState().renameThread('thread-1', '   ');
     expect(useChatStore.getState().threads[0].title).toBe('咖啡杯迭代');
+  });
+});
+
+describe('chatStore 语言模型选择', () => {
+  it('新对话继承当前线程的语言模型，显式指定优先', () => {
+    const first = useChatStore.getState().createThread('canvas-1', {
+      textProfileId: 'text-a',
+      textModel: 'model-a',
+      imageProfileId: 'img-a',
+      imageModel: 'image-a',
+    });
+    useChatStore.getState().appendMessage(first, { role: 'user', content: 'hi' });
+
+    const inherited = useChatStore.getState().createThread('canvas-1');
+    const inheritedThread = useChatStore.getState().threads.find((item) => item.id === inherited);
+    expect(inheritedThread).toMatchObject({
+      textProfileId: 'text-a',
+      textModel: 'model-a',
+      imageProfileId: 'img-a',
+      imageModel: 'image-a',
+    });
+
+    const explicit = useChatStore.getState().createThread('canvas-1', { textProfileId: 'text-b', textModel: 'model-b' });
+    expect(useChatStore.getState().threads.find((item) => item.id === explicit)).toMatchObject({
+      textProfileId: 'text-b',
+      textModel: 'model-b',
+    });
+  });
+
+  it('未开始对话可以切换语言模型，开始后锁定', () => {
+    const id = useChatStore.getState().createThread('canvas-1', { textProfileId: 'text-a', textModel: 'model-a' });
+    expect(useChatStore.getState().setThreadTextProfile(id, 'text-b', 'model-b')).toBe(true);
+    expect(useChatStore.getState().threads.find((item) => item.id === id)).toMatchObject({
+      textProfileId: 'text-b',
+      textModel: 'model-b',
+    });
+
+    useChatStore.getState().appendMessage(id, { role: 'user', content: 'hi' });
+    expect(useChatStore.getState().setThreadTextProfile(id, 'text-a', 'model-a')).toBe(false);
+    expect(useChatStore.getState().threads.find((item) => item.id === id)).toMatchObject({
+      textProfileId: 'text-b',
+      textModel: 'model-b',
+    });
+  });
+
+  it('Agent 生图模型开始对话后仍可切换', () => {
+    const id = useChatStore.getState().createThread('canvas-1', { imageProfileId: 'img-a', imageModel: 'image-a' });
+    useChatStore.getState().appendMessage(id, { role: 'user', content: 'hi' });
+
+    expect(useChatStore.getState().setThreadImageModel(id, 'img-b', 'image-b')).toBe(true);
+    expect(useChatStore.getState().threads.find((item) => item.id === id)).toMatchObject({
+      imageProfileId: 'img-b',
+      imageModel: 'image-b',
+    });
+  });
+
+  it('首条用户消息把选择的语言模型和生图模型写入线程', () => {
+    useChatStore.getState().appendMessage('thread-new', {
+      role: 'user',
+      content: 'hi',
+      modelSelection: { textProfileId: 'text-c', textModel: 'model-c', imageProfileId: 'img-c', imageModel: 'image-c' },
+    });
+
+    expect(useChatStore.getState().threads[0]).toMatchObject({
+      textProfileId: 'text-c',
+      textModel: 'model-c',
+      imageProfileId: 'img-c',
+      imageModel: 'image-c',
+    });
+  });
+
+  it('旧线程还没有语言模型时，用下一条用户消息补上并锁定', () => {
+    useChatStore.getState().appendMessage('thread-legacy', { role: 'user', content: '旧消息' });
+    useChatStore.getState().appendMessage('thread-legacy', {
+      role: 'user',
+      content: '新消息',
+      modelSelection: { textProfileId: 'text-d' },
+    });
+
+    const thread = useChatStore.getState().threads[0];
+    expect(thread.textProfileId).toBe('text-d');
+    expect(useChatStore.getState().setThreadTextProfile(thread.id, 'text-a')).toBe(false);
   });
 });
 
@@ -121,6 +211,44 @@ describe('chatStore 全局线程', () => {
     useChatStore.setState({ activeThreadId: '' });
     store.setActiveCanvas('canvas-current');
     expect(useChatStore.getState().activeThreadId).toBe(latestThread);
+  });
+
+  it('activeThreadId 为空时，画布 id 未变也要补选最近线程', () => {
+    const store = useChatStore.getState();
+    const oldThread = store.createThread('canvas-1');
+    store.appendMessage(oldThread, { role: 'user', content: '旧对话' });
+    const latestThread = store.createThread('canvas-1');
+    store.appendMessage(latestThread, { role: 'user', content: '最新对话' });
+    useChatStore.setState({ activeThreadId: '', activeCanvasId: 'canvas-1' });
+    store.setActiveCanvas('canvas-1');
+    expect(useChatStore.getState().activeThreadId).toBe(latestThread);
+  });
+
+  it('本地为空时，远端合并后自动选中最近线程', () => {
+    useChatStore.setState({ threads: [], activeThreadId: '', activeCanvasId: 'canvas-1' });
+    useChatStore.getState().mergeRemoteThreads([
+      {
+        id: 'thread-old', canvasId: 'canvas-1', title: '旧', messages: [],
+        createdAt: '2026-10-01T00:00:00.000Z', updatedAt: '2026-10-01T00:00:00.000Z',
+      },
+      {
+        id: 'thread-latest', canvasId: 'canvas-1', title: '新', messages: [],
+        createdAt: '2026-10-02T00:00:00.000Z', updatedAt: '2026-10-02T00:00:00.000Z',
+      },
+    ]);
+    expect(useChatStore.getState().activeThreadId).toBe('thread-latest');
+  });
+
+  it('远端合并不切换已经选中的线程', () => {
+    const store = useChatStore.getState();
+    const current = store.createThread('canvas-1');
+    store.appendMessage(current, { role: 'user', content: '当前' });
+    store.switchThread(current);
+    store.mergeRemoteThreads([{
+      id: 'thread-newer', canvasId: 'canvas-1', title: '更新的', messages: [],
+      createdAt: '2026-10-03T00:00:00.000Z', updatedAt: '2026-10-03T00:00:00.000Z',
+    }]);
+    expect(useChatStore.getState().activeThreadId).toBe(current);
   });
 
   it('切换画布不切换当前线程', () => {
@@ -185,7 +313,7 @@ describe('chatStore 全局线程', () => {
     expect(useChatStore.getState().draftBase).toBeNull();
   });
 
-  it('角色选择不跨线程：新建、切换和删除当前线程都恢复通用', () => {
+  it('角色选择不跨线程：新建、切换和删除当前线程都恢复通用', async () => {
     const store = useChatStore.getState();
     const first = store.createThread('canvas-1');
     store.setActiveRole('role-a');
@@ -199,18 +327,18 @@ describe('chatStore 全局线程', () => {
     expect(useChatStore.getState().activeRoleId).toBe('');
 
     store.setActiveRole('role-c');
-    store.deleteThread(first);
+    await store.deleteThread(first);
     expect(useChatStore.getState().activeRoleId).toBe('');
     expect(useChatStore.getState().activeThreadId).toBe(second);
   });
 
-  it('删除其他线程不改变当前角色', () => {
+  it('删除其他线程不改变当前角色', async () => {
     const store = useChatStore.getState();
     const current = store.createThread('canvas-1');
     const other = store.createThread('canvas-2');
     store.switchThread(current);
     store.setActiveRole('role-a');
-    store.deleteThread(other);
+    await store.deleteThread(other);
     expect(useChatStore.getState().activeRoleId).toBe('role-a');
   });
 });
@@ -298,7 +426,7 @@ describe('chatStore 启动合并', () => {
     expect(useChatStore.getState().threads[0].messages[0].content).toBe('远端新');
   });
 
-  it('本地更新不被远端旧快照冲掉', () => {
+  it('服务端权威消息与本地未发送消息都保留，不按浏览器时间抢占', () => {
     useChatStore.getState().appendMessage('t-1', { role: 'user', content: '本地新' });
     useChatStore.getState().mergeRemoteThreads([
       {
@@ -308,7 +436,7 @@ describe('chatStore 启动合并', () => {
         updatedAt: '2026-01-01T00:00:00.000Z',
       },
     ]);
-    expect(useChatStore.getState().threads[0].messages[0].content).toBe('本地新');
+    expect(useChatStore.getState().threads[0].messages.map((message) => message.content)).toEqual(['远端旧', '本地新']);
   });
 
   it('空数组是空操作', () => {
@@ -316,5 +444,39 @@ describe('chatStore 启动合并', () => {
     const before = useChatStore.getState().threads;
     useChatStore.getState().mergeRemoteThreads([]);
     expect(useChatStore.getState().threads).toBe(before);
+  });
+});
+
+describe('chatStore 被拒请求清理', () => {
+  it('只移除本次 request 未被 run 接管的本地占位', () => {
+    const store = useChatStore.getState();
+    const rejectedUser = store.appendMessage('t-1', { role: 'user', content: '被拒', requestId: 'req-rejected' });
+    const rejectedAssistant = store.appendMessage('t-1', { role: 'assistant', content: '', status: 'running', requestId: 'req-rejected' });
+    const acceptedUser = store.appendMessage('t-1', { role: 'user', content: '已接管', requestId: 'req-accepted' });
+    const acceptedAssistant = store.appendMessage('t-1', { role: 'assistant', content: '', requestId: 'req-accepted', runId: 'run-1' });
+    store.discardRequest('t-1', 'req-rejected');
+    const ids = useChatStore.getState().threads[0].messages.map((message) => message.id);
+    expect(ids).toEqual([acceptedUser, acceptedAssistant]);
+    expect(ids).not.toContain(rejectedUser);
+    expect(ids).not.toContain(rejectedAssistant);
+  });
+
+  it('被拒请求不会以“未发送消息”形式在权威线程里复活', () => {
+    const store = useChatStore.getState();
+    const rejected = store.appendMessage('t-1', { role: 'user', content: '被拒待发', requestId: 'req-rejected' });
+    const plainDraft = store.appendMessage('t-1', { role: 'user', content: '纯本地待发' });
+    store.mergeRemoteThreads([
+      {
+        id: 't-1', canvasId: 'canvas-1', title: '远端', revision: 3,
+        messages: [{ id: 'm1', role: 'user', content: '远端', createdAt: '2026-10-13T10:00:00.000Z' }],
+        createdAt: '2026-10-13T10:00:00.000Z',
+        updatedAt: '2026-10-13T10:00:00.000Z',
+      },
+    ]);
+    const contents = useChatStore.getState().threads[0].messages.map((message) => message.content);
+    expect(contents).toEqual(['远端', '纯本地待发']);
+    expect(contents).not.toContain('被拒待发');
+    expect(useChatStore.getState().threads[0].messages.some((message) => message.id === rejected)).toBe(false);
+    expect(useChatStore.getState().threads[0].messages.some((message) => message.id === plainDraft)).toBe(true);
   });
 });

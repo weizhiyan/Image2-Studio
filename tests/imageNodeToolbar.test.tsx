@@ -71,7 +71,6 @@ describe('图片节点工具栏', () => {
         onRegenerate={() => undefined}
         onAnnotate={() => undefined}
         onOutpaint={() => undefined}
-        copyPrompt="一只白色纸船"
         onDelete={() => undefined}
       />,
     );
@@ -87,37 +86,19 @@ describe('图片节点工具栏', () => {
     expect(html).toContain('删除节点（可撤销）');
   });
 
-  it('只有传入提示词时才显示复制入口，空白提示词也不显示', () => {
-    const withoutPrompt = renderToStaticMarkup(
+  it('提示词复制入口已收进节点标题，工具栏不再重复提供', () => {
+    const html = renderToStaticMarkup(
       <NodeSelectionToolbar
         showPreview
-        showRedit={false}
+        showRedit
         onPreview={() => undefined}
         onRedit={() => undefined}
-      />,
-    );
-    const blankPrompt = renderToStaticMarkup(
-      <NodeSelectionToolbar
-        showPreview
-        showRedit={false}
-        onPreview={() => undefined}
-        onRedit={() => undefined}
-        copyPrompt="   "
-      />,
-    );
-    const withPrompt = renderToStaticMarkup(
-      <NodeSelectionToolbar
-        showPreview
-        showRedit={false}
-        onPreview={() => undefined}
-        onRedit={() => undefined}
-        copyPrompt="一只白色纸船"
+        onRegenerate={() => undefined}
+        onDelete={() => undefined}
       />,
     );
 
-    expect(withoutPrompt).not.toContain('aria-label="复制提示词"');
-    expect(blankPrompt).not.toContain('aria-label="复制提示词"');
-    expect(withPrompt).toContain('aria-label="复制提示词"');
+    expect(html).not.toContain('aria-label="复制提示词"');
   });
 
   it('删除入口只由页面传入的回调决定', () => {
@@ -143,13 +124,12 @@ describe('图片节点工具栏', () => {
     expect(withDelete).toContain('aria-label="删除节点"');
   });
 
-  it('CanvasPage 仅给 AI 图片传当前版本提示词，删除只接到图片与参考图', () => {
+  it('CanvasPage 不再向工具栏传提示词，删除只接到图片与参考图', () => {
     const toolbarStart = CANVAS_PAGE_SOURCE.indexOf('<NodeSelectionToolbar');
     const toolbarEnd = CANVAS_PAGE_SOURCE.indexOf('/>', toolbarStart);
     const toolbar = CANVAS_PAGE_SOURCE.slice(toolbarStart, toolbarEnd);
 
-    expect(toolbar).toContain("copyPrompt={selectedImageNode.data.kind === 'image'");
-    expect(toolbar).toContain('activePromptOf(selectedImageNode.data)');
+    expect(toolbar).not.toContain('copyPrompt=');
     expect(toolbar).toContain(
       "onDelete={selectedImageNode.data.kind === 'image' || selectedImageNode.data.kind === 'reference'",
     );
@@ -215,7 +195,7 @@ describe('图片节点标题', () => {
     });
 
     expect(html).toContain('class="image-node-kind-label"');
-    expect(html).toContain('<span>图片</span>');
+    expect(html).toContain('<span class="image-node-kind-text">图片</span>');
   });
 });
 

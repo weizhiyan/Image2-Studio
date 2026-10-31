@@ -17,6 +17,7 @@ export function chatRoleSnapshotOf(role: PromptSkill): ChatRoleSnapshot {
     ...(role.avatarUrl ? { avatarUrl: role.avatarUrl } : {}),
     ...(role.category ? { category: role.category } : {}),
     systemPrompt: role.content,
+    ...(typeof role.temperature === 'number' ? { temperature: role.temperature } : {}),
     skills: role.skills.map((skill) => ({
       id: skill.id,
       name: skill.name,

@@ -1,11 +1,23 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { activeThreadOf, useChatStore } from '@/stores/chatStore';
-import type { ChatAskResponseSummary, ChatImageRef, ChatMessage, ChatToolCall } from '@/types';
+import type { ChatAskResponseSummary, ChatMessage, ChatToolCall } from '@/types';
 import { chatInlineSegments } from '@/lib/chatInlineRefs';
-import { extractVideoScript } from '@/lib/videoPrompt';
+import { parseSizeRatioOrZero } from '@/lib/aspect';
 import { CopyGlyphIcon, CopySuccessGlyphIcon, FoldGlyphIcon, IdGlyphIcon, LocateGlyphIcon, RetryGlyphIcon } from './ChatIcons';
-import { AiGlyphIcon, VideoGlyphIcon } from '@/components/canvas/NodeToolbarIcons';
+import { RoleAvatar } from './ChatRoleStack';
+import { AiGlyphIcon } from '@/components/canvas/NodeToolbarIcons';
 import './ChatPanel.css';
+
+const SINGLE_MEDIA_MAX = 240;
+const GRID_MEDIA_MAX = 136;
+
+/** 聊天结果图使用固定上限，容器按生成尺寸比例收缩，不跟随对话面板宽度拉伸。 */
+function mediaBox(size: string, maxDimension: number): { width: number; height: number } {
+  const ratio = parseSizeRatioOrZero(size) || 1;
+  return ratio >= 1
+    ? { width: maxDimension, height: Math.round(maxDimension / ratio) }
+    : { width: Math.round(maxDimension * ratio), height: maxDimension };
+}
 
 /* ── 基础 Markdown（段落 / 列表 / 引用 / 代码块 / 行内代码与加粗）── */
 
@@ -371,6 +383,9 @@ function UserMessageContent({
               >
                 <img src={segment.reference.url || ''} alt="" />
                 <span>{segment.reference.title || '图片'}</span>
+                <span className="hb-chat-msg-inline-ref-preview" aria-hidden="true">
+                  <img src={segment.reference.url || ''} alt="" />
+                </span>
               </button>
             ))
             : message.content}
@@ -413,13 +428,11 @@ function MessageRow({
   onLocate,
   onPreview,
   onRetry,
-  onApplyVideoScript,
 }: {
   message: ChatMessage;
   onLocate: (ref: { canvasId: string; nodeId: string; versionId?: string; force?: boolean }) => void;
   onPreview: (url: string, title: string) => void;
   onRetry: (messageId: string) => void;
-  onApplyVideoScript?: (prompt: string, references?: ChatImageRef[]) => void;
 }) {
   const thread = useChatStore(activeThreadOf);
   const [copied, copyText] = useCopyFeedback();
@@ -428,9 +441,10 @@ function MessageRow({
   const displayContent = message.role === 'assistant' ? assistantDisplayContent(message) : message.content;
   const messageIndex = thread?.messages.findIndex((item) => item.id === message.id) ?? -1;
   const priorUserMessage = messageIndex > 0
-    ? thread?.messages.slice(0, messageIndex).reverse().find((item) => item.role === 'user')
+    ? thread?.messages.slice(0, messageIndex).reverse().find((item) => item.role === 'user' && !item.askResponse)
     : undefined;
-  const videoReferences = priorUserMessage?.attachments || [];
+  // New messages carry their own run snapshot; old history may use its original user.
+  const roleBadge = message.agentRole || priorUserMessage?.agentRole || null;
 
   if (message.role === 'user') {
     return (
@@ -467,6 +481,7 @@ function MessageRow({
   const label = contextLabel(message.context);
   const canRetry = message.status === 'error' || message.status === 'stopped' || message.status === 'unknown';
   const hasRunningToolCall = (message.toolCalls || []).some((call) => call.status === 'running');
+  const singleMedia = message.media?.length === 1;
   return (
     <div className="hb-chat-msg hb-chat-msg-assistant">
       {message.status === 'awaiting_input' && !displayContent ? (
@@ -483,14 +498,26 @@ function MessageRow({
           <em>正在思考…</em>
         </div>
       ) : null}
+      {message.reasoning ? (
+        <details className="hb-chat-reasoning" open>
+          <summary>思考过程</summary>
+          <div className="hb-chat-reasoning-body">{message.reasoning}</div>
+        </details>
+      ) : null}
       {displayContent ? <MarkdownText text={displayContent} /> : null}
       {message.toolCalls?.map((call) => (
         <ToolCallCard key={call.id} call={call} onRetry={canRetry ? () => onRetry(message.id) : undefined} />
       ))}
       {message.media && message.media.length > 0 ? (
-        <div className={`hb-chat-media ${message.media.length === 1 ? 'is-single' : ''}`} aria-label="生成图片">
-          {message.media.map((item, index) => (
-            <div className="hb-chat-media-cell" key={`${item.versionId}-${index}`}>
+        <div className={`hb-chat-media ${singleMedia ? 'is-single' : ''}`} aria-label="生成图片">
+          {message.media.map((item, index) => {
+            const box = mediaBox(item.size, singleMedia ? SINGLE_MEDIA_MAX : GRID_MEDIA_MAX);
+            return (
+            <div
+              className="hb-chat-media-cell"
+              key={`${item.versionId}-${index}`}
+              style={{ width: box.width, height: box.height }}
+            >
               <img
                 src={item.url}
                 alt={item.prompt || '生成结果'}
@@ -509,7 +536,8 @@ function MessageRow({
                 </button>
               </div>
             </div>
-          ))}
+            );
+          })}
         </div>
       ) : null}
       {message.status === 'stopped' ? <div className="hb-chat-stopped">已停止，结果未继续生成</div> : null}
@@ -531,6 +559,21 @@ function MessageRow({
       ) : null}
       {label ? <div className="hb-chat-context">{label}</div> : null}
       <div className={`hb-chat-text-actions ${displayContent ? '' : 'hb-chat-text-actions-idle'}`}>
+        {roleBadge ? (
+          <span
+            className="hb-chat-msg-role"
+            title={roleBadge.name}
+            aria-label={`本轮角色：${roleBadge.name}`}
+          >
+            <RoleAvatar
+              role={{
+                name: roleBadge.name,
+                avatarUrl: roleBadge.avatarUrl || '',
+              }}
+            />
+            <span className="hb-chat-msg-role-name">{roleBadge.name}</span>
+          </span>
+        ) : null}
         <button
           type="button"
           title={copiedId ? '消息 ID 已复制' : '复制消息 ID'}
@@ -549,18 +592,6 @@ function MessageRow({
             {copied ? <CopySuccessGlyphIcon /> : <CopyGlyphIcon />}
           </button>
         ) : null}
-          {displayContent ? (
-            <button
-              type="button"
-              className="hb-chat-video-script-action"
-              title="把这段回复放进视频节点"
-              aria-label="把这段回复放进视频节点"
-              onClick={() => onApplyVideoScript?.(extractVideoScript(displayContent), videoReferences)}
-            >
-              <VideoGlyphIcon />
-              <span>应用为视频节点</span>
-            </button>
-          ) : null}
       </div>
     </div>
   );
@@ -571,12 +602,10 @@ export default function ChatMessageList({
   onLocate,
   onPreview,
   onRetry,
-  onApplyVideoScript,
 }: {
   onLocate: (ref: { canvasId: string; nodeId: string; versionId?: string; force?: boolean }) => void;
   onPreview: (url: string, title: string) => void;
   onRetry: (messageId: string) => void;
-  onApplyVideoScript?: (prompt: string, references?: ChatImageRef[]) => void;
 }) {
   const thread = useChatStore(activeThreadOf);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -641,7 +670,6 @@ export default function ChatMessageList({
           onLocate={onLocate}
           onPreview={onPreview}
           onRetry={onRetry}
-          onApplyVideoScript={onApplyVideoScript}
         />
       ))}
     </div>

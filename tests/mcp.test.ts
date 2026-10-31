@@ -269,6 +269,23 @@ describe('MCP 工具面', () => {
     expect(push.mock.calls[0][0]).toMatchObject({ type: 'locate', canvasId: 'c1', nodeId: 'n1' });
   });
 
+  it('huiban_locate 等待转发确认；失败时不虚报 delivered', async () => {
+    let confirm!: () => void;
+    const deps = makeDeps({
+      readCanvasDoc: vi.fn(async () => ({ name: '画布', edges: [], nodes: [{ id: 'n1' }] })) as unknown as McpDeps['readCanvasDoc'],
+      pushLocate: vi.fn(() => new Promise<void>((resolve) => { confirm = resolve; })) as unknown as McpDeps['pushLocate'],
+    });
+    let settled = false;
+    const pending = callMcpTool('huiban_locate', { canvasId: 'c1', nodeId: 'n1' }, deps).then((result) => { settled = true; return result; });
+    await vi.waitFor(() => expect(deps.pushLocate).toHaveBeenCalled());
+    const beforeConfirmation = settled;
+    confirm();
+    await pending;
+    expect(beforeConfirmation).toBe(false);
+    deps.pushLocate = vi.fn(async () => { throw new Error('relay failed'); }) as unknown as McpDeps['pushLocate'];
+    await expect(callMcpTool('huiban_locate', { canvasId: 'c1', nodeId: 'n1' }, deps)).rejects.toThrow(/relay failed/);
+  });
+
   it('huiban_locate 省略 nodeId 时定位画布上最新的节点', async () => {
     const deps = makeDeps({
       readCanvasDoc: vi.fn(async () => ({
@@ -384,6 +401,37 @@ describe('huiban_generate', () => {
     expect(nodes[1].data.label).toContain('2/3');
     expect(payload.images).toHaveLength(3);
     expect(deps.pushImage).toHaveBeenCalledTimes(3);
+  });
+
+  it('推图或自动定位失败如实返回 deliveryError，不虚报实时送达', async () => {
+    for (const failedPush of ['pushImage', 'pushLocate'] as const) {
+      const deps = makeDeps({
+        [failedPush]: vi.fn(async () => { throw new Error(`${failedPush} relay failed`); }),
+      });
+      const payload = textOf(await callMcpTool('huiban_generate', { prompt: '猫', canvasId: 'c1' }, deps));
+      expect(payload.persistedToDoc).toBe(true);
+      expect(payload.deliveredToCanvas).toBe(false);
+      expect(payload.autoLocate).toBe(false);
+      expect(payload.deliveryError).toContain('relay failed');
+      expect(payload.persistError).toBeUndefined();
+      expect(payload.hints.join('')).toContain('实时通知失败');
+    }
+  });
+
+  it('生成结果等待推图确认后才发定位和返回', async () => {
+    let confirm!: () => void;
+    const deps = makeDeps({
+      pushImage: vi.fn(() => new Promise<void>((resolve) => { confirm = resolve; })) as unknown as McpDeps['pushImage'],
+    });
+    let settled = false;
+    const pending = callMcpTool('huiban_generate', { prompt: '猫', canvasId: 'c1' }, deps).then((result) => { settled = true; return result; });
+    await vi.waitFor(() => expect(deps.pushImage).toHaveBeenCalled());
+    const beforeConfirmation = settled;
+    const locateBeforeConfirmation = (deps.pushLocate as ReturnType<typeof vi.fn>).mock.calls.length;
+    confirm();
+    await pending;
+    expect(beforeConfirmation).toBe(false);
+    expect(locateBeforeConfirmation).toBe(0);
   });
 
   it('ratio 映射成尺寸，非法比例报错', async () => {

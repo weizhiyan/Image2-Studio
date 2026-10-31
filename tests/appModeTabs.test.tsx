@@ -18,17 +18,24 @@ const WORKBENCH_SOURCE = readFileSync(
 );
 
 describe('AppModeTabs', () => {
-  it('在画布与工作台模式之间切换，并标记当前页面', () => {
+  it('用品牌 logo 打开另一工作模式的切换项', () => {
     const canvas = renderToStaticMarkup(<AppModeTabs mode="canvas" />);
     expect(canvas).toContain('aria-label="工作模式"');
-    expect(canvas).toContain('href="/"');
+    expect(canvas).toContain('src="/logo.png"');
+    expect(canvas).toContain('width="44"');
+    expect(canvas).toContain('height="44"');
+    expect(canvas).toContain('aria-label="当前为无限画布，切换工作模式"');
+    expect(canvas).toContain('aria-haspopup="menu"');
+    expect(canvas).toContain('aria-expanded="false"');
     expect(canvas).toContain('href="/workbench"');
-    expect(canvas).toMatch(/href="\/"[^>]*aria-current="page"[^>]*>无限画布<\/a>/);
-    expect(canvas).not.toMatch(/href="\/workbench"[^>]*aria-current="page"/);
+    expect(canvas).toContain('切换到工作台');
+    expect(canvas).not.toContain('href="/"');
 
     const workbench = renderToStaticMarkup(<AppModeTabs mode="workbench" />);
-    expect(workbench).toMatch(/href="\/workbench"[^>]*aria-current="page"[^>]*>工作台<\/a>/);
-    expect(workbench).not.toMatch(/href="\/"[^>]*aria-current="page"/);
+    expect(workbench).toContain('aria-label="当前为工作台，切换工作模式"');
+    expect(workbench).toContain('href="/"');
+    expect(workbench).toContain('切换到无限画布');
+    expect(workbench).not.toContain('href="/workbench"');
   });
 
   it('接入画布顶栏和工作台头部', () => {
@@ -38,9 +45,9 @@ describe('AppModeTabs', () => {
       .toBeLessThan(TOP_BAR_SOURCE.indexOf('<div className="top-nav-workflow-wrap"'));
     expect(WORKBENCH_SOURCE).toContain('<header className="workbench-header hb-topbar">');
     expect(WORKBENCH_SOURCE.indexOf('<AppModeTabs mode="workbench" />'))
+      .toBeLessThan(WORKBENCH_SOURCE.indexOf('<span className="workbench-brand-title">绘板工作台</span>'));
+    expect(WORKBENCH_SOURCE.indexOf('<span className="workbench-brand-title">绘板工作台</span>'))
       .toBeLessThan(WORKBENCH_SOURCE.indexOf('<div className="hb-topbar-spacer" />'));
-    expect(WORKBENCH_SOURCE).not.toContain('className="workbench-brand"');
-    expect(WORKBENCH_SOURCE).not.toContain('className="workbench-title"');
   });
 
   it('工作台顶栏不再提供重复的返回画布入口', () => {
@@ -50,9 +57,14 @@ describe('AppModeTabs', () => {
   it('复用玻璃、交互和 motion Token', () => {
     expect(CSS).toContain('var(--surface-popover-glass-bg)');
     expect(CSS).toContain('var(--surface-popover-glass-blur)');
-    expect(CSS).toContain('var(--control-bg-selected)');
-    expect(CSS).toContain('var(--control-fg-selected)');
+    expect(CSS).toContain('var(--surface-popover-glass-shadow)');
+    expect(CSS).toContain('var(--control-bg-hover)');
     expect(CSS).toContain('var(--control-border-focus)');
+    expect(CSS).toContain('var(--motion-fast)');
+    expect(CSS).toContain('var(--motion-normal)');
+    expect(CSS).toContain('transition: transform var(--motion-slow) var(--ease-out)');
+    expect(CSS).toContain('.app-mode-tabs__trigger:hover .app-mode-tabs__logo');
+    expect(CSS).toContain('transform: scale(0.8)');
     expect(CSS).toContain('@media (prefers-reduced-motion: reduce)');
     expect(CSS).not.toMatch(/transition:\s*all/);
   });

@@ -57,15 +57,23 @@ export function CanvasRail({
   panTool,
   onTogglePanTool,
   addTitle = '添加节点',
+  dismissed = false,
 }: {
   onAdd: (anchor: { x: number; y: number }) => void;
   extraButtons?: ReactNode;
   panTool: boolean;
   onTogglePanTool: () => void;
   addTitle?: string;
+  /** 历史面板展开时让位：整条工具轨淡出并向左收，不再压住面板。 */
+  dismissed?: boolean;
 }) {
   return (
-    <div className="canvas-rail" role="group" aria-label="画布功能入口">
+    <div
+      className={`canvas-rail${dismissed ? ' is-dismissed' : ''}`}
+      role="group"
+      aria-label="画布功能入口"
+      aria-hidden={dismissed || undefined}
+    >
       <button
         className="canvas-rail-btn canvas-rail-btn-add"
         type="button"

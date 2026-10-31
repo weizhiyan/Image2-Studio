@@ -1,5 +1,25 @@
 import fs from 'node:fs/promises';
 import { SETTINGS_FILE } from './paths.js';
+import { defaultMemorySettings, normalizeMemorySettings, type MemorySettings } from './chatMemory.js';
+
+export interface ChatRuntimeSettings {
+  maxModelRounds: number;
+  maxToolCalls: number;
+  maxImagesPerRun: number;
+  confirmImagesAbove: number;
+  maxOutputTokens: number;
+}
+
+export function defaultChatRuntimeSettings(): ChatRuntimeSettings {
+  return { maxModelRounds: 4, maxToolCalls: 2, maxImagesPerRun: 4, confirmImagesAbove: 1, maxOutputTokens: 4096 };
+}
+
+export function normalizeChatRuntimeSettings(raw: unknown): ChatRuntimeSettings {
+  const value = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw as Record<string, unknown> : {};
+  const defaults = defaultChatRuntimeSettings();
+  const bound = (key: keyof ChatRuntimeSettings, min: number, max: number) => typeof value[key] === 'number' && Number.isFinite(value[key]) ? Math.max(min, Math.min(max, Math.round(value[key] as number))) : defaults[key];
+  return { maxModelRounds: bound('maxModelRounds', 4, 8), maxToolCalls: bound('maxToolCalls', 1, 2), maxImagesPerRun: bound('maxImagesPerRun', 1, 8), confirmImagesAbove: 1, maxOutputTokens: bound('maxOutputTokens', 2048, 8192) };
+}
 
 /** 配置种类：image = 生图模型；text = 语言/多模态模型（发送前整理提示词用）；video = 视频生成模型。 */
 export type ProfileKind = 'image' | 'text' | 'video';
@@ -128,6 +148,8 @@ export interface ModelProfile {
   models: string[];
   /** 勾选启用的模型；默认模型必须落在其中。 */
   enabledModels: string[];
+  /** 在配置卡片里展示的模型（内层勾选）；缺省时回落到 enabledModels。 */
+  selectedModels?: string[];
   /** 这路配置的用途：生图 / 语言模型（提示词优化）。 */
   kind: ProfileKind;
   /** 语言模型的上游接口格式；生图配置恒为 auto（用不到）。 */
@@ -157,6 +179,8 @@ export interface StoredSettings {
   enhanceLevel: EnhanceLevel;
   /** 用户偏好档案：生成记录归纳 + 灯箱手动录入，注入优化对话。 */
   preferences: PreferenceProfile;
+  chatMemory: MemorySettings;
+  chatRuntime: ChatRuntimeSettings;
 }
 
 let seq = 0;
@@ -299,7 +323,7 @@ function migrateLegacy(raw: Record<string, unknown>): StoredSettings {
   profile.defaultSize = String(raw.defaultSize || '').trim() || profile.defaultSize;
   profile.models = Array.isArray(raw.models) ? raw.models.map((item) => String(item)) : [];
   profile.enabledModels = Array.isArray(raw.enabledModels) ? raw.enabledModels.map((item) => String(item)) : [];
-  return { profiles: [profile], activeProfileId: profile.id, direct: true, promptOptimizationEnabled: false, textProfileId: '', enhanceLevel: 'balanced', preferences: emptyPreferences() };
+  return { profiles: [profile], activeProfileId: profile.id, direct: true, promptOptimizationEnabled: false, textProfileId: '', enhanceLevel: 'balanced', preferences: emptyPreferences(), chatMemory: defaultMemorySettings(), chatRuntime: defaultChatRuntimeSettings() };
 }
 
 export function normalizeSettings(raw: Record<string, unknown>): StoredSettings {
@@ -312,6 +336,12 @@ export function normalizeSettings(raw: Record<string, unknown>): StoredSettings 
       const models = Array.isArray(entry.models) ? entry.models.map((item) => String(item)) : [];
       const enabledModels = Array.isArray(entry.enabledModels) ? entry.enabledModels.map((item) => String(item)) : [];
       const requestedModel = String(entry.model || '').trim();
+      // 旧配置没有 selectedModels：已启用的模型视为卡片可见；纯手填模型名时也让它可见且启用。
+      const explicitSelected = Array.isArray(entry.selectedModels);
+      const selectedModels = explicitSelected
+        ? Array.from(new Set((entry.selectedModels as unknown[]).map((item) => String(item)).filter(Boolean)))
+        : (enabledModels.length > 0 ? enabledModels : (requestedModel ? [requestedModel] : []));
+      const effectiveEnabled = explicitSelected || enabledModels.length > 0 ? enabledModels : selectedModels;
       const apiKey = String(entry.apiKey || '');
       return {
         ...base,
@@ -321,24 +351,25 @@ export function normalizeSettings(raw: Record<string, unknown>): StoredSettings 
         apiKey,
         defaultSize: String(kind === 'video' ? entry.defaultSize ?? '' : entry.defaultSize || base.defaultSize),
         models,
-        enabledModels,
+        enabledModels: effectiveEnabled,
+        selectedModels,
         model: kind === 'video'
           // 视频配置：没填默认模型时自动取第一个已勾选模型。
           // 用户只要「加了模型」，节点端就不会因为默认模型为空而判定「还没配好」。
-          ? (requestedModel || enabledModels[0] || '')
-          : resolveDefaultModel(String(entry.model || base.model), enabledModels),
+          ? (requestedModel || effectiveEnabled[0] || '')
+          : resolveDefaultModel(String(entry.model || base.model), effectiveEnabled),
         kind,
         textFormat: normalizeTextApiFormat(entry.textFormat),
         imageApiMode: normalizeImageApiMode(entry.imageApiMode),
         responsesModel: String(entry.responsesModel || base.responsesModel),
         videoApiMode: kind === 'video' ? normalizeVideoApiMode(entry.videoApiMode) : undefined,
         videoCustomConfig: kind === 'video' ? normalizeCustomVideoApiConfig(entry.videoCustomConfig, apiKey) : undefined,
-        // 缺省视为启用：老配置没有这个字段，不能一升级就全部停用
-        enabled: entry.enabled !== false,
+        // 语言配置不再有配置级启停：语言模型都由对话/默认选择器按模型选择。
+        enabled: kind === 'text' ? true : entry.enabled !== false,
       } satisfies ModelProfile;
     })
     .filter((profile) => profile.id);
-  if (profiles.length === 0) return { profiles: [createProfile('默认模型')], activeProfileId: '', direct: true, promptOptimizationEnabled: raw.promptOptimizationEnabled === true, textProfileId: '', enhanceLevel: normalizeEnhanceLevel(raw.enhanceLevel), preferences: normalizePreferences(raw.preferences) };
+  if (profiles.length === 0) return { profiles: [createProfile('默认模型')], activeProfileId: '', direct: true, promptOptimizationEnabled: raw.promptOptimizationEnabled === true, textProfileId: '', enhanceLevel: normalizeEnhanceLevel(raw.enhanceLevel), preferences: normalizePreferences(raw.preferences), chatMemory: normalizeMemorySettings(raw.chatMemory), chatRuntime: normalizeChatRuntimeSettings(raw.chatRuntime) };
   const imageProfiles = profiles.filter((profile) => profile.kind === 'image');
   const pool = imageProfiles.length > 0 ? imageProfiles : profiles;
   const active = pool.find((profile) => profile.id === raw.activeProfileId) || pool[0];
@@ -350,10 +381,16 @@ export function normalizeSettings(raw: Record<string, unknown>): StoredSettings 
     textProfileId: String(raw.textProfileId || ''),
     enhanceLevel: normalizeEnhanceLevel(raw.enhanceLevel),
     preferences: normalizePreferences(raw.preferences),
+    chatMemory: normalizeMemorySettings(raw.chatMemory),
+    chatRuntime: normalizeChatRuntimeSettings(raw.chatRuntime),
   };
 }
 
 export async function readSettings(): Promise<StoredSettings> {
+  return withSettingsWriteLock(readSettingsUnlocked);
+}
+
+async function readSettingsUnlocked(): Promise<StoredSettings> {
   let rawText = '';
   try {
     rawText = await fs.readFile(SETTINGS_FILE, 'utf8');
@@ -361,7 +398,7 @@ export async function readSettings(): Promise<StoredSettings> {
     if (!Array.isArray(raw.profiles)) {
       // 旧版单配置迁移成一路 profile：立刻落盘，id 才不会在下次启动时又变一遍
       const migrated = normalizeSettings(raw);
-      await withSettingsWriteLock(() => writeSettingsFile(migrated));
+      await writeSettingsFile(migrated);
       return migrated;
     }
     return normalizeSettings(raw);
@@ -373,14 +410,14 @@ export async function readSettings(): Promise<StoredSettings> {
         const recovered = normalizeSettings(JSON.parse(candidate) as Record<string, unknown>);
         const stamp = new Date().toISOString().replace(/[:.]/g, '-');
         await fs.copyFile(SETTINGS_FILE, `${SETTINGS_FILE}.corrupt-${stamp}`).catch(() => undefined);
-        await withSettingsWriteLock(() => writeSettingsFile(recovered));
+        await writeSettingsFile(recovered);
         console.warn('[huiban] settings.json 尾部残片已修复，原文件已留备份');
         return recovered;
       } catch {
         /* 连第一个对象都解析不了才走默认兜底 */
       }
     }
-    return { profiles: [createProfile('默认模型')], activeProfileId: '', direct: true, promptOptimizationEnabled: false, textProfileId: '', enhanceLevel: 'balanced', preferences: emptyPreferences() };
+    return { profiles: [createProfile('默认模型')], activeProfileId: '', direct: true, promptOptimizationEnabled: false, textProfileId: '', enhanceLevel: 'balanced', preferences: emptyPreferences(), chatMemory: defaultMemorySettings(), chatRuntime: defaultChatRuntimeSettings() };
   }
 }
 
@@ -395,6 +432,28 @@ export function activeProfile(settings: StoredSettings): ModelProfile {
   return usable[0] || pool[0] || createProfile('默认模型');
 }
 
+export function imageModelReadiness(settings: StoredSettings) {
+  const imageProfiles = settings.profiles.filter((profile) => profile.kind === 'image');
+  const active = imageProfiles.find((profile) => (
+    profile.id === settings.activeProfileId && profile.enabled !== false
+  ));
+  const profile = active || imageProfiles.find((item) => item.enabled !== false) || imageProfiles[0];
+  const configured = Boolean(
+    profile
+    && profile.enabled !== false
+    && profile.baseUrl.trim()
+    && profile.apiKey.trim()
+    && profile.model.trim(),
+  );
+
+  return {
+    configured,
+    modelsLoaded: Boolean(profile?.models.length),
+    profileName: profile?.name || '',
+    modelName: profile?.model || '',
+  };
+}
+
 /** 全部语言模型配置（发送前整理提示词用）。 */
 export function textProfilesOf(settings: StoredSettings): ModelProfile[] {
   // 停用的不参与自动竞选；按 id 显式指定的仍认（resolveTextProfile 里单独查）
@@ -406,6 +465,14 @@ export function resolveTextProfile(settings: StoredSettings, profileId?: string)
   const wanted = String(profileId || settings.textProfileId || '').trim();
   const hit = wanted ? settings.profiles.find((profile) => profile.id === wanted && profile.kind === 'text') : undefined;
   return hit || textProfilesOf(settings)[0] || null;
+}
+
+/** 语言模型跑哪一档：显式选中且在 enabledModels 里就用它，否则用配置的默认模型。 */
+export function resolveTextModel(profile: ModelProfile | null | undefined, requestedModel?: string): string {
+  if (!profile) return '';
+  const wanted = String(requestedModel || '').trim();
+  const enabled = Array.isArray(profile.enabledModels) ? profile.enabledModels : [];
+  return wanted && enabled.includes(wanted) ? wanted : profile.model;
 }
 
 /** 全部视频模型配置。视频是独立分组与计费，不跟生图混竞。 */
@@ -436,8 +503,8 @@ export function findProfile(settings: StoredSettings, profileId: string | undefi
 }
 
 export async function writeSettings(input: {
-  profiles: Array<Partial<ModelProfile>>;
-  activeProfileId: string;
+  profiles?: Array<Partial<ModelProfile>>;
+  activeProfileId?: string;
   /** 不传表示保持原值。 */
   direct?: boolean;
   promptOptimizationEnabled?: boolean;
@@ -446,105 +513,121 @@ export async function writeSettings(input: {
   enhanceLevel?: EnhanceLevel;
   /** 整份替换；不传表示保持原值。 */
   preferences?: PreferenceProfile;
+  chatMemory?: Partial<MemorySettings>;
+  chatRuntime?: Partial<ChatRuntimeSettings>;
 }): Promise<StoredSettings> {
-  const current = await readSettings();
-  const byId = new Map(current.profiles.map((profile) => [profile.id, profile]));
-  const profiles: ModelProfile[] = [];
-  /** 前端新增配置会带 new_ 临时 ID；保存时统一换成稳定 ID，并回写引用。 */
-  const draftIdToActualId = new Map<string, string>();
-  // 空数组从来不是合法用户操作（界面禁止删掉最后一组配置）：只可能是界面还没加载完就点了保存。
-  // 这种情况必须原样保留已存配置，否则整个 settings.json 会被一组空配置覆盖，Key 全部丢失。
-  if (input.profiles.length === 0 && current.profiles.length > 0) {
-    const kept: StoredSettings = {
-      ...current,
-      activeProfileId: current.activeProfileId,
+  return withSettingsWriteLock(async () => {
+    const current = await readSettingsUnlocked();
+    const byId = new Map(current.profiles.map((profile) => [profile.id, profile]));
+    const profiles: ModelProfile[] = [];
+    /** 前端新增配置会带 new_ 临时 ID；保存时统一换成稳定 ID，并回写引用。 */
+    const draftIdToActualId = new Map<string, string>();
+    // 空数组从来不是合法用户操作（界面禁止删掉最后一组配置）：只可能是界面还没加载完就点了保存。
+    // 这种情况必须原样保留已存配置，否则整个 settings.json 会被一组空配置覆盖，Key 全部丢失。
+    if (!input.profiles?.length && current.profiles.length > 0) {
+      const kept: StoredSettings = {
+        ...current,
+        activeProfileId: current.profiles.some((profile) => profile.id === input.activeProfileId) ? input.activeProfileId! : current.activeProfileId,
+        direct: typeof input.direct === 'boolean' ? input.direct : current.direct !== false,
+        promptOptimizationEnabled: typeof input.promptOptimizationEnabled === 'boolean' ? input.promptOptimizationEnabled : current.promptOptimizationEnabled,
+        textProfileId: typeof input.textProfileId === 'string' ? input.textProfileId : current.textProfileId,
+        enhanceLevel: input.enhanceLevel ? normalizeEnhanceLevel(input.enhanceLevel) : current.enhanceLevel,
+        preferences: input.preferences ? normalizePreferences(input.preferences) : current.preferences,
+        chatMemory: normalizeMemorySettings({ ...current.chatMemory, ...input.chatMemory }),
+        chatRuntime: normalizeChatRuntimeSettings({ ...current.chatRuntime, ...input.chatRuntime }),
+      };
+      await writeSettingsFile(kept);
+      return kept;
+    }
+    for (const draft of input.profiles || []) {
+      const requestedId = String(draft.id || '').trim();
+      const id = requestedId && !requestedId.startsWith('new_') && byId.has(requestedId) ? requestedId : '';
+      const draftKind = normalizeProfileKind(draft.kind);
+      const draftName = String(draft.name || '').trim();
+      const draftBaseUrl = String(draft.baseUrl || '').trim();
+      const identityMatches = !id && requestedId && !requestedId.startsWith('new_')
+        ? current.profiles.filter((profile) => (
+          profile.kind === draftKind
+          && profile.name === draftName
+          && profile.baseUrl === draftBaseUrl
+        ))
+        : [];
+      // A stale client may submit an old profile ID after another tab migrated it.
+      // Reuse a Key only when the non-temporary ID and full config identity match uniquely.
+      const previous = (id ? byId.get(id) : undefined)
+        || (identityMatches.length === 1 ? identityMatches[0] : undefined);
+      const actualId = previous?.id || createProfileId();
+      if (requestedId) draftIdToActualId.set(requestedId, actualId);
+      // apiKey 传空串表示"不修改"，避免界面每次保存都把 key 擦掉
+      const apiKey = String(draft.apiKey || '').trim() ? String(draft.apiKey).trim() : (previous?.apiKey || '');
+      const enabledModels = Array.isArray(draft.enabledModels)
+        ? Array.from(new Set(draft.enabledModels.map((item) => String(item).trim()).filter(Boolean)))
+        : (previous?.enabledModels || []);
+      const selectedModels = Array.isArray(draft.selectedModels)
+        ? Array.from(new Set(draft.selectedModels.map((item) => String(item).trim()).filter(Boolean)))
+        : (previous?.selectedModels || enabledModels);
+      const requestedModel = String(draft.model ?? previous?.model ?? '').trim();
+      const model = draftKind === 'video'
+        // 视频配置：未显式选择默认模型时，自动落到第一个已勾选模型。
+        // 这是「添加模型即可用」的关键一环——默认模型不再是一个隐藏的必填项。
+        ? (enabledModels.length > 0
+          ? (requestedModel && enabledModels.includes(requestedModel) ? requestedModel : enabledModels[0])
+          : requestedModel)
+        : resolveDefaultModel(requestedModel, enabledModels) || previous?.model || '';
+      const baseUrl = draftKind === 'video'
+        ? String(draft.baseUrl ?? previous?.baseUrl ?? '').trim()
+        : draftBaseUrl || previous?.baseUrl || 'https://api.openai.com/v1';
+      const defaultSize = draftKind === 'video'
+        ? String(draft.defaultSize ?? previous?.defaultSize ?? '').trim()
+        : String(draft.defaultSize || '').trim() || previous?.defaultSize || '1024x1024';
+      profiles.push({
+        id: actualId,
+        name: draftName || previous?.name || defaultNameForKind(draftKind),
+        baseUrl,
+        apiKey,
+        model,
+        defaultSize,
+        models: Array.isArray(draft.models) ? draft.models.map((item) => String(item)) : (previous?.models || []),
+        enabledModels,
+        selectedModels,
+        kind: draftKind,
+        textFormat: normalizeTextApiFormat(draft.textFormat ?? previous?.textFormat),
+        imageApiMode: normalizeImageApiMode(draft.imageApiMode ?? previous?.imageApiMode),
+        responsesModel: String(draft.responsesModel || previous?.responsesModel || 'gpt-5.5').trim() || 'gpt-5.5',
+        videoApiMode: draftKind === 'video'
+          ? normalizeVideoApiMode(draft.videoApiMode ?? previous?.videoApiMode)
+          : undefined,
+        videoCustomConfig: draftKind === 'video'
+          ? normalizeCustomVideoApiConfig(draft.videoCustomConfig ?? previous?.videoCustomConfig, apiKey)
+          : undefined,
+        // 语言配置不再有配置级启停；生图 / 视频缺省沿用旧值，全新配置默认启用。
+        enabled: draftKind === 'text'
+          ? true
+          : (typeof draft.enabled === 'boolean' ? draft.enabled : (previous?.enabled !== false)),
+      });
+    }
+    if (profiles.length === 0) profiles.push(createProfile('默认模型'));
+    const requestedActiveId = String(input.activeProfileId || '').trim();
+    const activeIdCandidate = draftIdToActualId.get(requestedActiveId) || requestedActiveId;
+    const activeId = profiles.some((profile) => profile.id === activeIdCandidate)
+      ? activeIdCandidate
+      : profiles[0].id;
+    const requestedTextProfileId = typeof input.textProfileId === 'string' ? input.textProfileId : current.textProfileId;
+    const textProfileId = draftIdToActualId.get(requestedTextProfileId) || requestedTextProfileId;
+    const next: StoredSettings = {
+      profiles,
+      activeProfileId: activeId,
       direct: typeof input.direct === 'boolean' ? input.direct : current.direct !== false,
       promptOptimizationEnabled: typeof input.promptOptimizationEnabled === 'boolean' ? input.promptOptimizationEnabled : current.promptOptimizationEnabled,
-      textProfileId: typeof input.textProfileId === 'string' ? input.textProfileId : current.textProfileId,
+      textProfileId,
+      enhanceLevel: input.enhanceLevel ? normalizeEnhanceLevel(input.enhanceLevel) : current.enhanceLevel,
+      preferences: input.preferences ? normalizePreferences(input.preferences) : current.preferences,
+      chatMemory: normalizeMemorySettings({ ...current.chatMemory, ...input.chatMemory }),
+      chatRuntime: normalizeChatRuntimeSettings({ ...current.chatRuntime, ...input.chatRuntime }),
     };
-    await withSettingsWriteLock(() => writeSettingsFile(kept));
-    return kept;
-  }
-  for (const draft of input.profiles) {
-    const requestedId = String(draft.id || '').trim();
-    const id = requestedId && !requestedId.startsWith('new_') && byId.has(requestedId) ? requestedId : '';
-    const draftKind = normalizeProfileKind(draft.kind);
-    const draftName = String(draft.name || '').trim();
-    const draftBaseUrl = String(draft.baseUrl || '').trim();
-    const identityMatches = !id && requestedId && !requestedId.startsWith('new_')
-      ? current.profiles.filter((profile) => (
-        profile.kind === draftKind
-        && profile.name === draftName
-        && profile.baseUrl === draftBaseUrl
-      ))
-      : [];
-    // A stale client may submit an old profile ID after another tab migrated it.
-    // Reuse a Key only when the non-temporary ID and full config identity match uniquely.
-    const previous = (id ? byId.get(id) : undefined)
-      || (identityMatches.length === 1 ? identityMatches[0] : undefined);
-    const actualId = previous?.id || createProfileId();
-    if (requestedId) draftIdToActualId.set(requestedId, actualId);
-    // apiKey 传空串表示"不修改"，避免界面每次保存都把 key 擦掉
-    const apiKey = String(draft.apiKey || '').trim() ? String(draft.apiKey).trim() : (previous?.apiKey || '');
-    const enabledModels = Array.isArray(draft.enabledModels)
-      ? Array.from(new Set(draft.enabledModels.map((item) => String(item).trim()).filter(Boolean)))
-      : (previous?.enabledModels || []);
-    const requestedModel = String(draft.model ?? previous?.model ?? '').trim();
-    const model = draftKind === 'video'
-      // 视频配置：未显式选择默认模型时，自动落到第一个已勾选模型。
-      // 这是「添加模型即可用」的关键一环——默认模型不再是一个隐藏的必填项。
-      ? (enabledModels.length > 0
-        ? (requestedModel && enabledModels.includes(requestedModel) ? requestedModel : enabledModels[0])
-        : requestedModel)
-      : resolveDefaultModel(requestedModel, enabledModels) || previous?.model || '';
-    const baseUrl = draftKind === 'video'
-      ? String(draft.baseUrl ?? previous?.baseUrl ?? '').trim()
-      : draftBaseUrl || previous?.baseUrl || 'https://api.openai.com/v1';
-    const defaultSize = draftKind === 'video'
-      ? String(draft.defaultSize ?? previous?.defaultSize ?? '').trim()
-      : String(draft.defaultSize || '').trim() || previous?.defaultSize || '1024x1024';
-    profiles.push({
-      id: actualId,
-      name: draftName || previous?.name || defaultNameForKind(draftKind),
-      baseUrl,
-      apiKey,
-      model,
-      defaultSize,
-      models: Array.isArray(draft.models) ? draft.models.map((item) => String(item)) : (previous?.models || []),
-      enabledModels,
-      kind: draftKind,
-      textFormat: normalizeTextApiFormat(draft.textFormat ?? previous?.textFormat),
-      imageApiMode: normalizeImageApiMode(draft.imageApiMode ?? previous?.imageApiMode),
-      responsesModel: String(draft.responsesModel || previous?.responsesModel || 'gpt-5.5').trim() || 'gpt-5.5',
-      videoApiMode: draftKind === 'video'
-        ? normalizeVideoApiMode(draft.videoApiMode ?? previous?.videoApiMode)
-        : undefined,
-      videoCustomConfig: draftKind === 'video'
-        ? normalizeCustomVideoApiConfig(draft.videoCustomConfig ?? previous?.videoCustomConfig, apiKey)
-        : undefined,
-      // 缺省沿用旧值；全新配置才默认启用。
-      enabled: typeof draft.enabled === 'boolean' ? draft.enabled : (previous?.enabled !== false),
-    });
-  }
-  if (profiles.length === 0) profiles.push(createProfile('默认模型'));
-  const requestedActiveId = String(input.activeProfileId || '').trim();
-  const activeIdCandidate = draftIdToActualId.get(requestedActiveId) || requestedActiveId;
-  const activeId = profiles.some((profile) => profile.id === activeIdCandidate)
-    ? activeIdCandidate
-    : profiles[0].id;
-  const requestedTextProfileId = typeof input.textProfileId === 'string' ? input.textProfileId : current.textProfileId;
-  const textProfileId = draftIdToActualId.get(requestedTextProfileId) || requestedTextProfileId;
-  const next: StoredSettings = {
-    profiles,
-    activeProfileId: activeId,
-    direct: typeof input.direct === 'boolean' ? input.direct : current.direct !== false,
-    promptOptimizationEnabled: typeof input.promptOptimizationEnabled === 'boolean' ? input.promptOptimizationEnabled : current.promptOptimizationEnabled,
-    textProfileId,
-    enhanceLevel: input.enhanceLevel ? normalizeEnhanceLevel(input.enhanceLevel) : current.enhanceLevel,
-    preferences: input.preferences ? normalizePreferences(input.preferences) : current.preferences,
-  };
-  await withSettingsWriteLock(() => writeSettingsFile(next));
-  return next;
+    await writeSettingsFile(next);
+    return next;
+  });
 }
 
 export function publicView(settings: StoredSettings) {
@@ -557,6 +640,7 @@ export function publicView(settings: StoredSettings) {
       defaultSize: profile.defaultSize,
       models: profile.models,
       enabledModels: profile.enabledModels,
+      selectedModels: profile.selectedModels,
       kind: profile.kind,
       textFormat: profile.textFormat,
       imageApiMode: profile.imageApiMode,
@@ -573,6 +657,8 @@ export function publicView(settings: StoredSettings) {
     promptOptimizationEnabled: settings.promptOptimizationEnabled,
     textProfileId: settings.textProfileId,
     enhanceLevel: settings.enhanceLevel,
+    chatMemory: normalizeMemorySettings(settings.chatMemory),
+    chatRuntime: normalizeChatRuntimeSettings(settings.chatRuntime),
     preferences: {
       enabled: settings.preferences.enabled,
       entries: settings.preferences.entries,

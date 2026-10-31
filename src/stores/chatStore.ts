@@ -1,9 +1,10 @@
 import { create } from 'zustand';
-import { persist, createJSONStorage } from 'zustand/middleware';
-import type { StateStorage } from 'zustand/middleware';
+import { persist } from 'zustand/middleware';
+import type { PersistStorage, StorageValue } from 'zustand/middleware';
 import type { ChatImageRef, ChatMessage, ChatThread } from '@/types';
 import { createId } from '@/lib/id';
-import { deleteChatThread, putChatThread, stopChatRun } from '@/lib/bridge';
+import { ChatConflictError, clearChatThread, deleteChatThread, putChatThread, type ChatRunEvent, type ChatRunConfirmation } from '@/lib/bridge';
+import { mergeAuthoritativeThread, reduceChatRunEvent, type ChatRunState } from '@/lib/chatRunEvents';
 
 /**
  * 对话状态：全局独立线程（threads 是实体数组，activeThreadId 指向当前线程）。
@@ -23,6 +24,8 @@ export interface ChatActiveRun {
   runId: string;
   threadId: string;
   messageId: string;
+  seq?: number;
+  pendingConfirmation?: ChatRunConfirmation;
 }
 
 /** 草稿引用的唯一键：同一节点的不同版本算不同引用。 */
@@ -64,16 +67,31 @@ interface ChatState {
   markUnread: () => void;
   clearUnread: () => void;
   setMessageScrollTop: (top: number) => void;
-  createThread: (canvasId?: string) => string;
+  createThread: (canvasId?: string, options?: {
+    textProfileId?: string;
+    textModel?: string;
+    imageProfileId?: string;
+    imageModel?: string;
+    preserveDraft?: boolean;
+  }) => string;
+  /** 未开始对话的线程可以换语言模型；已有消息时锁定并返回 false。 */
+  setThreadTextProfile: (threadId: string, textProfileId: string, textModel?: string) => boolean;
+  /** Agent 出图模型：对话开始后仍可随时切换。 */
+  setThreadImageModel: (threadId: string, imageProfileId: string, imageModel?: string) => boolean;
   switchThread: (threadId: string) => void;
   renameThread: (threadId: string, title: string) => void;
   /** 删线程：只删对话，不碰画布节点。 */
-  deleteThread: (threadId: string) => void;
+  deleteThread: (threadId: string) => Promise<void>;
   /** 清空线程消息：线程本身与画布图片都保留。 */
-  clearThread: (threadId: string) => void;
+  clearThread: (threadId: string) => Promise<void>;
   appendMessage: (threadId: string, message: Omit<ChatMessage, 'id' | 'createdAt'> & { id?: string }) => string;
   patchMessage: (threadId: string, messageId: string, patch: Partial<ChatMessage>) => void;
-  patchThread: (threadId: string, patch: Partial<ChatThread>) => void;
+  /** 启动被拒：丢掉本次 request 未被服务端接管的本地占位，避免留下无回复的孤儿消息。 */
+  discardRequest: (threadId: string, requestId: string) => void;
+  patchThread: (threadId: string, patch: Partial<ChatThread>, options?: { save?: boolean }) => void;
+  applyRunEvents: (threadId: string, events: ChatRunEvent[]) => boolean;
+  syncError: string;
+  runEventCursors: Record<string, number>;
   setActiveRun: (run: ChatActiveRun | null) => void;
   mergeRemoteThreads: (remote: ChatThread[]) => void;
 }
@@ -88,6 +106,15 @@ function deriveTitle(content: string): string {
 function safeCanvasId(value: unknown): string | undefined {
   const id = typeof value === 'string' ? value.trim() : '';
   return id && id !== '[object Object]' ? id : undefined;
+}
+
+/** 最近更新的线程；updatedAt 相同用数组顺序兜底（后创建的在后）。 */
+function mostRecentThread(threads: ChatThread[]): ChatThread | undefined {
+  return [...threads].sort((left, right) => {
+    const updatedDelta = Date.parse(right.updatedAt || '') - Date.parse(left.updatedAt || '');
+    if (updatedDelta !== 0) return updatedDelta;
+    return threads.indexOf(right) - threads.indexOf(left);
+  })[0];
 }
 
 function normalizeLocalImageRef(raw: unknown): ChatImageRef | null {
@@ -161,52 +188,79 @@ export function normalizeLocalThread(raw: unknown): ChatThread | null {
   } as ChatThread;
 }
 
-/** node / vitest 环境没有 localStorage：回落内存存储，保证 store 在测试里可用。 */
-function chatStorage(): StateStorage {
-  if (typeof localStorage !== 'undefined') {
-    return {
-      getItem: (key) => localStorage.getItem(key),
-      removeItem: (key) => localStorage.removeItem(key),
-      setItem: (key, value) => {
-        try {
-          localStorage.setItem(key, value);
-        } catch (error) {
-          const name = (error as { name?: string } | null)?.name;
-          if (name !== 'QuotaExceededError' && name !== 'NS_ERROR_DOM_QUOTA_REACHED') return;
-          try {
-            // 本地副本满时先丢掉草稿里的内嵌图；线程消息入库前已剥过大 dataURL，bridge 还有整份备份
-            const parsed = JSON.parse(value) as { state?: Record<string, unknown> };
-            if (parsed.state) {
-              parsed.state.draftAttachments = [];
-              parsed.state.draftBase = null;
-              localStorage.setItem(key, JSON.stringify(parsed));
-            }
-          } catch {
-            console.warn('[绘板] 本地对话缓存已满，已依赖 bridge 对话副本');
-          }
-        }
-      },
-    };
+type PersistedChat = Pick<ChatState, 'threads' | 'draft' | 'draftAttachments' | 'draftBase' | 'activeRun' | 'runEventCursors'>;
+let pendingPersistence: { key: string; value: StorageValue<PersistedChat> } | undefined;
+let persistenceTimer: ReturnType<typeof setTimeout> | undefined;
+let persistedReferences: PersistedChat | undefined;
+const memoryStorage = new Map<string, string>();
+
+/** JSON serialization is throttled too, not just localStorage.setItem. */
+export function flushChatPersistence(): void {
+  if (persistenceTimer !== undefined) clearTimeout(persistenceTimer);
+  persistenceTimer = undefined;
+  if (!pendingPersistence) return;
+  const { key, value } = pendingPersistence;
+  pendingPersistence = undefined;
+  try {
+    const serialized = JSON.stringify(value);
+    if (typeof localStorage === 'undefined') memoryStorage.set(key, serialized);
+    else localStorage.setItem(key, serialized);
+  } catch {
+    useChatStore.setState({ syncError: '本地对话缓存写入失败，请勿关闭页面；服务器中的已接纳消息仍保留。' });
   }
-  const map = new Map<string, string>();
-  return {
-    getItem: (key) => (map.has(key) ? (map.get(key) as string) : null),
-    setItem: (key, value) => { map.set(key, value); },
-    removeItem: (key) => { map.delete(key); },
-  };
+}
+const chatPersistence: PersistStorage<PersistedChat> = {
+  getItem: (key) => {
+    try {
+      const value = typeof localStorage === 'undefined' ? memoryStorage.get(key) : localStorage.getItem(key);
+      return value ? JSON.parse(value) : null;
+    } catch { return null; }
+  },
+  removeItem: (key) => {
+    if (pendingPersistence?.key === key) pendingPersistence = undefined;
+    if (typeof localStorage === 'undefined') memoryStorage.delete(key);
+    else localStorage.removeItem(key);
+  },
+  setItem: (key, value) => {
+    const next = value.state;
+    if (persistedReferences && Object.keys(next).every((key) => next[key as keyof PersistedChat] === persistedReferences![key as keyof PersistedChat])) return;
+    persistedReferences = next;
+    pendingPersistence = { key, value };
+    if (persistenceTimer === undefined) persistenceTimer = setTimeout(flushChatPersistence, 500);
+  },
+};
+if (typeof window !== 'undefined') window.addEventListener('pagehide', flushChatPersistence);
+
+const scrollPositions = new Map<string, number>();
+function readScroll(threadId: string): number {
+  try { return scrollPositions.get(threadId) ?? Number(sessionStorage.getItem(`huiban:chat-scroll:${threadId}`) || 0); }
+  catch { return scrollPositions.get(threadId) || 0; }
+}
+function writeScroll(threadId: string, top: number): void {
+  scrollPositions.set(threadId, top);
+  try { sessionStorage.setItem(`huiban:chat-scroll:${threadId}`, String(top)); } catch { /* session-only fallback */ }
 }
 
-/** 防抖上桥：同一线程连续变更只发最后一次，与画布文档同一节拍。 */
+/** Only explicit metadata actions queue writes; never an SSE patch or run placeholder. */
 const pushTimers = new Map<string, ReturnType<typeof setTimeout>>();
+function cancelPush(threadId: string): void {
+  const timer = pushTimers.get(threadId);
+  if (timer !== undefined) clearTimeout(timer);
+  pushTimers.delete(threadId);
+}
 function schedulePush(threadId: string): void {
   if (!threadId) return;
-  const existing = pushTimers.get(threadId);
-  if (existing) clearTimeout(existing);
+  cancelPush(threadId);
   pushTimers.set(threadId, setTimeout(() => {
     pushTimers.delete(threadId);
     const thread = useChatStore.getState().threads.find((item) => item.id === threadId);
     if (!thread) return;
-    void putChatThread(thread);
+    void putChatThread(thread, { metadataOnly: true }).then((remote) => {
+      useChatStore.getState().mergeRemoteThreads([remote]);
+    }).catch((error) => {
+      if (error instanceof ChatConflictError && error.current) useChatStore.getState().mergeRemoteThreads([error.current]);
+      useChatStore.setState({ syncError: error instanceof Error ? error.message : '对话保存失败，请重试' });
+    });
   }, 600));
 }
 
@@ -244,25 +298,21 @@ export const useChatStore = create<ChatState>()(
       activeRun: null,
       unread: false,
       messageScrollTop: 0,
+      syncError: '',
+      runEventCursors: {},
 
       setActiveCanvas: (canvasId) => {
-        if (get().activeCanvasId === canvasId) return;
-        // 线程是全局实体；切画布只更新默认结果落点，不切换对话或丢弃明确引用。
         const hasActiveThread = Boolean(get().activeThreadId && get().threads.some((item) => item.id === get().activeThreadId));
+        if (get().activeCanvasId === canvasId && hasActiveThread) return;
+        // 线程是全局实体；切画布只更新默认结果落点，不切换对话或丢弃明确引用。
         if (hasActiveThread) {
           set({ activeCanvasId: canvasId });
           return;
         }
         // 刷新后 activeThreadId 是会话态，不持久化；有历史时恢复最近更新的一条，
-        // 让用户重新打开面板就能看到上次的对话，而不是误显示空态。
-        const threads = get().threads;
-        const latestThread = [...threads]
-          .sort((left, right) => {
-            const updatedDelta = Date.parse(right.updatedAt || '') - Date.parse(left.updatedAt || '');
-            if (updatedDelta !== 0) return updatedDelta;
-            // 创建 / 发送发生在同一毫秒时，数组后面的线程才是最近创建的。
-            return threads.indexOf(right) - threads.indexOf(left);
-          })[0];
+        // 让用户重新打开面板就能看到上次的对话，而不是误显示空态。即使画布 id 没变
+        // 也要补选：远端线程可能是在 setActiveCanvas 之后才合并进来的。
+        const latestThread = mostRecentThread(get().threads);
         set({ activeCanvasId: canvasId, activeThreadId: latestThread?.id || '' });
       },
 
@@ -325,30 +375,93 @@ export const useChatStore = create<ChatState>()(
 
       clearUnread: () => set({ unread: false }),
 
-      setMessageScrollTop: (top) => set({ messageScrollTop: top }),
+      setMessageScrollTop: (top) => {
+        writeScroll(get().activeThreadId, top);
+        set({ messageScrollTop: top });
+      },
 
-      createThread: (canvasId) => {
+      createThread: (canvasId, options = {}) => {
+        flushChatPersistence();
         const target = canvasId || get().activeCanvasId || undefined;
+        const active = get().threads.find((item) => item.id === get().activeThreadId);
+        const textProfileId = options.textProfileId || active?.textProfileId || '';
+        const textModel = options.textModel || active?.textModel || '';
+        const imageProfileId = options.imageProfileId || active?.imageProfileId || '';
+        const imageModel = options.imageModel || active?.imageModel || '';
         const now = new Date().toISOString();
-        const thread: ChatThread = { id: createId('thread'), ...(target ? { canvasId: target } : {}), title: '新对话', messages: [], createdAt: now, updatedAt: now };
-        // 新对话开始一份干净上下文，避免草稿文字或上一线程的基准图串入。
+        const thread: ChatThread = {
+          id: createId('thread'),
+          ...(target ? { canvasId: target } : {}),
+          ...(textProfileId ? { textProfileId } : {}),
+          ...(textModel ? { textModel } : {}),
+          ...(imageProfileId ? { imageProfileId } : {}),
+          ...(imageModel ? { imageModel } : {}),
+          title: '新对话',
+          messages: [],
+          createdAt: now,
+          updatedAt: now,
+        };
+        // 新对话开始一份干净上下文，避免草稿文字或上一线程的基准图串入；
+        // 换模型触发的「新建对话」要保留用户已经打好的草稿。
         set({
           threads: [...get().threads, thread],
           activeThreadId: thread.id,
           activeRoleId: '',
           open: true,
-          draft: '',
-          draftAttachments: [],
-          draftBase: null,
+          ...(options.preserveDraft ? {} : { draft: '', draftAttachments: [], draftBase: null }),
           messageScrollTop: 0,
         });
         return thread.id;
       },
 
+      setThreadTextProfile: (threadId, textProfileId, textModel) => {
+        const thread = get().threads.find((item) => item.id === threadId);
+        const nextProfileId = String(textProfileId || '').trim();
+        if (!thread || thread.messages.length > 0 || !nextProfileId) return false;
+        const nextModel = String(textModel || '').trim();
+        set({
+          threads: get().threads.map((item) => (
+            item.id === threadId
+              ? {
+                ...item,
+                textProfileId: nextProfileId,
+                ...(nextModel ? { textModel: nextModel } : {}),
+                updatedAt: new Date().toISOString(),
+              }
+              : item
+          )),
+        });
+        schedulePush(threadId);
+        return true;
+      },
+
+      setThreadImageModel: (threadId, imageProfileId, imageModel) => {
+        const thread = get().threads.find((item) => item.id === threadId);
+        const nextProfileId = String(imageProfileId || '').trim();
+        if (!thread || !nextProfileId) return false;
+        const nextModel = String(imageModel || '').trim();
+        set({
+          threads: get().threads.map((item) => (
+            item.id === threadId
+              ? {
+                ...item,
+                imageProfileId: nextProfileId,
+                ...(nextModel ? { imageModel: nextModel } : {}),
+                updatedAt: new Date().toISOString(),
+              }
+              : item
+          )),
+        });
+        schedulePush(threadId);
+        return true;
+      },
+
       switchThread: (threadId) => {
         const thread = get().threads.find((item) => item.id === threadId);
         if (!thread) return;
-        set({ activeThreadId: threadId, activeRoleId: '', draft: '', draftAttachments: [], draftBase: null, messageScrollTop: 0 });
+        flushChatPersistence();
+        set({ activeThreadId: threadId, activeRoleId: '', draft: '', draftAttachments: [], draftBase: null, messageScrollTop: readScroll(threadId) });
+        flushChatPersistence();
       },
 
       renameThread: (threadId, title) => {
@@ -362,9 +475,12 @@ export const useChatStore = create<ChatState>()(
         schedulePush(threadId);
       },
 
-      deleteThread: (threadId) => {
+      deleteThread: async (threadId) => {
         const thread = get().threads.find((item) => item.id === threadId);
         if (!thread) return;
+        cancelPush(threadId);
+        try { await deleteChatThread(threadId); }
+        catch (error) { set({ syncError: error instanceof Error ? error.message : '删除对话失败' }); return; }
         const rest = get().threads.filter((item) => item.id !== threadId);
         // 删的是当前线程：落到最近更新的线程上，别让用户对着空面板。
         const nextActive = get().activeThreadId === threadId
@@ -372,7 +488,6 @@ export const useChatStore = create<ChatState>()(
           : get().activeThreadId;
         const deletingActive = get().activeThreadId === threadId;
         const activeRun = get().activeRun;
-        if (activeRun?.threadId === threadId) void stopChatRun(activeRun.runId);
         set({
           threads: rest,
           activeThreadId: nextActive,
@@ -385,18 +500,22 @@ export const useChatStore = create<ChatState>()(
           } : {}),
           ...(activeRun?.threadId === threadId ? { activeRun: null } : {}),
         });
-        void deleteChatThread(threadId);
+        flushChatPersistence();
       },
 
-      clearThread: (threadId) => {
+      clearThread: async (threadId) => {
         const thread = get().threads.find((item) => item.id === threadId);
-        if (!thread || thread.messages.length === 0) return;
-        set({
-          threads: get().threads.map((item) => (
-            item.id === threadId ? { ...item, messages: [], updatedAt: new Date().toISOString() } : item
-          )),
-        });
-        schedulePush(threadId);
+        if (!thread) return;
+        cancelPush(threadId);
+        try {
+          const remote = await clearChatThread(threadId, thread.revision);
+          set({ threads: get().threads.map((item) => item.id === threadId ? remote : item),
+            ...(get().activeRun?.threadId === threadId ? { activeRun: null } : {}) });
+          flushChatPersistence();
+        } catch (error) {
+          if (error instanceof ChatConflictError && error.current) get().mergeRemoteThreads([error.current]);
+          set({ syncError: error instanceof Error ? error.message : '清空对话失败' });
+        }
       },
 
       appendMessage: (threadId, message) => {
@@ -409,12 +528,37 @@ export const useChatStore = create<ChatState>()(
         const title = existing
           ? (existing.messages.length === 0 && full.role === 'user' ? deriveTitle(full.content) : existing.title)
           : deriveTitle(full.content);
+        // 首条用户消息把本轮选中的对话模型 / Agent 生图模型固化到线程上；
+        // 旧线程还没有记录时，也用下一条用户消息补上，避免一直回落到设置默认值。
+        const adoptText = full.role === 'user'
+          && (!existing || existing.messages.length === 0 || !existing.textProfileId);
+        const adoptImage = full.role === 'user'
+          && (!existing || existing.messages.length === 0 || !existing.imageProfileId);
+        const textProfileId = adoptText
+          ? String(full.modelSelection?.textProfileId || existing?.textProfileId || '').trim()
+          : '';
+        const textModel = adoptText
+          ? String(full.modelSelection?.textModel || existing?.textModel || '').trim()
+          : '';
+        const imageProfileId = adoptImage
+          ? String(full.modelSelection?.imageProfileId || existing?.imageProfileId || '').trim()
+          : '';
+        const imageModel = adoptImage
+          ? String(full.modelSelection?.imageModel || existing?.imageModel || '').trim()
+          : '';
+        const modelFields = {
+          ...(textProfileId ? { textProfileId } : {}),
+          ...(textModel ? { textModel } : {}),
+          ...(imageProfileId ? { imageProfileId } : {}),
+          ...(imageModel ? { imageModel } : {}),
+        };
         set({
           threads: existing
             ? get().threads.map((item) => (item.id === threadId
               ? {
                 ...item,
                 ...(get().activeCanvasId ? { canvasId: get().activeCanvasId } : {}),
+                ...modelFields,
                 messages,
                 title,
                 updatedAt: now,
@@ -423,13 +567,13 @@ export const useChatStore = create<ChatState>()(
             : [...get().threads, {
               id: threadId,
               ...(get().activeCanvasId ? { canvasId: get().activeCanvasId } : {}),
+              ...modelFields,
               title,
               messages,
               createdAt: now,
               updatedAt: now,
             }],
         });
-        schedulePush(threadId);
         return id;
       },
 
@@ -444,10 +588,27 @@ export const useChatStore = create<ChatState>()(
               : item
           )),
         });
-        schedulePush(threadId);
       },
 
-      patchThread: (threadId, patch) => {
+      discardRequest: (threadId, requestId) => {
+        if (!threadId || !requestId) return;
+        const thread = get().threads.find((item) => item.id === threadId);
+        if (!thread || !thread.messages.some((item) => item.requestId === requestId)) return;
+        set({
+          threads: get().threads.map((item) => (
+            item.id === threadId
+              ? {
+                ...item,
+                // 已被 run 接管的消息（带 runId）保留；只清理这次被拒请求的本地占位。
+                messages: item.messages.filter((msg) => msg.requestId !== requestId || Boolean(msg.runId)),
+                updatedAt: new Date().toISOString(),
+              }
+              : item
+          )),
+        });
+      },
+
+      patchThread: (threadId, patch, options) => {
         if (!threadId) return;
         if (!get().threads.some((item) => item.id === threadId)) return;
         set({
@@ -455,51 +616,73 @@ export const useChatStore = create<ChatState>()(
             item.id === threadId ? { ...item, ...patch, updatedAt: new Date().toISOString() } : item
           )),
         });
-        schedulePush(threadId);
+        if (options?.save) schedulePush(threadId);
+      },
+
+      applyRunEvents: (threadId, events) => {
+        const thread = get().threads.find((item) => item.id === threadId);
+        if (!thread) return false;
+        const runId = events[0]?.runId || get().activeRun?.runId;
+        const savedSeq = runId ? get().runEventCursors[runId] : undefined;
+        let state: ChatRunState = { thread, activeRun: get().activeRun, ...(runId && savedSeq !== undefined ? { cursor: { runId, seq: savedSeq } } : {}) };
+        for (const event of events) state = reduceChatRunEvent(state, event);
+        if (state.thread !== thread || state.activeRun !== get().activeRun) {
+          const entries = state.cursor ? [...Object.entries(get().runEventCursors).filter(([id]) => id !== state.cursor!.runId), [state.cursor.runId, state.cursor.seq]] : Object.entries(get().runEventCursors);
+          set({ threads: get().threads.map((item) => item.id === threadId ? state.thread : item), activeRun: state.activeRun, runEventCursors: Object.fromEntries(entries.slice(-128)) });
+        }
+        if (!state.activeRun) flushChatPersistence();
+        return Boolean(state.needsSnapshot);
       },
 
       setActiveRun: (run) => set({ activeRun: run }),
 
       mergeRemoteThreads: (remote) => {
-        if (!Array.isArray(remote) || remote.length === 0) return;
-        const local = get().threads;
-        const next = [...local];
-        const pushUps: ChatThread[] = [];
+        if (!Array.isArray(remote) || !remote.length) return;
+        const next = [...get().threads];
         for (const item of remote) {
-          const threadId = String(item?.id || '');
-          if (!threadId) continue;
-          const remoteAt = Date.parse(String(item.updatedAt || ''));
-          const index = next.findIndex((candidate) => candidate.id === threadId);
-          if (index < 0) {
-            next.push(item);
-            continue;
-          }
-          const localAt = Date.parse(String(next[index].updatedAt || ''));
-          // 远端更新：采用远端；本地更新：保留本地并回推，让别的浏览器也看得到
-          if (Number.isFinite(remoteAt) && remoteAt > localAt) {
-            next[index] = item;
-          } else {
-            pushUps.push(next[index]);
+          if (!item?.id) continue;
+          const index = next.findIndex((candidate) => candidate.id === item.id);
+          if (index < 0) next.push(item);
+          else {
+            const local = next[index];
+            const merged = { ...mergeAuthoritativeThread(local, item) };
+            const active = get().activeRun;
+            // A metadata/list response has no run seq and may contain only a persisted prefix.
+            // Only run snapshots may replace the current run's materialized messages.
+            if (active?.threadId === item.id && (local.generation ?? 0) === (item.generation ?? 0)) {
+              const owned = local.messages.filter((message) => message.runId === active.runId || message.id === active.messageId);
+              const ids = new Set(owned.map((message) => message.id));
+              merged.messages = [...merged.messages.map((message) => ids.has(message.id) ? owned.find((entry) => entry.id === message.id)! : message), ...owned.filter((message) => !merged.messages.some((entry) => entry.id === message.id))];
+            }
+            next[index] = merged;
           }
         }
-        const changed = pushUps.length > 0 || next.length !== local.length
-          || next.some((item, index) => item !== local[index]);
-        if (changed) set({ threads: next });
-        for (const thread of pushUps) void putChatThread(thread);
+        const activeThreadId = get().activeThreadId;
+        const keepActive = Boolean(activeThreadId && next.some((item) => item.id === activeThreadId));
+        // 首次打开或本地副本为空时，远端线程合并后要补选最近一条；否则头部会停在
+        // “新对话”，记忆等线程级入口因 thread 为空而不可用。
+        const nextActiveThreadId = keepActive ? activeThreadId : mostRecentThread(next)?.id || '';
+        set({
+          threads: next,
+          ...(nextActiveThreadId !== activeThreadId ? { activeThreadId: nextActiveThreadId } : {}),
+        });
       },
     }),
     {
       name: 'huiban-chat-v1',
       version: 2,
-      storage: createJSONStorage(() => chatStorage()),
+      storage: chatPersistence,
       migrate: (persisted) => {
         const state = (persisted || {}) as Record<string, unknown>;
         return {
-          // open / activeCanvasId / activeRoleId / activeRun 是会话态不持久化；线程与草稿要跨刷新保留。
+          // open / activeCanvasId / activeRoleId 是会话态不持久化；线程、草稿与在途 run 要跨刷新保留。
           // 旧版草稿附件没有 canvasId / versionId 字段，一次性迁移时丢弃（草稿本是暂态）
           threads: migrateThreads(persisted),
           draft: typeof state.draft === 'string' ? state.draft : '',
           draftAttachments: [],
+          draftBase: null,
+          activeRun: (state.activeRun as ChatActiveRun | null) || null,
+          runEventCursors: {},
         };
       },
       partialize: (state) => ({
@@ -507,6 +690,9 @@ export const useChatStore = create<ChatState>()(
         draft: state.draft,
         draftAttachments: state.draftAttachments,
         draftBase: state.draftBase,
+        // 刷新后要凭 runId 重连 SSE，否则生成中的消息会永远停在 running。
+        activeRun: state.activeRun,
+        runEventCursors: state.runEventCursors,
       }),
     },
   ),

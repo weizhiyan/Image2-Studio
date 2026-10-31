@@ -1,7 +1,7 @@
 /* 生成历史抽屉：贴着左侧功能条弹出的长方形面板，玻璃底 + 自滚动。
    宫格视图只放图（列宽自适应填满面板，缩略图跟着列宽走，勾选与定位都压在图上做）；
    列表视图按天分组：组标题是弱化日期，条目是小图 + 两行文字。
-   两种视图都能多选删除；条目最外侧不放描边底色，选中/hover 统一用 outline 画圈。 */
+   两种视图都能多选下载 / 删除；条目最外侧不放描边底色，选中/hover 统一用 outline 画圈。 */
 .image-history-panel {
   position: fixed;
   z-index: 130;
@@ -54,6 +54,75 @@
     opacity: 0;
     transform: translate(-6px, -50%) scale(0.97);
   }
+}
+
+/* 画布内的固定历史面板：上沿贴住导航下缘，下沿停在缩放 dock 上方。
+   宽度略收一档，配合更大的内边距，让两列缩略图从 208px 回到约 173px。 */
+.image-history-panel.is-canvas-panel {
+  --hb-history-panel-width: 400px;
+  /* 双侧滚动条留白后内容区会窄约 16px；基准档收到 168，仍稳定排成两列。 */
+  --hb-history-thumb: 168px;
+  --hb-history-bottom-clearance: calc(
+    var(--spacing-4) + var(--control-height) + var(--spacing-1) + var(--spacing-2)
+  );
+  left: var(--spacing-4);
+  top: calc(var(--top-nav-height) - var(--spacing-1));
+  bottom: var(--hb-history-bottom-clearance);
+  width: min(var(--hb-history-panel-width), calc(100vw - 96px));
+  max-height: none;
+  border: 1px solid var(--surface-panel-border);
+  animation: history-canvas-pop var(--motion-slow) var(--ease-out) both;
+}
+
+.image-history-panel.is-canvas-panel.is-leaving {
+  animation: history-canvas-leave var(--motion-slow) var(--ease-in) both;
+}
+
+@keyframes history-canvas-pop {
+  from {
+    opacity: 0;
+    transform: translateX(calc(var(--spacing-3) * -1)) scale(0.992);
+  }
+}
+
+@keyframes history-canvas-leave {
+  to {
+    opacity: 0;
+    transform: translateX(-12px) scale(0.992);
+  }
+}
+
+.image-history-panel.is-canvas-panel .image-history-head {
+  gap: var(--spacing-3);
+  padding: var(--spacing-4) var(--spacing-4) var(--spacing-3);
+  border-bottom: 0;
+}
+
+.image-history-panel.is-canvas-panel .image-history-head button {
+  width: var(--control-height-compact);
+  height: var(--control-height-compact);
+  border-radius: var(--radius-xs);
+}
+
+.image-history-panel.is-canvas-panel .image-history-head .image-history-multi {
+  width: auto;
+  min-width: calc(var(--control-height-compact) + var(--spacing-3));
+  padding: 0 var(--spacing-2);
+}
+
+.image-history-panel.is-canvas-panel .image-history-head strong {
+  font-size: var(--font-size-md);
+}
+
+.image-history-panel.is-canvas-panel .image-history-filter {
+  padding: 0 var(--spacing-4) var(--spacing-3);
+  border-bottom: 0;
+}
+
+.image-history-panel.is-canvas-panel .image-history-scroll {
+  gap: var(--spacing-3);
+  padding: 0 var(--spacing-3);
+  scrollbar-gutter: stable both-edges;
 }
 
 .image-history-panel.is-inline {
@@ -124,12 +193,17 @@
   font-variant-numeric: tabular-nums;
 }
 
-/* 头部动作区：多选开关 +（多选态下才出现的）删除按钮 */
+/* 头部动作区：多选 / 本地文件夹 / 视图切换，统一靠右。 */
 .image-history-head-actions {
   flex: none;
   display: flex;
   align-items: center;
   gap: var(--spacing-1);
+  margin-left: auto;
+}
+
+.image-history-head-actions .image-history-views {
+  margin-left: 0;
 }
 
 .image-history-reveal-error {
@@ -167,25 +241,19 @@
   color: var(--color-text-primary);
 }
 
-/* 带文字的小开关：比纯图标按钮宽一截，圆角走控件档。
-   选择器带上 .image-history-head 前缀，才压得过下面「头部图标按钮」的 28px 宽基础规则 */
-/* 基类给按钮是 display: grid：图标 + 文字会被摆进两个隐式行、竖着堆。
-   这里改回横排（图标在左、文字在右），28px 高的按钮里垂直居中 */
+/* 多选开关用文字表达，避免图标在紧凑头部里产生对齐歧义。 */
 .image-history-head .image-history-multi {
   width: auto;
   display: inline-flex;
   align-items: center;
-  gap: var(--spacing-1);
+  justify-content: center;
   padding: 0 var(--spacing-2);
   border-radius: var(--radius-xs);
   font-family: var(--font-sans);
   font-size: var(--font-size-xs);
+  line-height: 1;
+  text-align: center;
   white-space: nowrap;
-}
-
-.image-history-head .image-history-multi svg {
-  width: 14px;
-  height: 14px;
 }
 
 .image-history-head .image-history-multi[aria-pressed='true'] {
@@ -193,46 +261,12 @@
   color: var(--color-text-primary);
 }
 
-/* 多选态下这颗按钮就是退出入口（文案变「取消多选」）：点亮 + 一圈内描边，
-   和普通 toggle、和 hover 灰底都区分开，一眼知道点它是出去 */
+/* 选择态下这颗按钮就是退出入口：点亮 + 一圈内描边，和普通 hover 灰底区分开。 */
 .image-history-head .image-history-multi.is-exit,
 .image-history-head .image-history-multi.is-exit:hover {
   background: var(--color-interaction-default);
   color: var(--color-text-primary);
   box-shadow: inset 0 0 0 1px var(--color-ui-border-strong);
-}
-
-/* 删除：多选态下的醒目主操作。常态是红槽红字（--color-accent-red-subtle 底 + --color-accent-red 字）；
-   第一下「上膛」整块翻实心红并改文案「确认删除」，2 秒内第二下才真删，超时退回普通态。
-   选择器同样带 .image-history-head 前缀，压过头部图标按钮的 28px 宽基础规则。 */
-.image-history-head .image-history-delete {
-  width: auto;
-  padding: 0 var(--spacing-3);
-  border-radius: var(--radius-xs);
-  background: var(--color-accent-red-subtle);
-  color: var(--color-accent-red);
-  font-family: var(--font-sans);
-  font-size: var(--font-size-xs);
-  font-variant-numeric: tabular-nums;
-  white-space: nowrap;
-  transition: background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out);
-}
-
-.image-history-head .image-history-delete:hover:not(:disabled) {
-  background: color-mix(in srgb, var(--color-accent-red) 22%, var(--color-accent-red-subtle));
-}
-
-.image-history-head .image-history-delete.is-armed,
-.image-history-head .image-history-delete.is-armed:hover:not(:disabled) {
-  background: var(--color-accent-red);
-  color: var(--color-on-accent);
-}
-
-/* 没得可删（一个都没勾）或正在删：置灰且不接点击 */
-.image-history-head .image-history-delete:disabled {
-  background: var(--color-ui-control-hover);
-  color: var(--color-text-tertiary);
-  cursor: default;
 }
 
 .image-history-filter {
@@ -242,6 +276,12 @@
   gap: var(--spacing-1);
   padding: var(--spacing-2) var(--spacing-3);
   border-bottom: 1px solid var(--divider-subtle);
+}
+
+.image-history-filter-tabs {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-1);
 }
 
 .image-history-filter-actions {
@@ -335,6 +375,11 @@
   cursor: pointer;
 }
 
+.image-history-filter-actions .image-history-views button svg {
+  width: var(--icon-glyph-sm);
+  height: var(--icon-glyph-sm);
+}
+
 .image-history-filter-actions .image-history-views button:hover {
   background: var(--color-ui-control-hover);
   color: var(--color-text-primary);
@@ -349,8 +394,82 @@
   border-radius: var(--radius-sm);
 }
 
+.image-history-bulkbar {
+  flex: none;
+  min-height: calc(var(--control-height-compact) + var(--spacing-2));
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-2);
+  margin: var(--spacing-3) var(--spacing-3) var(--spacing-3);
+  padding: var(--spacing-1) var(--spacing-1) var(--spacing-1) var(--spacing-2);
+  border: 1px solid var(--surface-panel-border);
+  border-radius: var(--radius-md);
+  background: var(--color-ui-control-panel);
+}
+
+.image-history-bulk-selected {
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-xs);
+  white-space: nowrap;
+}
+
+.image-history-bulk-selected strong {
+  color: var(--color-text-primary);
+  font-weight: var(--font-weight-semibold);
+  font-variant-numeric: tabular-nums;
+}
+
+.image-history-bulk-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-1);
+  margin-left: auto;
+}
+
+.image-history-bulkbar button {
+  width: var(--control-height-compact);
+  height: var(--control-height-compact);
+  flex: none;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-xs);
+  background: transparent;
+  color: var(--color-text-tertiary);
+  cursor: pointer;
+  transition: background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out);
+}
+
+.image-history-bulkbar button:hover:not(:disabled) {
+  background: var(--color-ui-control-hover);
+  color: var(--color-text-primary);
+}
+
+.image-history-bulkbar button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.image-history-bulkbar button svg {
+  width: var(--icon-glyph-sm);
+  height: var(--icon-glyph-sm);
+}
+
+.image-history-bulk-actions .image-history-delete:hover:not(:disabled) {
+  background: var(--color-accent-red-subtle);
+  color: var(--color-accent-red);
+}
+
+.image-history-bulk-actions .image-history-delete.is-armed,
+.image-history-bulk-actions .image-history-delete.is-armed:hover:not(:disabled) {
+  background: var(--color-accent-red);
+  color: var(--color-on-accent);
+}
+
 .image-history-filter-btn {
-  min-height: 28px;
+  height: var(--control-height-compact);
+  min-height: var(--control-height-compact);
   display: inline-flex;
   align-items: center;
   gap: var(--spacing-1);
@@ -380,12 +499,12 @@
   color: var(--color-text-primary);
 }
 
-.image-history-filter-btn[aria-pressed='true'] {
+.image-history-filter-btn[aria-selected='true'] {
   background: var(--color-interaction-default);
   color: var(--color-text-primary);
 }
 
-.image-history-filter-btn[aria-pressed='true'] span {
+.image-history-filter-btn[aria-selected='true'] span {
   color: var(--color-text-secondary);
 }
 
@@ -395,7 +514,6 @@
   display: flex;
   align-items: center;
   gap: 2px;
-  margin-left: auto;
 }
 
 .image-history-views button:hover {

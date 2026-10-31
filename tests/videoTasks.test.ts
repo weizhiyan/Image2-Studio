@@ -75,18 +75,62 @@ describe('视频任务记录', () => {
     vi.resetModules();
   });
 
+  it('并发占位时同一节点只有一个请求能取得提交权', async () => {
+    const input = {
+      profileId: 'profile', nodeId: 'node', canvasId: 'canvas', prompt: '视频',
+      model: 'video-model', seconds: 5, resolution: '480p', ratio: '16:9',
+    };
+    const [first, second] = await Promise.all([
+      tasks.reserveVideoTask(input),
+      tasks.reserveVideoTask(input),
+    ]);
+
+    expect([first, second].filter((item) => item.reserved)).toHaveLength(1);
+    expect(await tasks.listVideoTasks()).toHaveLength(1);
+  });
+
+  it('结果未知的占位会阻止同节点再次提交', async () => {
+    const input = {
+      profileId: 'profile', nodeId: 'node', canvasId: 'canvas', prompt: '视频',
+      model: 'video-model', seconds: 5, resolution: '480p', ratio: '16:9',
+    };
+    await tasks.reserveVideoTask(input);
+
+    const again = await tasks.reserveVideoTask(input);
+
+    expect(again.reserved).toBe(false);
+    expect(again.record.submissionUnknown).toBe(true);
+    expect(await tasks.listVideoTasks()).toHaveLength(1);
+  });
+
+  it('明确失败后允许同节点重新提交', async () => {
+    const input = {
+      profileId: 'profile', nodeId: 'node', canvasId: 'canvas', prompt: '视频',
+      model: 'video-model', seconds: 5, resolution: '480p', ratio: '16:9',
+    };
+    await tasks.reserveVideoTask(input);
+    await tasks.failVideoSubmission('node', '明确失败');
+
+    const again = await tasks.reserveVideoTask(input);
+
+    expect(again.reserved).toBe(true);
+    expect(await tasks.listVideoTasks()).toHaveLength(2);
+  });
+
   it('按节点恢复最近一次任务，而不是旧任务', async () => {
     await tasks.reserveVideoTask({
       profileId: 'profile', nodeId: 'node', canvasId: 'canvas', prompt: '旧任务',
       model: 'video-model', seconds: 5, resolution: '480p', ratio: '16:9',
     });
+    await tasks.failVideoSubmission('node', '旧任务明确失败');
     await new Promise((resolve) => setTimeout(resolve, 3));
     const latest = await tasks.reserveVideoTask({
       profileId: 'profile', nodeId: 'node', canvasId: 'canvas', prompt: '新任务',
       model: 'video-model', seconds: 5, resolution: '480p', ratio: '16:9',
     });
 
-    expect((await tasks.findVideoTaskByNode('node'))?.createdAt).toBe(latest.createdAt);
+    expect(latest.reserved).toBe(true);
+    expect((await tasks.findVideoTaskByNode('node'))?.createdAt).toBe(latest.record.createdAt);
   });
 
   it('提交回执绑定到最新占位任务，不误改旧任务', async () => {
@@ -94,6 +138,7 @@ describe('视频任务记录', () => {
       profileId: 'profile', nodeId: 'node', canvasId: 'canvas', prompt: '旧任务',
       model: 'video-model', seconds: 5, resolution: '480p', ratio: '16:9',
     });
+    await tasks.failVideoSubmission('node', '旧任务明确失败');
     await new Promise((resolve) => setTimeout(resolve, 3));
     const latest = await tasks.reserveVideoTask({
       profileId: 'profile', nodeId: 'node', canvasId: 'canvas', prompt: '新任务',
@@ -102,13 +147,14 @@ describe('视频任务记录', () => {
 
     await tasks.confirmVideoSubmission('node', 'task-new');
     const records = await tasks.listVideoTasks();
-    const updated = records.find((record) => record.createdAt === latest.createdAt);
-    const previous = records.find((record) => record.prompt === '旧任务');
+    const updated = records.find((record) => record.prompt === '新任务');
+    const old = records.find((record) => record.prompt === '旧任务');
 
+    expect(latest.reserved).toBe(true);
     expect(updated?.taskId).toBe('task-new');
     expect(updated?.submissionUnknown).toBe(false);
     expect(updated?.error).toBeUndefined();
-    expect(previous?.submissionUnknown).toBe(true);
+    expect(old?.status).toBe('failed');
   });
 
   it('结果未知时保留待核查标记', async () => {

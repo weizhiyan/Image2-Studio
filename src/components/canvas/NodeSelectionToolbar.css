@@ -68,16 +68,12 @@
   color: var(--color-accent-red);
 }
 
-.image-selection-toolbar .image-selection-toolbar-glyph-sm.is-copied {
-  color: var(--color-brand);
-}
-
 /* ── Figma 2664:1926 度量对齐 ────────────────────────────────────────────
    基础规则（ImageNodes.css:1231 起，禁改）把图标钮一律做成 32×32、svg 压到 17px，
    那是旧手写图标的尺寸。本轮将图标统一缩小一档，但不改变按钮命中区：
    - 放大 / 绘画：18px 图标 → 钮仍为 36×32
    - 二次编辑 / 重新生成：16px 图标 → 文字钮自动宽 / 淡底钮仍为 42×32
-   - 复制提示词 / 删除节点：16px 图标 → 普通钮仍为 32×32
+   - 删除节点：16px 图标 → 普通钮仍为 32×32
    全部用「类名 + 类名」两级选择器，特异性稳压 ImageNodes.css 的同名基础规则，
    不依赖两个文件的注入顺序。 */
 .image-selection-toolbar > button.image-selection-toolbar-glyph-lg {
@@ -101,7 +97,7 @@
   font-size: var(--font-size-base);
 }
 
-/* 二次编辑 / 重新生成 / 复制提示词 / 删除：统一缩小为 16px 图标。 */
+/* 二次编辑 / 重新生成 / 删除：统一缩小为 16px 图标。 */
 .image-selection-toolbar > button.image-selection-toolbar-text svg,
 .image-selection-toolbar > button.image-selection-toolbar-accent svg,
 .image-selection-toolbar > button.image-selection-toolbar-glyph-sm svg {

@@ -52,6 +52,15 @@ describe('本机对话角色', () => {
     expect(await listPromptSkills()).toEqual([]);
   });
 
+  it('角色温度持久化并限制在 0-1', async () => {
+    const created = await savePromptSkill({ name: '温度角色', content: '提示词', temperature: 0.9 });
+    expect(created.temperature).toBe(0.9);
+    expect((await listPromptSkills()).find((role) => role.id === created.id)?.temperature).toBe(0.9);
+
+    const clamped = await savePromptSkill({ name: '温度上限', content: '提示词', temperature: 5 });
+    expect(clamped.temperature).toBe(1);
+  });
+
   it('允许仅用 Skill 组成角色，并限制每个角色最多 9 个 Skill', async () => {
     const skills = Array.from({ length: 9 }, (_, index) => ({
       id: `skill-${index}`,

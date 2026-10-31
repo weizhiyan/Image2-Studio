@@ -26,6 +26,8 @@ export interface PromptSkill {
   content: string;
   /** 随角色一起注入的 Skill 文件。 */
   skills: RoleSkill[];
+  /** 对话采样温度 0-1；缺省按 0.6。 */
+  temperature?: number;
   enabled: boolean;
   createdAt: string;
   updatedAt: string;
@@ -38,6 +40,13 @@ export interface PromptRoleSnapshot {
   category?: string;
   systemPrompt: string;
   skills: RoleSkill[];
+  temperature?: number;
+}
+
+function normalizeTemperature(value: unknown): number | undefined {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return undefined;
+  return Math.min(1, Math.max(0, Math.round(number * 10) / 10));
 }
 
 let writeChain: Promise<unknown> = Promise.resolve();
@@ -68,6 +77,7 @@ async function readFile(): Promise<PromptSkill[]> {
         avatarUrl: String(item.avatarUrl || '').trim().slice(0, 2048),
         content,
         skills,
+        temperature: normalizeTemperature(item.temperature),
         enabled: true,
         createdAt: String(item.createdAt || now),
         updatedAt: String(item.updatedAt || now),
@@ -128,6 +138,7 @@ export async function savePromptSkill(input: {
   avatarUrl?: string;
   content?: string;
   skills?: Array<Partial<RoleSkill>>;
+  temperature?: number;
   enabled?: boolean;
 }): Promise<PromptSkill> {
   const name = String(input.name || '').trim().slice(0, 100);
@@ -135,6 +146,7 @@ export async function savePromptSkill(input: {
   const category = String(input.category || '').trim().slice(0, 60);
   const avatarUrl = String(input.avatarUrl || '').trim().slice(0, 2048);
   const content = String(input.content || '').trim();
+  const temperature = normalizeTemperature(input.temperature);
   if (!name) throw new Error('角色名称不能为空');
   if (content.length > MAX_SKILL_CHARS) throw new Error(`系统提示词不能超过 ${MAX_SKILL_CHARS} 个字符`);
   const roleSkills = normalizeRoleSkills(input.skills || []);
@@ -158,6 +170,7 @@ export async function savePromptSkill(input: {
       avatarUrl,
       content,
       skills: roleSkills,
+      temperature,
       enabled: true,
       createdAt: existing?.createdAt || now,
       updatedAt: now,
@@ -187,6 +200,7 @@ export function normalizePromptRoleSnapshot(raw: unknown): PromptRoleSnapshot | 
   if (!id || !name) return undefined;
   const systemPrompt = String(item.systemPrompt || item.content || '').trim().slice(0, MAX_SKILL_CHARS);
   const skills = normalizeRoleSkills(item.skills);
+  const temperature = normalizeTemperature(item.temperature);
   if (!systemPrompt && skills.length === 0) return undefined;
   return {
     id,
@@ -195,6 +209,7 @@ export function normalizePromptRoleSnapshot(raw: unknown): PromptRoleSnapshot | 
     ...(String(item.category || '').trim() ? { category: String(item.category).trim().slice(0, 60) } : {}),
     systemPrompt,
     skills,
+    ...(typeof temperature === 'number' ? { temperature } : {}),
   };
 }
 

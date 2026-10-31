@@ -1,11 +1,12 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { SIZE_PRESETS } from '@/lib/aspect';
-import { pickSingleLanguageProfileId, withSingleLanguageProfile } from '@/lib/profileEnable';
+import { pickDefaultLanguageProfileId } from '@/lib/profileEnable';
 import { useSettingsStore } from '@/stores/settingsStore';
 import { fetchModels, fetchVideoModels, revealSavedApiKey, testConnection } from '@/lib/bridge';
 import { describeRequestError } from '@/lib/errors';
 import { TrashIcon } from '@/components/canvas/NodeChrome';
 import ChatRolesSettings from '@/components/ChatRolesSettings';
+import ChatMemorySettings from '@/components/ChatMemorySettings';
 import type { CustomVideoApiConfig, ImageApiMode, ProfileKind, TextApiFormat, VideoApiMode } from '@/types';
 import { renderVideoHeadersTemplate, renderVideoRequestTemplate } from '../../bridge/videoRequestTemplate';
 import './model-config.css';
@@ -53,6 +54,9 @@ interface ProfileDraft {
   model: string;
   defaultSize: string;
   models: string[];
+  /** 卡片里展示的模型（内层勾选）。 */
+  selectedModels: string[];
+  /** 实际启用的模型（卡片开关）。 */
   enabledModels: string[];
   kind: ProfileKind;
   textFormat: TextApiFormat;
@@ -67,8 +71,8 @@ interface ProfileDraft {
 
 /**
  * 左侧配置列表的一行（参考图）：名称 + 模型名 + 右侧开关与删除。
- * 生图配置可多路同时启用（开关各自独立）；
- * 语言模型同时只启用一路——开新的会自动让位旧的（互斥在 toggleDraftEnabled 里）。
+ * 生图配置和语言模型都可以多路同时启用（开关各自独立）；
+ * 语言模型的默认那路由设置里的 textProfileId 决定，对话里可按线程切换。
  * 行主体点开是右侧编辑器。
  */
 export interface ProfileRowProps {
@@ -104,11 +108,12 @@ export function ProfileOverviewCard({
   onToggleModel,
   onTest,
 }: ProfileOverviewCardProps) {
-  const modelNames = Array.from(new Set([...draft.models, ...draft.enabledModels, draft.model].map((name) => name.trim()).filter(Boolean)));
-  const isModelEnabled = (name: string) => draft.enabledModels.includes(name)
-    || (draft.enabledModels.length === 0 && draft.model === name);
-  const enabledModels = modelNames.filter(isModelEnabled);
-  const enabledCount = draft.enabledModels.length || (draft.model ? 1 : 0);
+  const selectedModels = draft.selectedModels ?? draft.enabledModels;
+  const modelNames = Array.from(new Set(
+    [...selectedModels, ...draft.enabledModels, draft.model].map((name) => name.trim()).filter(Boolean),
+  ));
+  const isModelEnabled = (name: string) => draft.enabledModels.includes(name);
+  const enabledCount = modelNames.filter(isModelEnabled).length;
 
   return (
     <article
@@ -144,27 +149,30 @@ export function ProfileOverviewCard({
         </div>
       </header>
       <div className="model-config-overview-models">
-        {enabledModels.map((name) => (
-          <div className="model-config-overview-model is-enabled" key={name}>
-            <span title={name}>{name}</span>
-            <button
-              type="button"
-              role="switch"
-              aria-checked="true"
-              aria-label={`停用模型 ${name}`}
-              title="停用模型"
-              className="model-config-profile-switch on"
-              disabled={saving}
-              onClick={(event) => {
-                event.stopPropagation();
-                onToggleModel(draft.id, name);
-              }}
-            >
-              <span className="model-config-profile-switch-track" aria-hidden="true"><i /></span>
-            </button>
-          </div>
-        ))}
-        {enabledModels.length === 0 ? (
+        {modelNames.map((name) => {
+          const enabled = isModelEnabled(name);
+          return (
+            <div className={`model-config-overview-model${enabled ? ' is-enabled' : ''}`} key={name}>
+              <span title={name}>{name}</span>
+              <button
+                type="button"
+                role="switch"
+                aria-checked={enabled}
+                aria-label={`${enabled ? '停用' : '启用'}模型 ${name}`}
+                title={enabled ? '停用模型' : '启用模型'}
+                className={`model-config-profile-switch ${enabled ? 'on' : ''}`}
+                disabled={saving}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onToggleModel(draft.id, name);
+                }}
+              >
+                <span className="model-config-profile-switch-track" aria-hidden="true"><i /></span>
+              </button>
+            </div>
+          );
+        })}
+        {modelNames.length === 0 ? (
           <span className="model-config-overview-empty">还没有模型</span>
         ) : null}
       </div>
@@ -185,7 +193,7 @@ export function ProfileRow({
 }: ProfileRowProps) {
   const isText = kind === 'text';
   // filter(Boolean)：拼空串会留下双空格，class 里看着像两个类其实有一个是空的
-  const rowClass = ['model-config-profile-row', selected ? 'selected' : '', enabled ? '' : 'is-disabled']
+  const rowClass = ['model-config-profile-row', selected ? 'selected' : '', !isText && !enabled ? 'is-disabled' : '']
     .filter(Boolean)
     .join(' ');
   return (
@@ -194,26 +202,26 @@ export function ProfileRow({
         type="button"
         className="model-config-profile-main"
         onClick={() => onSelect(id)}
-        title={enabled ? undefined : '已停用：不参与默认选用'}
+        title={!isText && !enabled ? '已停用：不参与默认选用' : undefined}
       >
         <strong>{name}</strong>
         <small>{model}</small>
       </button>
       <div className="model-config-profile-actions">
-        {/* 启停开关：生图可多开，语言模型互斥（toggleDraftEnabled 里让位） */}
-        <button
-          type="button"
-          role="switch"
-          aria-checked={enabled}
-          className={`model-config-profile-switch ${enabled ? 'on' : ''}`}
-          title={enabled
-            ? (isText ? '当前使用中，点击停用' : '已启用：参与默认选用，点击停用')
-            : (isText ? '点击启用：设为当前语言模型（其它语言模型会让位）' : '已停用：不参与默认选用，点击启用')}
-          aria-label={`${enabled ? '停用' : '启用'} ${name}`}
-          onClick={() => onToggleEnabled(id)}
-        >
-          <span className="model-config-profile-switch-track" aria-hidden="true"><i /></span>
-        </button>
+        {/* 语言配置不再有配置级启停；生图 / 视频仍保留开关 */}
+        {!isText ? (
+          <button
+            type="button"
+            role="switch"
+            aria-checked={enabled}
+            className={`model-config-profile-switch ${enabled ? 'on' : ''}`}
+            title={enabled ? '已启用：参与默认选用，点击停用' : '已停用：不参与默认选用，点击启用'}
+            aria-label={`${enabled ? '停用' : '启用'} ${name}`}
+            onClick={() => onToggleEnabled(id)}
+          >
+            <span className="model-config-profile-switch-track" aria-hidden="true"><i /></span>
+          </button>
+        ) : null}
         <button
           type="button"
           className="model-config-profile-delete"
@@ -288,7 +296,8 @@ export default function SettingsPanel({ onClose }: SettingsPanelProps) {
   const [textProfileId, setTextProfileId] = useState('');
   const [direct, setDirect] = useState(true);
   /** 设置弹窗分类；偏好档案页只承载 AI 对话角色。 */
-  const [tab, setTab] = useState<'image' | 'text' | 'video' | 'preferences'>('image');
+  const [tab, setTab] = useState<'image' | 'text' | 'video' | 'preferences' | 'memory'>('image');
+  const [memoryVisited, setMemoryVisited] = useState(false);
   const [selectedId, setSelectedId] = useState('');
   const [editorOpen, setEditorOpen] = useState(false);
   const [roleDetailOpen, setRoleDetailOpen] = useState(false);
@@ -299,15 +308,40 @@ export default function SettingsPanel({ onClose }: SettingsPanelProps) {
   const [revealingApiKey, setRevealingApiKey] = useState(false);
   const [manualModel, setManualModel] = useState('');
   const [pickerOpen, setPickerOpen] = useState(false);
+  const [languagePickerOpen, setLanguagePickerOpen] = useState(false);
   const [fetching, setFetching] = useState(false);
   const [testing, setTesting] = useState(false);
   const [testingProfileId, setTestingProfileId] = useState('');
   const [saving, setSaving] = useState(false);
   const [notice, setNotice] = useState('');
   const [errorText, setErrorText] = useState('');
+  const [closing, setClosing] = useState(false);
   const pickerRef = useRef<HTMLDivElement>(null);
+  const languagePickerRef = useRef<HTMLDivElement>(null);
+  const closingRef = useRef(false);
+  const closedRef = useRef(false);
+  const closeTimerRef = useRef<number | undefined>(undefined);
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
   /** 配置草稿只做首次水合，后续 store 刷新不覆盖本地编辑。 */
   const hydratedRef = useRef(false);
+
+  const finishClose = useCallback(() => {
+    if (closedRef.current) return;
+    closedRef.current = true;
+    window.clearTimeout(closeTimerRef.current);
+    onCloseRef.current();
+  }, []);
+
+  const requestClose = useCallback(() => {
+    if (closingRef.current) return;
+    closingRef.current = true;
+    setClosing(true);
+    // 动画结束事件缺失（减少动态偏好 / 浏览器跳帧）时仍能卸载。
+    closeTimerRef.current = window.setTimeout(finishClose, 260);
+  }, [finishClose]);
+
+  useEffect(() => () => window.clearTimeout(closeTimerRef.current), []);
 
   useEffect(() => {
     if (!settings) return;
@@ -319,13 +353,12 @@ export default function SettingsPanel({ onClose }: SettingsPanelProps) {
       const fallbackId = settings.activeProfileId || firstImage || settings.profiles[0]?.id || '';
       setActiveId(fallbackId);
       setSelectedId(fallbackId);
-      setTextProfileId(settings.textProfileId || settings.profiles.find((profile) => profile.kind === 'text')?.id || '');
+      setTextProfileId(pickDefaultLanguageProfileId(settings.profiles, settings.textProfileId));
     }
     setDirect(settings.direct !== false);
     if (firstHydration) {
       // 只首次把服务端配置灌入草稿。打开面板时可能已有一次刷新在途；若每次 settings
       // 更新都重建草稿，会覆盖用户刚输入的 URL / Key / 模型。首次读取期间新增的临时草稿要保留。
-      const languageKeepId = pickSingleLanguageProfileId(settings.profiles, settings.textProfileId);
       setDrafts((current) => {
         const serverDrafts = settings.profiles.map((profile) => {
           const local = current.find((draft) => draft.id === profile.id);
@@ -338,7 +371,12 @@ export default function SettingsPanel({ onClose }: SettingsPanelProps) {
             model: profile.model,
             defaultSize: profile.defaultSize,
             models: profile.models || [],
-            enabledModels: profile.enabledModels || [],
+            selectedModels: Array.isArray(profile.selectedModels)
+              ? profile.selectedModels
+              : (profile.enabledModels?.length ? profile.enabledModels : (profile.model ? [profile.model] : [])),
+            enabledModels: Array.isArray(profile.selectedModels)
+              ? (profile.enabledModels || [])
+              : (profile.enabledModels?.length ? profile.enabledModels : (profile.model ? [profile.model] : [])),
             kind: profile.kind || 'image',
             textFormat: profile.textFormat || 'auto',
             imageApiMode: profile.imageApiMode || 'images',
@@ -346,7 +384,7 @@ export default function SettingsPanel({ onClose }: SettingsPanelProps) {
             videoApiMode: profile.videoApiMode || 'auto',
             videoCustomConfig: profile.videoCustomConfig || DEFAULT_CUSTOM_VIDEO_CONFIG,
             keyConfigured: profile.keyConfigured,
-            enabled: profile.kind === 'text' ? profile.id === languageKeepId : profile.enabled !== false,
+            enabled: (profile.kind || 'image') === 'text' ? true : profile.enabled !== false,
           };
         });
         const serverIds = new Set(settings.profiles.map((profile) => profile.id));
@@ -359,11 +397,11 @@ export default function SettingsPanel({ onClose }: SettingsPanelProps) {
   /* Esc 关闭，对齐灵枢 Dialog */
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') onClose();
+      if (event.key === 'Escape') requestClose();
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [onClose]);
+  }, [requestClose]);
 
   /* 点外部收起模型下拉（生图默认模型 + 优化用语言模型两个） */
   useEffect(() => {
@@ -375,7 +413,16 @@ export default function SettingsPanel({ onClose }: SettingsPanelProps) {
     return () => window.removeEventListener('pointerdown', onPointerDown);
   }, [pickerOpen]);
 
-  const selected = tab === 'preferences'
+  useEffect(() => {
+    if (!languagePickerOpen) return undefined;
+    const onPointerDown = (event: PointerEvent) => {
+      if (!languagePickerRef.current?.contains(event.target as Node)) setLanguagePickerOpen(false);
+    };
+    window.addEventListener('pointerdown', onPointerDown);
+    return () => window.removeEventListener('pointerdown', onPointerDown);
+  }, [languagePickerOpen]);
+
+  const selected = tab === 'preferences' || tab === 'memory'
     ? null
     : drafts.find((draft) => draft.id === selectedId && draft.kind === tab)
       || drafts.find((draft) => draft.kind === tab)
@@ -394,7 +441,7 @@ export default function SettingsPanel({ onClose }: SettingsPanelProps) {
 
   /** 切 tab 时把选中项指到该类型的第一路：否则右栏还显示着另一类型的配置 */
   useEffect(() => {
-    if (tab === 'preferences') return;
+    if (tab === 'preferences' || tab === 'memory') return;
     const wanted = tab === 'image' ? 'image' : tab === 'video' ? 'video' : 'text';
     if (selected && (selected.kind || 'image') === wanted) return;
     const first = drafts.find((draft) => (draft.kind || 'image') === wanted);
@@ -475,7 +522,7 @@ export default function SettingsPanel({ onClose }: SettingsPanelProps) {
   /**
    * 启停开关（右侧编辑区的 switch 与左侧列表的勾选共用）：
    * 生图配置可以多路同时启用（画布上默认走哪一路由星标决定，也可按 id 手动指定）；
-   * 语言模型同时只跑一路——启用新的一路会让位旧的，与"提示词优化只能启用一路"对齐。
+   * 语言模型同样可以多路同时启用，对话里按线程选择具体模型。
    */
   const toggleDraftEnabled = (draft: ProfileDraft) => {
     const next = !draft.enabled;
@@ -490,7 +537,7 @@ export default function SettingsPanel({ onClose }: SettingsPanelProps) {
           nextTextProfileId = fallback?.id || '';
           setTextProfileId(nextTextProfileId);
         }
-        setNotice(fallback ? '已停用这路，提示词优化已切换到其它可用语言模型' : '没有其它可用的语言模型了：提示词优化会暂时不可用');
+        setNotice(fallback ? '已停用这路，默认语言模型已切换到其它可用配置' : '没有其它可用的语言模型了：提示词优化会暂时不可用');
       } else if (activeId === draft.id) {
         const fallback = drafts.find((item) => item.kind !== 'text' && item.id !== draft.id && item.enabled);
         nextActiveId = fallback?.id || '';
@@ -502,11 +549,13 @@ export default function SettingsPanel({ onClose }: SettingsPanelProps) {
       return;
     }
     if (draft.kind === 'text') {
-      // 语言模型只留一路：其余同时停用，提示词优化指向刚启用的这路
-      nextDrafts = withSingleLanguageProfile(nextDrafts, draft.id);
-      nextTextProfileId = draft.id;
-      setTextProfileId(nextTextProfileId);
-      setNotice('已启用这路语言模型，其它语言模型已让位（语言模型同时只能启用一路）');
+      // 多路语言模型可以同时启用；默认那路只在为空或已失效时才让位给新启用的这路
+      const currentDefault = drafts.find((item) => item.id === textProfileId);
+      if (!textProfileId || !currentDefault || !currentDefault.enabled) {
+        nextTextProfileId = draft.id;
+        setTextProfileId(nextTextProfileId);
+      }
+      setNotice('已启用这路语言模型，可在对话的模型菜单里切换使用');
     }
     setDrafts(nextDrafts);
     // 左侧开关是运行态入口，切换后立即落盘；右侧字段仍只在点击“保存配置”时提交。
@@ -528,6 +577,7 @@ export default function SettingsPanel({ onClose }: SettingsPanelProps) {
       model: '',
       defaultSize: kind === 'video' ? '' : SIZE_PRESETS[0],
       models: [],
+      selectedModels: [],
       enabledModels: [],
       kind,
       textFormat: 'auto',
@@ -538,13 +588,13 @@ export default function SettingsPanel({ onClose }: SettingsPanelProps) {
       keyConfigured: false,
       enabled: true,
     };
-    setDrafts((current) => (
-      // 语言模型同时只跑一路：新建的一路直接顶上，其余同时停用
-      kind === 'text' ? [...withSingleLanguageProfile(current, draft.id), draft] : [...current, draft]
-    ));
+    setDrafts((current) => [...current, draft]);
     setSelectedId(draft.id);
     setEditorOpen(true);
-    if (kind === 'text') setTextProfileId(draft.id);
+    const currentDefault = drafts.find((item) => item.id === textProfileId);
+    if (kind === 'text' && (!textProfileId || !currentDefault || !currentDefault.enabled)) {
+      setTextProfileId(draft.id);
+    }
     setNotice('');
     setErrorText('');
   };
@@ -564,13 +614,21 @@ export default function SettingsPanel({ onClose }: SettingsPanelProps) {
 
   const toggleModel = (name: string) => {
     if (!selected) return;
-    const next = new Set(selected.enabledModels);
-    if (next.has(name)) next.delete(name);
-    else next.add(name);
-    const list = Array.from(next);
+    const selectedSet = new Set(selected.selectedModels);
+    const enabledSet = new Set(selected.enabledModels);
+    if (selectedSet.has(name)) {
+      selectedSet.delete(name);
+      enabledSet.delete(name);
+    } else {
+      selectedSet.add(name);
+      enabledSet.add(name);
+    }
+    const nextSelected = Array.from(selectedSet);
+    const nextEnabled = Array.from(enabledSet);
     patchSelected({
-      enabledModels: list,
-      model: list.includes(selected.model) ? selected.model : list[0] || '',
+      selectedModels: nextSelected,
+      enabledModels: nextEnabled,
+      model: nextEnabled.includes(selected.model) ? selected.model : nextEnabled[0] || '',
     });
   };
 
@@ -614,7 +672,8 @@ export default function SettingsPanel({ onClose }: SettingsPanelProps) {
         const nextModel = nextEnabled.includes(selected.model)
           ? selected.model
           : nextEnabled[0] || '';
-        patchSelected({ models: nextModels, enabledModels: nextEnabled, model: nextModel });
+        const nextSelected = Array.from(new Set([...selected.selectedModels, ...nextEnabled]));
+        patchSelected({ models: nextModels, selectedModels: nextSelected, enabledModels: nextEnabled, model: nextModel });
         setNotice([`已获取 ${normalized.length} 个视频模型`, protocolNote, result.evidence].filter(Boolean).join('；'));
       } catch (err) {
         setErrorText(err instanceof Error ? err.message : '拉取视频模型失败');
@@ -635,7 +694,7 @@ export default function SettingsPanel({ onClose }: SettingsPanelProps) {
       const normalized = Array.from(new Set(list.map((item) => String(item).trim()).filter(Boolean)));
       if (normalized.length === 0) {
         // 服务端没给列表：绝不清空用户已勾选/已填的模型，否则默认模型会被抹成空、看着像配置丢了
-        setNotice(selected.enabledModels.length > 0
+        setNotice(selected.selectedModels.length > 0
           ? '服务端未返回模型列表，已保留当前勾选与默认模型；也可在下方手填模型名'
           : '服务端未返回模型列表，可在下方手填模型名');
         return;
@@ -649,7 +708,8 @@ export default function SettingsPanel({ onClose }: SettingsPanelProps) {
       const nextModel = normalized.includes(selected.model) && nextEnabled.includes(selected.model)
         ? selected.model
         : nextEnabled[0] || '';
-      patchSelected({ models: nextModels, enabledModels: nextEnabled, model: nextModel });
+      const nextSelected = Array.from(new Set([...selected.selectedModels, ...nextEnabled]));
+      patchSelected({ models: nextModels, selectedModels: nextSelected, enabledModels: nextEnabled, model: nextModel });
       setNotice(kept.length > 0
         ? `已获取 ${normalized.length} 个模型，保留 ${kept.length} 个已选模型`
         : hadSelection
@@ -668,9 +728,11 @@ export default function SettingsPanel({ onClose }: SettingsPanelProps) {
     if (!selected || !name) return;
     const nextModels = selected.models.includes(name) ? selected.models : [...selected.models, name];
     const nextEnabled = selected.enabledModels.includes(name) ? selected.enabledModels : [...selected.enabledModels, name];
+    const nextSelected = selected.selectedModels.includes(name) ? selected.selectedModels : [...selected.selectedModels, name];
     setManualModel('');
     patchSelected({
       models: nextModels,
+      selectedModels: nextSelected,
       enabledModels: nextEnabled,
       model: selected.model || name,
     });
@@ -748,10 +810,10 @@ export default function SettingsPanel({ onClose }: SettingsPanelProps) {
         }
       }
       const selectedDraftIndex = selected ? draftsToSave.findIndex((draft) => draft.id === selected.id) : -1;
-      // 保存前再归一一次：不管界面怎么绕，落盘的必须还是"语言模型只启用一路"
-      const normalizedDrafts = withSingleLanguageProfile(draftsToSave, pickSingleLanguageProfileId(draftsToSave, textProfileIdToSave));
+      // 语言模型可以多路启用；默认那路只保留仍启用的配置，避免指向已停用 / 已删除的 id。
+      const resolvedTextProfileId = pickDefaultLanguageProfileId(draftsToSave, textProfileIdToSave);
       const savedSettings = await save({
-        profiles: normalizedDrafts.map((draft) => ({
+        profiles: draftsToSave.map((draft) => ({
           // 保留新配置的临时 ID，bridge 保存时会把它映射成稳定 ID，
           // 这样 textProfileId / activeProfileId 不会在保存后指向不存在的配置。
           id: draft.id,
@@ -761,6 +823,7 @@ export default function SettingsPanel({ onClose }: SettingsPanelProps) {
           model: draft.model.trim(),
           defaultSize: draft.defaultSize,
           models: draft.models,
+          selectedModels: draft.selectedModels,
           enabledModels: draft.enabledModels,
           kind: draft.kind,
           textFormat: draft.textFormat,
@@ -769,13 +832,13 @@ export default function SettingsPanel({ onClose }: SettingsPanelProps) {
           videoCustomConfig: draft.kind === 'video' ? draft.videoCustomConfig : undefined,
           // 生图配置不能把语言模型名写成 Responses 主模型；运行时会按该路生图模型校验。
           responsesModel: draft.kind === 'text' ? draft.model : draft.responsesModel,
-          enabled: draft.enabled,
+          enabled: draft.kind === 'text' ? true : draft.enabled,
         })),
         activeProfileId: activeIdToSave,
-        textProfileId: textProfileIdToSave,
+        textProfileId: resolvedTextProfileId,
         direct,
       });
-      const persistedIds = new Map(normalizedDrafts.map((draft, index) => [
+      const persistedIds = new Map(draftsToSave.map((draft, index) => [
         draft.id,
         savedSettings.profiles[index]?.id || draft.id,
       ]));
@@ -807,8 +870,7 @@ export default function SettingsPanel({ onClose }: SettingsPanelProps) {
   const toggleOverviewModel = (profileId: string, modelName: string) => {
     const target = drafts.find((draft) => draft.id === profileId);
     if (!target) return;
-    const wasEnabled = target.enabledModels.includes(modelName)
-      || (target.enabledModels.length === 0 && target.model === modelName);
+    const wasEnabled = target.enabledModels.includes(modelName);
     const enabledModels = wasEnabled
       ? target.enabledModels.filter((name) => name !== modelName)
       : Array.from(new Set([...target.enabledModels, modelName]));
@@ -822,6 +884,11 @@ export default function SettingsPanel({ onClose }: SettingsPanelProps) {
 
   const currentKind: ProfileKind | null = tab === 'image' || tab === 'text' || tab === 'video' ? tab : null;
   const overviewProfiles = currentKind ? drafts.filter((draft) => draft.kind === currentKind) : [];
+  const enabledTextDrafts = drafts.filter((draft) => draft.kind === 'text' && draft.enabled);
+  const defaultLanguageId = enabledTextDrafts.some((draft) => draft.id === textProfileId)
+    ? textProfileId
+    : enabledTextDrafts[0]?.id || '';
+  const defaultLanguageDraft = enabledTextDrafts.find((draft) => draft.id === defaultLanguageId) || null;
   const canTestProfile = (draft: ProfileDraft) => Boolean(
     (draft.apiKey.trim() || draft.keyConfigured)
     && (draft.kind === 'image' || draft.model.trim()),
@@ -869,16 +936,25 @@ export default function SettingsPanel({ onClose }: SettingsPanelProps) {
     />
   );
   return (
-    <div className="hb-modal-overlay" role="presentation">
+    <div
+      className={`hb-modal-overlay${closing ? ' is-closing' : ''}`}
+      role="presentation"
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget) requestClose();
+      }}
+    >
       <div
-        className="model-config-modal model-config-modal-wide"
+        className={`model-config-modal model-config-modal-wide${closing ? ' is-closing' : ''}`}
         role="dialog"
         aria-label="AI 模型设置"
         onClick={(event) => event.stopPropagation()}
+        onAnimationEnd={(event) => {
+          if (closing && event.target === event.currentTarget) finishClose();
+        }}
       >
         <div className="model-config-modal-head">
           <h2>AI 模型设置</h2>
-          <button type="button" className="model-config-close" onClick={onClose} aria-label="关闭 AI 模型设置">×</button>
+          <button type="button" className="model-config-close" onClick={requestClose} aria-label="关闭 AI 模型设置">×</button>
         </div>
 
         {error ? (
@@ -932,10 +1008,12 @@ export default function SettingsPanel({ onClose }: SettingsPanelProps) {
           >
             偏好档案
           </button>
+          <button type="button" role="tab" aria-selected={tab === 'memory'} className={`model-config-tab ${tab === 'memory' ? 'active' : ''}`} onClick={() => { setTab('memory'); setMemoryVisited(true); setEditorOpen(false); }}>对话记忆</button>
         </div>
         ) : null}
 
-        {tab === 'preferences' ? (
+        {memoryVisited ? <div className="chat-memory-settings" hidden={tab !== 'memory'}><ChatMemorySettings onClose={requestClose} /></div> : null}
+        {tab === 'memory' ? null : tab === 'preferences' ? (
           <div className="model-config-modal-body model-config-roles-panel">
             <ChatRolesSettings onDetailChange={setRoleDetailOpen} />
           </div>
@@ -952,18 +1030,20 @@ export default function SettingsPanel({ onClose }: SettingsPanelProps) {
             <strong>{selected?.name || '模型配置'}</strong>
             {selected ? (
               <>
-                <button
-                  type="button"
-                  role="switch"
-                  aria-checked={selected.enabled}
-                  aria-label={`${selected.enabled ? '停用' : '启用'} ${selected.name}`}
-                  title={selected.enabled ? '停用这路配置' : '启用这路配置'}
-                  className={`model-config-profile-switch ${selected.enabled ? 'on' : ''}`}
-                  disabled={saving}
-                  onClick={() => toggleDraftEnabled(selected)}
-                >
-                  <span className="model-config-profile-switch-track" aria-hidden="true"><i /></span>
-                </button>
+                {selected.kind !== 'text' ? (
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-checked={selected.enabled}
+                    aria-label={`${selected.enabled ? '停用' : '启用'} ${selected.name}`}
+                    title={selected.enabled ? '停用这路配置' : '启用这路配置'}
+                    className={`model-config-profile-switch ${selected.enabled ? 'on' : ''}`}
+                    disabled={saving}
+                    onClick={() => toggleDraftEnabled(selected)}
+                  >
+                    <span className="model-config-profile-switch-track" aria-hidden="true"><i /></span>
+                  </button>
+                ) : null}
                 <button type="button" className="model-config-delete-action" aria-label={`删除 ${selected.name}`} title="删除配置" onClick={deleteSelectedProfile}>
                   <TrashIcon />
                   <span>删除</span>
@@ -1150,7 +1230,7 @@ export default function SettingsPanel({ onClose }: SettingsPanelProps) {
                     <div>
                       <div className="model-config-model-section-title">
                         <strong>已获取模型</strong>
-                        <span>{selected.enabledModels.length} / {selected.models.length} 已选择</span>
+                        <span>{selected.selectedModels.length} / {selected.models.length} 已选择</span>
                       </div>
                     </div>
                     <button
@@ -1184,7 +1264,7 @@ export default function SettingsPanel({ onClose }: SettingsPanelProps) {
                         <label className="model-config-model-choice">
                           <input
                             type="checkbox"
-                            checked={selected.enabledModels.includes(name)}
+                            checked={selected.selectedModels.includes(name)}
                             onChange={() => toggleModel(name)}
                             aria-label={`${name} 选择`}
                           />
@@ -1375,17 +1455,77 @@ export default function SettingsPanel({ onClose }: SettingsPanelProps) {
           </>
         ) : (
           <section className="model-config-overview" aria-label="模型配置列表">
-            <div className="model-config-overview-toolbar">
-              <button
-                type="button"
-                className="model-config-profile-add"
-                disabled={!settings || loading || Boolean(storeError) || !currentKind}
-                onClick={() => { if (currentKind) handleAddProfile(currentKind); }}
-              >
-                <PlusIcon />
-                <span>添加模型</span>
-              </button>
-            </div>
+            {tab === 'text' ? (
+              <div className="model-config-default-language">
+                <div className="model-config-default-language-row">
+                  <span className="model-config-default-language-label">提示词优化</span>
+                  <div className="model-config-model-picker model-config-default-language-picker" ref={languagePickerRef}>
+                    <button
+                      type="button"
+                      className="model-config-model-picker-trigger"
+                      aria-expanded={languagePickerOpen}
+                      aria-haspopup="listbox"
+                      disabled={saving || loading || Boolean(storeError) || enabledTextDrafts.length === 0}
+                      onClick={() => setLanguagePickerOpen((open) => !open)}
+                    >
+                      <span>
+                        {defaultLanguageDraft
+                          ? `${defaultLanguageDraft.name} · ${defaultLanguageDraft.model || '未填写模型'}`
+                          : '没有启用的语言模型'}
+                      </span>
+                      <span aria-hidden="true">▾</span>
+                    </button>
+                    {languagePickerOpen ? (
+                      <div className="model-config-model-picker-menu" role="listbox" aria-label="选择提示词优化模型">
+                        {enabledTextDrafts.map((draft) => {
+                          const ready = Boolean(draft.model && (draft.keyConfigured || draft.apiKey.trim()));
+                          return (
+                            <button
+                              key={draft.id}
+                              type="button"
+                              role="option"
+                              aria-selected={draft.id === defaultLanguageId}
+                              disabled={!ready}
+                              onClick={() => {
+                                setTextProfileId(draft.id);
+                                setLanguagePickerOpen(false);
+                                window.setTimeout(() => void handleSave(drafts, activeId, draft.id), 0);
+                              }}
+                            >
+                              <span>{draft.name} · {draft.model || '未填写模型'}</span>
+                              {ready ? null : <small>未配置 Key</small>}
+                            </button>
+                          );
+                        })}
+                        {enabledTextDrafts.length === 0 ? <span>没有启用的语言模型</span> : null}
+                      </div>
+                    ) : null}
+                  </div>
+                  <button
+                    type="button"
+                    className="model-config-profile-add is-strong"
+                    disabled={!settings || loading || Boolean(storeError)}
+                    onClick={() => handleAddProfile('text')}
+                  >
+                    <PlusIcon />
+                    <span>添加模型</span>
+                  </button>
+                </div>
+              </div>
+            ) : null}
+            {tab !== 'text' ? (
+              <div className="model-config-overview-toolbar">
+                <button
+                  type="button"
+                  className="model-config-profile-add"
+                  disabled={!settings || loading || Boolean(storeError) || !currentKind}
+                  onClick={() => { if (currentKind) handleAddProfile(currentKind); }}
+                >
+                  <PlusIcon />
+                  <span>添加模型</span>
+                </button>
+              </div>
+            ) : null}
             {!settings || loading ? (
               <div className="model-config-loading" role="status">
                 <strong>配置加载中…</strong>

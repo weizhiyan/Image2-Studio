@@ -90,6 +90,18 @@
   to { opacity: 1; transform: translateY(0) scale(1); }
 }
 
+/* ── 弹性退场。参数：--exit-scale（结束缩放）/ --exit-y ── */
+@keyframes spring-out {
+  from { opacity: 1; transform: translateY(0) scale(1); }
+  to { opacity: 0; transform: translateY(var(--exit-y, 0px)) scale(var(--exit-scale, 0.96)); }
+}
+
+/* ── 纯淡出 ── */
+@keyframes fade-out {
+  from { opacity: 1; }
+  to { opacity: 0; }
+}
+
 /* ── 边缘滑入（抽屉 / 侧栏，无淡入）。参数：--slide-from，负值 = 从左侧 ── */
 @keyframes slide-in-x {
   from { transform: translateX(var(--slide-from, 100%)); }

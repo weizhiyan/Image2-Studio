@@ -55,6 +55,27 @@ describe('normalizeChatThread 入库清洗', () => {
     expect(msgs(normalized)[1].attachments?.[0].nodeId).toBe('n1');
   });
 
+  it('线程的对话模型与 Agent 生图模型随对话持久化，非法值丢弃', () => {
+    const normalized = chat.normalizeChatThread(thread({
+      textProfileId: ' text-a ',
+      textModel: ' model-a ',
+      imageProfileId: ' img-a ',
+      imageModel: ' image-a ',
+    }));
+    expect(normalized).toMatchObject({
+      textProfileId: 'text-a',
+      textModel: 'model-a',
+      imageProfileId: 'img-a',
+      imageModel: 'image-a',
+    });
+    const invalid = chat.normalizeChatThread(thread({ textProfileId: 42, textModel: 42, imageProfileId: 42, imageModel: 42 }));
+    expect(invalid?.textProfileId).toBeUndefined();
+    expect(invalid?.textModel).toBeUndefined();
+    expect(invalid?.imageProfileId).toBeUndefined();
+    expect(invalid?.imageModel).toBeUndefined();
+    expect(chat.normalizeChatThread(thread())?.textProfileId).toBeUndefined();
+  });
+
   it('引用与媒体保留 nodeId / versionId（对话只存引用，不断链）', () => {
     const normalized = chat.normalizeChatThread(thread({
       messages: [{

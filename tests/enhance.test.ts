@@ -3,6 +3,7 @@ import { pickTextProfile, resolveDirect, shouldEnhancePrompt } from '../src/lib/
 import { preferenceBlockText } from '../src/lib/bridge';
 import { normalizeEnhanceLevel, normalizeSettings } from '../bridge/settings';
 import type { MediaSettings, ModelProfileView } from '../src/types';
+import { defaultChatRuntimeSettings, defaultMemorySettings } from '../src/lib/chatMemorySettings';
 
 function profile(partial: Partial<ModelProfileView>): ModelProfileView {
   return {
@@ -28,6 +29,8 @@ function settings(partial: Partial<MediaSettings>): MediaSettings {
     textProfileId: partial.textProfileId ?? '',
     enhanceLevel: partial.enhanceLevel || 'balanced',
     preferences: partial.preferences || { enabled: false, entries: [], updatedAt: '' },
+    chatMemory: partial.chatMemory || defaultMemorySettings(),
+    chatRuntime: partial.chatRuntime || defaultChatRuntimeSettings(),
   };
 }
 

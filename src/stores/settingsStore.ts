@@ -1,13 +1,23 @@
 import { create } from 'zustand';
-import type { EnhanceLevel, MediaSettings, ModelProfileView } from '@/types';
+import type { ChatRuntimeSettings, EnhanceLevel, MediaSettings, MemorySettings, ModelProfileView } from '@/types';
+import { normalizeChatRuntimeSettings, normalizeMemorySettings } from '@/lib/chatMemorySettings';
 import { getSettings, saveSettings, type SettingsInput } from '@/lib/bridge';
+
+export type SettingsSaveInput = SettingsInput & {
+  chatMemory?: Partial<MemorySettings>;
+  chatRuntime?: Partial<ChatRuntimeSettings>;
+};
+
+function withChatDefaults(settings: MediaSettings): MediaSettings {
+  return { ...settings, chatMemory: normalizeMemorySettings(settings.chatMemory), chatRuntime: normalizeChatRuntimeSettings(settings.chatRuntime) };
+}
 
 interface SettingsState {
   settings: MediaSettings | null;
   loading: boolean;
   error: string;
   load: () => Promise<void>;
-  save: (input: SettingsInput) => Promise<MediaSettings>;
+  save: (input: SettingsSaveInput) => Promise<MediaSettings>;
   /** 只切换 Image API / Responses API 模式；不控制额外的提示词优化。 */
   setDirect: (direct: boolean) => Promise<void>;
   /** 只翻整理强度：节点工具栏的三档下拉走这条。 */
@@ -24,7 +34,7 @@ export const useSettingsStore = create<SettingsState>((set) => ({
     const requestId = ++settingsLoadRequestId;
     set({ loading: true, error: '' });
     try {
-      const settings = await getSettings();
+      const settings = withChatDefaults(await getSettings());
       if (requestId !== settingsLoadRequestId) return;
       set({ settings, loading: false });
     } catch (err) {
@@ -35,7 +45,7 @@ export const useSettingsStore = create<SettingsState>((set) => ({
   save: async (input) => {
     // 失败必须落 error：否则界面上没有任何反馈，用户只会觉得“保存不了”
     try {
-      const settings = await saveSettings(input);
+      const settings = withChatDefaults(await saveSettings(input));
       set({ settings, error: '' });
       return settings;
     } catch (err) {

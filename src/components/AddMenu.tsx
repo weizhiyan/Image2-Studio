@@ -49,7 +49,7 @@ export default function AddMenu({ x, y, notice, onCreateGenerationNode, onUpload
             <path d="M4 6h16M12 6v12M8.5 18h7" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" />
           </svg>
         </span>
-        <strong>Markdown 文本</strong>
+        <strong>文本</strong>
         <small>编辑文案并连接到生成节点</small>
       </button>
       {notice ? <div className="image-add-menu-notice">{notice}</div> : null}

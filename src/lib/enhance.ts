@@ -22,8 +22,16 @@ export function shouldEnhancePrompt(settings: MediaSettings | null, direct: bool
 export function pickTextProfile(settings: MediaSettings | null): ModelProfileView | null {
   if (!settings) return null;
   const list = (settings.profiles || []).filter((profile) => profile.kind === 'text');
-  const chosen = list.find((profile) => profile.id === settings.textProfileId) || list[0] || null;
-  return chosen && chosen.keyConfigured && chosen.model ? chosen : null;
+  const usable = (profile: ModelProfileView): boolean => {
+    if (!profile.keyConfigured || !profile.model) return false;
+    // 新配置有 selectedModels：至少启用一个模型才算可用；旧配置没有该字段时保持原行为。
+    return Array.isArray(profile.selectedModels) ? (profile.enabledModels?.length ?? 0) > 0 : true;
+  };
+  const preferred = list.find((profile) => profile.id === settings.textProfileId);
+  const chosen = (preferred && usable(preferred) ? preferred : undefined)
+    || list.find((profile) => usable(profile))
+    || null;
+  return chosen;
 }
 
 /**

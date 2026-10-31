@@ -1,10 +1,11 @@
 import { useEffect, useRef, useState } from 'react';
 import type { CanvasDoc } from '@/types';
-import { ChevronIcon, EditIcon, TrashIcon } from '@/components/canvas/NodeChrome';
+import { ChevronIcon, TrashIcon } from '@/components/canvas/NodeChrome';
 import AgentConnectDialog from '@/components/AgentConnectDialog';
 import AgentConnectIcon from '@/components/AgentConnectIcon';
 import AppModeTabs from '@/components/AppModeTabs';
 import { getAgentStatus, type AgentStatus } from '@/lib/bridge';
+import { latestCanvasImageUrl } from '@/lib/canvasThumbnails';
 
 interface TopBarProps {
   canvases: CanvasDoc[];
@@ -35,7 +36,6 @@ export default function TopBar({
   const active = canvases.find((doc) => doc.id === activeId) || canvases[0];
   const [menuOpen, setMenuOpen] = useState(false);
   const [editing, setEditing] = useState(false);
-  const [menuEditingId, setMenuEditingId] = useState('');
   const [nameDraft, setNameDraft] = useState(active?.name || '');
   const [deleteTarget, setDeleteTarget] = useState<CanvasDoc | null>(null);
   const [agentOpen, setAgentOpen] = useState(false);
@@ -52,7 +52,6 @@ export default function TopBar({
     const onPointerDown = (event: PointerEvent) => {
       if (wrapRef.current && !wrapRef.current.contains(event.target as Node)) {
         setMenuOpen(false);
-        setMenuEditingId('');
       }
     };
     window.addEventListener('pointerdown', onPointerDown);
@@ -88,12 +87,11 @@ export default function TopBar({
 
   const commitName = () => {
     const trimmed = nameDraft.trim();
-    const targetId = menuEditingId || active?.id || '';
+    const targetId = active?.id || '';
     const targetName = canvases.find((doc) => doc.id === targetId)?.name || '';
     if (trimmed && trimmed !== targetName) onRename(targetId, trimmed);
     else setNameDraft(targetName);
     setEditing(false);
-    setMenuEditingId('');
   };
 
   return (
@@ -122,10 +120,7 @@ export default function TopBar({
               type="button"
               className="top-nav-workflow-name"
               title="重命名画布"
-              onClick={() => {
-                setMenuEditingId('');
-                setEditing(true);
-              }}
+              onClick={() => setEditing(true)}
             >
               <span>{active?.name || '未命名画布'}</span>
             </button>
@@ -155,29 +150,13 @@ export default function TopBar({
               新建画布
             </button>
             <div className="workflow-menu-list">
-              {canvases.map((doc) => (
-                <div
-                  key={doc.id}
-                  className={`workflow-menu-item ${doc.id === active?.id ? 'active' : ''} ${menuEditingId === doc.id ? 'is-editing' : ''}`}
-                >
-                  {menuEditingId === doc.id ? (
-                    <input
-                      className="workflow-menu-item-input"
-                      value={nameDraft}
-                      aria-label={`重命名画布 ${doc.name}`}
-                      autoFocus
-                      onChange={(event) => setNameDraft(event.target.value)}
-                      onBlur={commitName}
-                      onKeyDown={(event) => {
-                        if (event.key === 'Enter') event.currentTarget.blur();
-                        if (event.key === 'Escape') {
-                          setNameDraft(doc.name);
-                          setMenuEditingId('');
-                        }
-                        event.stopPropagation();
-                      }}
-                    />
-                  ) : (
+              {canvases.map((doc) => {
+                const thumbnailUrl = latestCanvasImageUrl(doc);
+                return (
+                  <div
+                    key={doc.id}
+                    className={`workflow-menu-item ${doc.id === active?.id ? 'active' : ''}`}
+                  >
                     <button
                       type="button"
                       className="workflow-menu-item-main"
@@ -187,42 +166,31 @@ export default function TopBar({
                         onSwitch(doc.id);
                       }}
                     >
-                      <span>{doc.name}</span>
-                    </button>
-                  )}
-                  {/* 悬停这一行才浮出：重命名 + 删除。重命名就是顶栏名称那套逻辑，换个触发入口 */}
-                  <div className="workflow-menu-item-actions">
-                    <button
-                      type="button"
-                      className="workflow-menu-edit"
-                      title="重命名画布"
-                      aria-label={`重命名画布 ${doc.name}`}
-                      onClick={(event) => {
-                        event.stopPropagation();
-                        setNameDraft(doc.name);
-                        setMenuEditingId(doc.id);
-                      }}
-                    >
-                      <EditIcon />
+                      <span className={`workflow-menu-item-thumb${thumbnailUrl ? '' : ' is-empty'}`} aria-hidden="true">
+                        {thumbnailUrl ? <img src={thumbnailUrl} alt="" /> : null}
+                      </span>
+                      <span className="workflow-menu-item-name">{doc.name}</span>
                     </button>
                     {canvases.length > 1 ? (
-                      <button
-                        type="button"
-                        className="workflow-menu-delete"
-                        title="删除画布"
-                        aria-label={`删除画布 ${doc.name}`}
-                        onClick={(event) => {
-                          event.stopPropagation();
-                          setMenuOpen(false);
-                          setDeleteTarget(doc);
-                        }}
-                      >
-                        <TrashIcon />
-                      </button>
+                      <div className="workflow-menu-item-actions">
+                        <button
+                          type="button"
+                          className="workflow-menu-delete"
+                          title="删除画布"
+                          aria-label={`删除画布 ${doc.name}`}
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            setMenuOpen(false);
+                            setDeleteTarget(doc);
+                          }}
+                        >
+                          <TrashIcon />
+                        </button>
+                      </div>
                     ) : null}
                   </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
           </div>
         ) : null}
@@ -272,7 +240,6 @@ export default function TopBar({
         }}
       >
         <AgentConnectIcon />
-        <span className="agent-connect-btn-dot" aria-hidden="true" />
       </button>
       <button
         type="button"

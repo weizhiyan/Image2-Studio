@@ -9,9 +9,16 @@
   display: grid;
   place-items: center;
   padding: var(--spacing-4);
-  background: color-mix(in srgb, var(--color-bg-base) 76%, transparent);
+  /* 与 Agent 弹窗共用同一层遮罩：深色 scrim + 轻模糊。 */
+  background: var(--dialog-scrim);
   backdrop-filter: var(--surface-modal-backdrop-blur);
   -webkit-backdrop-filter: var(--surface-modal-backdrop-blur);
+  animation: fade-in var(--motion-slow) var(--ease-out) both;
+}
+
+.hb-modal-overlay.is-closing {
+  pointer-events: none;
+  animation: fade-out var(--motion-slow) var(--ease-in) both;
 }
 
 .model-config-modal {
@@ -27,9 +34,17 @@
   corner-shape: var(--corner-smooth);
   background: color-mix(in srgb, var(--surface-panel-bg) 92%, transparent);
   box-shadow: var(--shadow-lg);
-  --enter-y: 6px;
-  --enter-scale: 0.99;
-  animation: spring-in var(--motion-normal) var(--ease-out) both;
+  --enter-y: 0px;
+  --enter-scale: 0.4;
+  --exit-y: 0px;
+  --exit-scale: 0.4;
+  transform-origin: center;
+  animation: spring-in var(--motion-slower) var(--ease-emphasized) both;
+}
+
+.model-config-modal.is-closing {
+  pointer-events: none;
+  animation: spring-out var(--motion-slow) var(--ease-in) both;
 }
 
 .model-config-modal-head {
@@ -502,6 +517,11 @@
   outline: none;
 }
 
+.model-config-model-picker-trigger:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
 .model-config-model-picker-trigger > span:first-child {
   min-width: 0;
   overflow: hidden;
@@ -518,10 +538,12 @@
   max-height: 196px;
   display: grid;
   overflow: auto;
-  border: 1px solid var(--control-border);
+  border: 1px solid var(--surface-popover-border);
   border-radius: var(--radius-md);
-  background: color-mix(in srgb, var(--surface-panel-bg) 96%, transparent);
-  box-shadow: var(--shadow-lg);
+  background: var(--surface-popover-glass-bg);
+  backdrop-filter: var(--surface-popover-glass-blur);
+  -webkit-backdrop-filter: var(--surface-popover-glass-blur);
+  box-shadow: var(--surface-popover-glass-shadow);
   padding: 4px;
 }
 
@@ -548,6 +570,11 @@
 .model-config-model-picker-menu button[aria-selected='true'] {
   background: var(--control-bg-hover);
   color: var(--color-text-primary);
+}
+
+.model-config-model-picker-menu button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 
 /* 可用模型区：group 只是裸标题，这里直接排布（头部信息行 + 手填 + 勾选网格） */
@@ -1918,5 +1945,59 @@
 @media (max-width: 620px) {
   .model-config-skill-fields {
     grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.model-config-default-language {
+  display: grid;
+  gap: var(--spacing-2);
+  padding: var(--spacing-3) var(--spacing-4);
+}
+
+.model-config-default-language-row {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-3);
+  min-width: 0;
+}
+
+.model-config-default-language-label {
+  flex: none;
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-xs);
+}
+
+.model-config-default-language-picker {
+  flex: 1;
+  min-width: 0;
+}
+
+.model-config-default-language-row .model-config-profile-add {
+  flex: none;
+}
+
+.model-config-default-language-row .model-config-profile-add.is-strong {
+  border-style: solid;
+  border-color: var(--control-border);
+  background: var(--color-ui-control);
+  color: var(--color-text-primary);
+  padding: 0 var(--spacing-3);
+  font-weight: var(--font-weight-medium);
+}
+
+.model-config-default-language-row .model-config-profile-add.is-strong:hover:not(:disabled) {
+  background: var(--color-ui-control-hover);
+}
+
+.model-config-overview-model:not(.is-enabled) > span {
+  color: var(--color-text-tertiary);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .hb-modal-overlay,
+  .hb-modal-overlay.is-closing,
+  .model-config-modal,
+  .model-config-modal.is-closing {
+    animation: none;
   }
 }

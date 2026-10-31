@@ -3,7 +3,7 @@
  * 用户实测反馈"有两个绿色的勾"：启停勾选和"默认/优化模型"标记都渲染成绿色对勾，
  * 一行里并排两个，分不清谁是谁，布局也显得挤。现行设计把两种语义钉死：
  *   启停 = 开关（.model-config-profile-switch，role="switch"）
- *     生图多路各自独立开关；语言模型互斥（开新的让位旧的，逻辑在 toggleDraftEnabled）
+ *     生图配置和语言模型都可以多路同时启用，开关各自独立
  *   删除 = .model-config-profile-delete
  */
 import { describe, expect, it } from 'vitest';
@@ -41,14 +41,13 @@ describe('配置列表一行', () => {
     expect(html).toContain('role="switch"');
   });
 
-  it('语言模型行同样用开关：同时只启用一路，不再出现单选圆点或绿色勾', () => {
+  it('语言配置没有配置级启停开关，只保留删除', () => {
     const html = renderRow({ kind: 'text', name: '公司GPT', model: 'GPT' });
+    expect(html).not.toContain('model-config-profile-switch');
+    expect(html).not.toContain('role="switch"');
     expect(html).not.toContain('model-config-profile-check');
     expect(html).not.toContain('model-config-profile-radio');
-    expect(html).not.toContain('model-config-profile-set-default');
-    expect(html).not.toContain('model-config-profile-default');
-    expect(html).toContain('model-config-profile-switch on');
-    expect(html).toContain('role="switch"');
+    expect(html).toContain('model-config-profile-delete');
   });
 
   it('停用：整行置灰 + 开关不亮', () => {
@@ -64,12 +63,11 @@ describe('配置列表一行', () => {
     expect(renderRow({ enabled: true })).toContain('model-config-profile-delete');
   });
 
-  it('停用的语言模型仍显示开关，可启用为当前使用', () => {
+  it('语言配置即使数据里标记停用也不显示开关（语言配置无配置级启停）', () => {
     const html = renderRow({ kind: 'text', enabled: false });
-    expect(html).toContain('model-config-profile-switch');
-    expect(html).not.toContain('model-config-profile-switch on');
-    expect(html).not.toContain('model-config-profile-check');
-    expect(html).not.toContain('model-config-profile-radio');
+    expect(html).not.toContain('model-config-profile-switch');
+    expect(html).not.toContain('role="switch"');
+    expect(html).toContain('model-config-profile-delete');
   });
 
   it('选中行带 selected，方便和右侧编辑器对应', () => {
@@ -128,6 +126,18 @@ describe('模型配置概览卡片', () => {
     expect(html).not.toContain('model-b');
     expect(html).not.toContain('未启用模型');
     expect(html).toContain('model-config-overview-card is-current');
+  });
+
+  it('卡片展示已选模型；停用的模型仍显示，只是开关关闭', () => {
+    const html = renderOverviewCard({
+      selectedModels: ['model-a', 'model-b'],
+      enabledModels: ['model-a'],
+    });
+    expect(html).toContain('model-a');
+    expect(html).toContain('model-b');
+    expect(html).toContain('停用模型 model-a');
+    expect(html).toContain('启用模型 model-b');
+    expect(html).toContain('aria-checked="false"');
   });
 
   it('卡片显示已停用配置状态，测试中时显示反馈并禁用测试操作', () => {
