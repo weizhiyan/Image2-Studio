@@ -99,29 +99,29 @@ function aspectHint(size: string): string {
 export function buildVisualPromptRules(size: string, level: EnhanceLevel): string {
   const spec = LEVEL_SPECS[level];
   return [
-    '- prompt 使用用户描述的主要语言；用户要求图中文字时按原语言用英文引号 "..." 精确保留，一字不改',
+    '- prompt 使用用户描述的主要语言；用户要求图中文字时按原语言用英文引号 “...” 精确保留，一字不改',
     '- prompt 是一段连贯的自然语言，完整句子；不要关键词堆砌、标签列表或分点',
-    '- 图中的文字内容用英文引号包裹，例如：a neon sign reading "OPEN 24H"',
+    '- 图中的文字内容用英文引号包裹，例如：a neon sign reading “OPEN 24H”',
     '',
     '【描述结构：用户没提到的维度才补，已提到的一律尊重原意】',
     '1. 主体：谁 / 什么，外貌、姿态、表情、服饰、材质',
     '2. 动作与场景：在做什么、环境、时间、天气、季节',
-    '3. 构图与镜头：景别（特写 / 半身 / 全身 / 全景）、机位、视角、空间关系（如 "positioned in the left third"）',
+    '3. 构图与镜头：景别（特写 / 半身 / 全身 / 全景）、机位、视角、空间关系（如 “positioned in the left third”）',
     '4. 光线：光源方向、软硬、色温、时段氛围',
     '5. 色彩与影调：主色、对比度、饱和度倾向',
     '6. 媒介与风格：具体媒介（如 35mm film photography, watercolor, 3D render, flat vector illustration）',
     '7. 质感与细节：纹理、精度程度（如 highly detailed, soft focus）',
     '',
     '【参考图用法（只在附带参考图时生效）】',
-    '- 判断依据是用户的措辞：用户说"根据…风格 / 呼应 / 同样的感觉 / 调性像" → 只迁移参考图的氛围、色系、光线、质感与图层结构（天地海如何分层、主体偏左还是居中），绝不复刻参考图里的具体主体、构图、文字与版式元素',
-    '- 用户说"基于这张图 / 把这张图改成 / 加上" → 图生图模式：保留参考图的主体与构图，只应用用户要求的改动',
+    '- 判断依据是用户的措辞：用户说”根据…风格 / 呼应 / 同样的感觉 / 调性像” → 只迁移参考图的氛围、色系、光线、质感与图层结构（天地海如何分层、主体偏左还是居中），绝不复刻参考图里的具体主体、构图、文字与版式元素',
+    '- 用户说”基于这张图 / 把这张图改成 / 加上” → 图生图模式：保留参考图的主体与构图，只应用用户要求的改动',
     '- 用户指定用途（做背景 / 放在某页 / 结尾用）时，必须在提示词里写明为文字预留的干净区域的位置与大致占比',
     '- 参考图里出现的文字、Logo、UI 元素一律不进最终提示词（用户没要求图内文字时）',
     '',
     '【忠实性红线】',
     '- 用户明确要的元素一个不少；用户没提的重要元素一个不加（没说人就不加人，没说文字就不加文字）',
     '- 用户输入已足够详细（超过 40 词，或已含镜头 / 媒介 / 风格描述）时只做轻度整理：补光线与构图，保留原有措辞与细节',
-    '- 优先正面描述画面，但用户明确的否定约束、禁止修改项与必须保留项必须完整保留，不得为缩短提示词而丢弃（如“不要改背景”必须落实为背景保持原样）',
+    '- 优先正面描述画面，但用户明确的否定约束、禁止修改项与必须保留项必须完整保留，不得为缩短提示词而丢弃（如”不要改背景”必须落实为背景保持原样）',
     '- 用户明确提供的本人品牌 Logo / 标识应按原样保留，不擅自改写；要求复制未提供的第三方受保护角色或标识时，改写成气质相近的原创元素',
     '- 不使用在世艺术家的姓名作为风格词；用流派或视觉特征描述替代',
     '',
@@ -129,21 +129,58 @@ export function buildVisualPromptRules(size: string, level: EnhanceLevel): strin
     `- 当前档位：${spec.brief}`,
     `- ${spec.freedom}`,
     `- 输出长度：${spec.words}`,
+    '',
+    '【常见错误与避坑】',
+    '❌ 错误1：用户说”一只猫”，你写”a cute fluffy Persian cat with blue eyes” → 过度具象化',
+    '✅ 正确：”a cat” 即可，让模型发挥；除非用户明确要”波斯猫”或”蓝眼睛”',
+    '',
+    '❌ 错误2：用户说”风格像梵高”，你写”in the style of Van Gogh” → 使用在世艺术家姓名',
+    '✅ 正确：”post-impressionist style with visible brushstrokes and vibrant colors”',
+    '',
+    '❌ 错误3：参考图是风格参考，你在提示词里描述了参考图的主体 → 会复刻主体',
+    '✅ 正确：只写”warm color palette, soft focus, dreamy atmosphere”这类氛围词',
+    '',
+    '❌ 错误4：用户提示词已经很详细（>50词），你还大幅改写 → 改变了用户意图',
+    '✅ 正确：只补光线/构图这类必要维度，保留原措辞',
+    '',
+    '❌ 错误5：用户说”不要背景”，你写”simple background” → 忽略了否定约束',
+    '✅ 正确：”isolated on white background” 或 “transparent background”',
+    '',
+    '❌ 错误6：用户说”根据参考图风格”，你写”a [参考图里的主体]...” → 会生成相同主体',
+    '✅ 正确：完全不提参考图的主体，只写新场景的主体和氛围感',
+    '',
     '【现实约束】',
     '- 生图模型内部还会再润色一次提示词，所以不要写过度精细到互相冲突的细节',
     `- ${aspectHint(size)}`,
   ].join('\n');
 }
 
-export function buildSystemSpec(size: string, level: EnhanceLevel): string {
+export function buildSystemSpec(size: string, level: EnhanceLevel, hasReferenceImages: boolean = false): string {
+  // ✅ 如果有参考图，先加视觉理解环节
+  const visualAnalysisSection = hasReferenceImages ? `
+【参考图分析流程】
+在改写提示词之前，你必须先分析参考图（如果用户提供了）：
+1. 主体识别：参考图里的主要对象是什么（人/物/场景）
+2. 风格特征：色系（暖/冷/中性）、光线（自然/人工/戏剧性）、质感（光滑/粗糙/朦胧）
+3. 构图结构：主体位置（居中/三分法/对角线）、景深（浅/深）、画幅比例
+4. 细节提取：纹理、材质、氛围感、情绪倾向
+
+⚠️ 关键约束：
+- 如果用户说"风格参考/呼应/同样的感觉" → 只迁移第2、3、4点的特征，主体必须全新
+- 如果用户说"基于这张图改/把这张图改成" → 保留第1点的主体，只改用户要求的部分
+- 参考图里的文字、Logo、UI元素一律不进提示词（除非用户明确要求）
+` : '';
+
   return [
     '你是图像生成模型的提示词工程师。用户会给一句想画的内容（可能很短、很口语），也可能是中文。',
     '你的唯一任务：把它改写成一段高质量的生图提示词，原文语义一个不丢。',
     '',
+    visualAnalysisSection,
     '【输出格式】',
     '- 只输出一个 JSON 对象，不要 Markdown 代码块、解释、道歉或额外文字',
     '- JSON 必须包含 prompt（最终给生图模型的一段自然语言提示词）和 usage（style 或 edit）',
     '- 可选字段 referenceRoles：数组元素为 {"index": number, "role": "style|identity|layout|object|background"}',
+    hasReferenceImages ? '- 可选字段 analysisNotes（调试用）：对参考图的简短分析结论（50字内）' : '',
     '',
     buildVisualPromptRules(size, level),
   ].join('\n');
@@ -157,6 +194,60 @@ export function buildSystemSpec(size: string, level: EnhanceLevel): string {
 export function directStyleNote(prompt: string, usage: ReferenceUsage): string {
   if (usage !== 'style' || !/附带参考图编号/.test(String(prompt || ''))) return String(prompt || '');
   return `[风格参考约束] 附带图片只提供风格（色系、光线氛围、质感），请生成一个主体与构图都不同于参考图的全新场景，并正面写清新场景里有什么；不要以原参考图的主体作画面主角。\n${prompt}`;
+}
+
+/**
+ * 直连模式的轻量级提示词优化
+ * 不调用语言模型，纯规则处理，用于直连模式下提升基础提示词质量
+ */
+export function preprocessDirectPrompt(
+  prompt: string,
+  size: string,
+  usage: ReferenceUsage,
+  hasReference: boolean
+): string {
+  let enhanced = prompt.trim();
+
+  // ✅ 1. 如果提示词太短，补充基础维度
+  const wordCount = enhanced.split(/\s+/).length;
+  if (wordCount < 10) {
+    const [w, h] = size.split('x').map(Number);
+    const isLandscape = w > h * 1.15;
+    const isPortrait = h > w * 1.15;
+
+    // 补充构图建议
+    if (isLandscape && !/\b(landscape|horizontal|wide)\b/i.test(enhanced)) {
+      enhanced += ', wide horizontal composition';
+    } else if (isPortrait && !/\b(portrait|vertical)\b/i.test(enhanced)) {
+      enhanced += ', vertical portrait composition';
+    }
+
+    // 补充基础光线（如果完全没提）
+    if (!/\b(light|lighting|sunny|shadow|bright|dark|glow|illuminate)\b/i.test(enhanced)) {
+      enhanced += ', natural lighting';
+    }
+
+    // 补充质感（如果完全没提）
+    if (!/\b(detail|quality|resolution|sharp|soft|texture|fine)\b/i.test(enhanced)) {
+      enhanced += ', high quality';
+    }
+  }
+
+  // ✅ 2. 风格参考的特殊处理
+  if (hasReference && usage === 'style') {
+    // 在开头加上明确的约束，防止模型复刻参考图主体
+    enhanced = `Style reference only (do not replicate subject): ${enhanced}`;
+  }
+
+  // ✅ 3. 图生图的保真指令
+  if (hasReference && usage === 'edit') {
+    // 确保有"保留"/"改动"的明确指向
+    if (!/\b(keep|preserve|maintain|change|modify|replace|add|edit|based on)\b/i.test(enhanced)) {
+      enhanced = `Based on reference image, ${enhanced}`;
+    }
+  }
+
+  return enhanced;
 }
 
 /**
@@ -547,8 +638,10 @@ export async function enhancePromptDetailed(profile: ModelProfile, params: Enhan
   const withReferences = imageUrls.length > 0
     ? `${userText}${referenceGuide}`
     : userText;
+  // ✅ 检测是否有参考图
+  const hasReferenceImages = Boolean(params.referenceDataUrls && params.referenceDataUrls.length > 0);
   const spec = [
-    buildSystemSpec(String(params.size || ''), level),
+    buildSystemSpec(String(params.size || ''), level, hasReferenceImages),  // ✅ 传递参考图标志
     preferenceBlock(params.preferences || []),
   ].filter(Boolean).join('\n\n');
   const text = await callTextModel(profile, {

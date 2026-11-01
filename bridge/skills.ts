@@ -2,6 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { DATA_DIR } from './paths.js';
+import { DEFAULT_PROMPT_SKILLS } from './defaultPromptSkills.js';
 
 const SKILLS_FILE = path.join(DATA_DIR, 'prompt-skills.json');
 const MAX_ROLES = 5;
@@ -51,6 +52,13 @@ function normalizeTemperature(value: unknown): number | undefined {
 
 let writeChain: Promise<unknown> = Promise.resolve();
 
+function defaultPromptSkills(): PromptSkill[] {
+  return DEFAULT_PROMPT_SKILLS.map((role) => ({
+    ...role,
+    skills: role.skills.map((skill) => ({ ...skill })),
+  }));
+}
+
 function withWriteLock<T>(task: () => Promise<T>): Promise<T> {
   const run = writeChain.then(task, task);
   writeChain = run.catch(() => undefined);
@@ -84,10 +92,11 @@ async function readFile(): Promise<PromptSkill[]> {
       }];
     }).slice(0, MAX_ROLES);
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
-      const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-      await fs.copyFile(SKILLS_FILE, `${SKILLS_FILE}.corrupt-${stamp}`).catch(() => undefined);
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return defaultPromptSkills();
     }
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    await fs.copyFile(SKILLS_FILE, `${SKILLS_FILE}.corrupt-${stamp}`).catch(() => undefined);
     return [];
   }
 }

@@ -1,5 +1,6 @@
 import type { ModelProfile } from './settings.js';
 import { saveBuffer, type SavedFile } from './files.js';
+import { preprocessDirectPrompt, type ReferenceUsage } from './textApi.js';
 
 export interface GenerateParams {
   /** Responses 模式的主模型，由当前启用的语言模型配置提供。 */
@@ -131,12 +132,21 @@ async function generateWithImagesApi(profile: ModelProfile, params: GeneratePara
   const base = profile.baseUrl.replace(/\/+$/, '');
   const size = normalizeImageSize(params.size?.trim() || profile.defaultSize);
   const model = params.model?.trim() || profile.model;
-  const prompt = params.imagesPrompt?.trim() || params.prompt;
+  let prompt = params.imagesPrompt?.trim() || params.prompt;
   const headers = providerAuthHeaders(profile.apiKey);
 
   const n = Math.min(Math.max(Math.floor(Number(params.n)) || 1, 1), 8);
   const referenceUrls = (params.referenceDataUrls || []).filter((item) => String(item || '').trim());
   if (referenceUrls.length === 0 && params.referenceDataUrl) referenceUrls.push(params.referenceDataUrl);
+
+  // ✅ 直连模式：如果没有经过语言模型优化（imagesPrompt为空），使用轻量级优化
+  if (!params.imagesPrompt && referenceUrls.length > 0) {
+    const usage: ReferenceUsage = params.inputFidelity === 'high' ? 'edit' : 'style';
+    prompt = preprocessDirectPrompt(prompt, size, usage, true);
+  } else if (!params.imagesPrompt && !referenceUrls.length) {
+    // 无参考图的情况也做基础优化
+    prompt = preprocessDirectPrompt(prompt, size, 'style', false);
+  }
 
   const request = async (): Promise<Response> => {
     if (referenceUrls.length > 0) {

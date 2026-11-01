@@ -425,6 +425,11 @@ export async function callMcpTool(
     const textProfile = resolveTextProfile(settings);
     const preferences = settings.preferences;
     const enabledSkills = await (deps.listPromptSkills?.() || Promise.resolve([]));
+
+    // ✅ 为MCP工具提供完整的规范，包括视觉理解部分
+    const specWithoutReferences = buildSystemSpec(size, level, false);
+    const specWithReferences = buildSystemSpec(size, level, true);
+
     return toolText({
       level,
       levels: Object.entries(LEVEL_SPECS).map(([key, value]) => ({
@@ -443,7 +448,8 @@ export async function callMcpTool(
         direct: settings.direct,
         promptOptimizationEnabled: settings.promptOptimizationEnabled,
       },
-      spec: buildSystemSpec(size, level),
+      spec: specWithoutReferences,  // 默认返回无参考图版本
+      specWithReferences,  // ✅ 新增：有参考图时使用此版本
       enabledSkills: enabledSkills.map(({ name, description, content }) => ({ name, description, content })),
       referenceRules: {
         style: '只迁移参考图的色系 / 光线 / 氛围 / 质感；主体与构图必须全新，inputFidelity=low',
@@ -451,8 +457,22 @@ export async function callMcpTool(
         autoDetect: '按措辞判断：「根据…风格 / 呼应 / 同样的感觉」→style；「基于这张图 / 把这张图改成 / 加上」→edit',
         directNote: directStyleNote('附带参考图编号', 'style'),
         fidelityByUsage: { style: fidelityForUsage('style'), edit: fidelityForUsage('edit') },
+        // ✅ 新增：关键避坑指南
+        commonMistakes: [
+          '风格参考时不要描述参考图的主体，只写氛围词（色系、光线、质感）',
+          '图生图时必须明确保留什么、改动什么',
+          '用户提示词已详细时只补必要维度，不大幅改写',
+          '不使用在世艺术家姓名，用流派描述替代',
+        ],
       },
       flow: 'huiban_prompt_guide 读规范 → 自己写提示词（或 huiban_optimize 让服务端优化）→ huiban_generate{prompt, canvasId}；带参考图时提示词里的用途要与 huiban_generate 的 referenceUsage 一致',
+      // ✅ 新增：使用建议
+      usageTips: {
+        withReferences: '有参考图时：先分析参考图（主体/风格/构图/细节），再根据用户意图判断用途（style/edit），最后生成提示词',
+        withoutReferences: '无参考图时：按描述结构（主体/场景/构图/光线/色彩/媒介/质感）补齐缺失维度',
+        shortPrompt: '提示词<10词时：补充构图、光线、质感等基础维度',
+        longPrompt: '提示词>50词时：只做轻度整理，保留原措辞',
+      },
     });
   }
 

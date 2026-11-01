@@ -17,7 +17,21 @@ afterAll(async () => {
 describe('本机对话角色', () => {
   beforeEach(async () => {
     await fs.mkdir(testRoot, { recursive: true });
+    await fs.writeFile(path.join(testRoot, 'prompt-skills.json'), '[]', 'utf8');
+  });
+
+  it('首次没有角色文件时使用仓库内置角色，本地空数组则保持为空', async () => {
     await fs.rm(path.join(testRoot, 'prompt-skills.json'), { force: true });
+    const defaults = await listPromptSkills();
+    expect(defaults.map((role) => role.name)).toEqual([
+      '创意发散',
+      '动效制作',
+      'UI交互与排版优化',
+    ]);
+    expect(defaults.every((role) => role.content.length > 0)).toBe(true);
+
+    await fs.writeFile(path.join(testRoot, 'prompt-skills.json'), '[]', 'utf8');
+    expect(await listPromptSkills()).toEqual([]);
   });
 
   it('角色字段和 Skill 都持久化，保存后直接可用，可修改与删除', async () => {
@@ -83,7 +97,7 @@ describe('本机对话角色', () => {
     await savePromptSkill({ name: '角色 1', content: '提示词 1' });
     await expect(savePromptSkill({ name: '角色 1', content: '重复名称' }))
       .rejects.toThrow(/同名角色/);
-    await fs.rm(path.join(testRoot, 'prompt-skills.json'), { force: true });
+    await fs.writeFile(path.join(testRoot, 'prompt-skills.json'), '[]', 'utf8');
     for (let index = 1; index <= 5; index += 1) {
       await savePromptSkill({ name: `角色 ${index}`, content: `提示词 ${index}` });
     }
