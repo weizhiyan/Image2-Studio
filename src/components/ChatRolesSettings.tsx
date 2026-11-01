@@ -598,10 +598,10 @@ export default function ChatRolesSettings({ onDetailChange }: ChatRolesSettingsP
           </div>
 
           <footer className="chat-role-editor-footer">
-            <button type="button" className="chat-roles-button" onClick={() => void saveDraft()} disabled={saving}>
+            <button type="button" className="chat-roles-button is-quiet" onClick={closeEditor} disabled={saving}>取消</button>
+            <button type="button" className="chat-roles-button is-primary" onClick={() => void saveDraft()} disabled={saving}>
               {saving ? '保存中...' : '保存设置'}
             </button>
-            <button type="button" className="chat-roles-button is-quiet" onClick={closeEditor} disabled={saving}>取消</button>
           </footer>
         </div>
       )}

@@ -10,6 +10,8 @@ function readSource(path: string): string {
 const TOKENS = readSource('../src/styles/tokens.css');
 const ANIMATIONS = readSource('../src/styles/animations.css');
 const CONTROLS = readSource('../src/components/canvas/CanvasControls.css');
+const IMAGE_NODES = readSource('../src/components/canvas/ImageNodes.css');
+const CANVAS_PAGE = readSource('../src/pages/canvas-page.css');
 const FLOW_EDGE = readSource('../src/components/canvas/FlowEdge.tsx');
 const AGENT_CONNECT = readSource('../src/components/AgentConnectDialog.css');
 const APP_MODE_TABS = readSource('../src/components/AppModeTabs.tsx');
@@ -59,6 +61,68 @@ describe('浅色模式细节', () => {
     expect(FLOW_EDGE).toContain('stopColor="var(--color-edge-beam-highlight)"');
     expect(FLOW_EDGE).toContain('stopColor="var(--color-text-secondary)"');
   });
+
+  it('浅色分段控件轨道比深色更轻', () => {
+    const tracks = [...TOKENS.matchAll(/--segment-track-bg:\s*([^;]+);/g)]
+      .map((match) => match[1].trim());
+
+    expect(tracks).toEqual([
+      'color-mix(in srgb, var(--color-shadow) 26%, transparent)',
+      'color-mix(in srgb, var(--color-shadow) 6%, transparent)',
+    ]);
+  });
+
+  it('浅色顶栏按钮为纯白，画布缩放 dock 不投影', () => {
+    const backgrounds = [...TOKENS.matchAll(/--topbar-control-bg:\s*([^;]+);/g)]
+      .map((match) => match[1].trim());
+
+    expect(backgrounds).toEqual([
+      'color-mix(in srgb, var(--color-ui-control) 88%, transparent)',
+      'var(--color-paper)',
+    ]);
+    expect(IMAGE_NODES).toMatch(
+      /\.image-canvas-btn\s*\{[^}]*background:\s*var\(--topbar-control-bg\)/s,
+    );
+    expect(CANVAS_PAGE).toMatch(
+      /\.agent-connect-btn\s*\{[^}]*background:\s*var\(--topbar-control-bg\)/s,
+    );
+    expect(CONTROLS).toMatch(/\.canvas-dock\s*\{[^}]*box-shadow:\s*none/s);
+  });
+
+  it('浅色顶栏控件文字比通用次级文字更重', () => {
+    const foregrounds = [...TOKENS.matchAll(/--topbar-control-fg:\s*([^;]+);/g)]
+      .map((match) => match[1].trim());
+
+    expect(foregrounds).toEqual([
+      'var(--color-text-secondary)',
+      '#34363B',
+    ]);
+    expect(IMAGE_NODES).toMatch(
+      /\.image-canvas-btn\s*\{[^}]*color:\s*var\(--topbar-control-fg\)/s,
+    );
+  });
+
+  it('浅色图片悬浮控件压在照片上时改为恒定深底白字', () => {
+    const backgrounds = [...TOKENS.matchAll(/--image-node-overlay-bg:\s*([^;]+);/g)]
+      .map((match) => match[1].trim());
+    const foregrounds = [...TOKENS.matchAll(/--image-node-overlay-fg:\s*([^;]+);/g)]
+      .map((match) => match[1].trim());
+
+    expect(backgrounds).toEqual([
+      'color-mix(in srgb, var(--color-bg-base) 64%, transparent)',
+      'var(--media-chrome-bg-strong)',
+    ]);
+    expect(foregrounds).toEqual([
+      'var(--color-text-secondary)',
+      'var(--media-chrome-fg)',
+    ]);
+    expect(IMAGE_NODES).toMatch(
+      /\.image-node-pixel-size\s*\{[^}]*background:\s*var\(--image-node-overlay-bg\)[^}]*color:\s*var\(--image-node-overlay-fg\)/s,
+    );
+    expect(IMAGE_NODES).toMatch(
+      /\.image-node-copy-button\s*\{[^}]*background:\s*var\(--image-node-overlay-bg\)[^}]*color:\s*var\(--image-node-overlay-fg\)/s,
+    );
+  });
 });
 
 describe('浅色 Agent 连接弹窗', () => {
@@ -76,6 +140,21 @@ describe('浅色 Agent 连接弹窗', () => {
     );
     expect(AGENT_CONNECT).toMatch(
       /\.agent-connect-agent\s*\{[^}]*background:\s*var\(--agent-connect-card-bg\)/s,
+    );
+  });
+});
+
+describe('深色弹窗表面', () => {
+  it('居中弹窗统一使用 #282829，浅色保持纯白', () => {
+    const modalBackgrounds = [...TOKENS.matchAll(/--surface-modal-bg:\s*([^;]+);/g)]
+      .map((match) => match[1].trim());
+
+    expect(modalBackgrounds).toEqual([
+      '#282829',
+      'var(--color-paper)',
+    ]);
+    expect(AGENT_CONNECT).toMatch(
+      /\.agent-connect-dialog\s*\{[^}]*background:\s*var\(--surface-modal-bg\)/s,
     );
   });
 });

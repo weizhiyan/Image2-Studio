@@ -40,5 +40,8 @@ describe('画布下拉列表', () => {
   it('删除确认遮罩与 Agent 弹窗使用同一层 scrim', () => {
     expect(PAGE_CSS).toMatch(/\.canvas-delete-confirm-overlay\s*\{[^}]*background:\s*var\(--dialog-scrim\)/s);
     expect(PAGE_CSS).toMatch(/\.canvas-delete-confirm-overlay\s*\{[^}]*backdrop-filter:\s*var\(--surface-modal-backdrop-blur\)/s);
+    expect(PAGE_CSS).toMatch(
+      /\.canvas-delete-confirm\s*\{[^}]*background:\s*var\(--surface-modal-bg\)/s,
+    );
   });
 });

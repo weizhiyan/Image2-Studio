@@ -293,13 +293,13 @@
   box-sizing: border-box;
   border: 1px solid var(--control-border);
   border-radius: var(--radius-sm);
-  background: color-mix(in srgb, var(--color-ui-control) 88%, transparent);
+  background: var(--topbar-control-bg);
   color: var(--color-text-secondary);
   cursor: pointer;
 }
 
 .agent-connect-btn:hover {
-  background: var(--control-bg-hover);
+  background: var(--topbar-control-bg-hover);
   color: var(--color-text-primary);
 }
 
@@ -639,7 +639,7 @@
   padding: var(--spacing-4);
   border: 1px solid var(--surface-panel-border);
   border-radius: var(--radius-md);
-  background: var(--surface-panel-bg);
+  background: var(--surface-modal-bg);
   box-shadow: var(--shadow-lg);
 }
 

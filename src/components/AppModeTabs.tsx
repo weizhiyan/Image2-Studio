@@ -80,6 +80,7 @@ export default function AppModeTabs({ mode }: AppModeTabsProps) {
   const triggerRef = useRef<HTMLButtonElement>(null);
   const menuItemRef = useRef<HTMLAnchorElement>(null);
   const menuId = useId();
+  const themeLabelId = useId();
   const current = MODES.find((item) => item.id === mode) ?? MODES[0];
   const target = MODES.find((item) => item.id !== mode) ?? MODES[1];
 
@@ -181,37 +182,47 @@ export default function AppModeTabs({ mode }: AppModeTabsProps) {
           <span>{target.actionLabel}</span>
         </a>
         <div className="app-mode-tabs__separator" role="separator" />
-        <div className="app-mode-tabs__appearance" role="group" aria-label="外观">
-          <button
-            type="button"
-            className="app-mode-tabs__theme-option"
-            role="menuitemradio"
-            aria-checked={theme === 'system'}
-            onClick={() => chooseTheme('system')}
+        <div className="app-mode-tabs__appearance-row">
+          <span id={themeLabelId} className="app-mode-tabs__appearance-label">主题</span>
+          <div
+            className="app-mode-tabs__appearance"
+            role="group"
+            aria-labelledby={themeLabelId}
           >
-            <ThemeIcon theme="system" />
-            <span>跟随系统</span>
-          </button>
-          <button
-            type="button"
-            className="app-mode-tabs__theme-option"
-            role="menuitemradio"
-            aria-checked={theme === 'light'}
-            onClick={() => chooseTheme('light')}
-          >
-            <ThemeIcon theme="light" />
-            <span>浅色</span>
-          </button>
-          <button
-            type="button"
-            className="app-mode-tabs__theme-option"
-            role="menuitemradio"
-            aria-checked={theme === 'dark'}
-            onClick={() => chooseTheme('dark')}
-          >
-            <ThemeIcon theme="dark" />
-            <span>深色</span>
-          </button>
+            <button
+              type="button"
+              className="app-mode-tabs__theme-option"
+              role="menuitemradio"
+              aria-label="跟随系统"
+              title="跟随系统"
+              aria-checked={theme === 'system'}
+              onClick={() => chooseTheme('system')}
+            >
+              <ThemeIcon theme="system" />
+            </button>
+            <button
+              type="button"
+              className="app-mode-tabs__theme-option"
+              role="menuitemradio"
+              aria-label="浅色"
+              title="浅色"
+              aria-checked={theme === 'light'}
+              onClick={() => chooseTheme('light')}
+            >
+              <ThemeIcon theme="light" />
+            </button>
+            <button
+              type="button"
+              className="app-mode-tabs__theme-option"
+              role="menuitemradio"
+              aria-label="深色"
+              title="深色"
+              aria-checked={theme === 'dark'}
+              onClick={() => chooseTheme('dark')}
+            >
+              <ThemeIcon theme="dark" />
+            </button>
+          </div>
         </div>
       </div>
     </nav>

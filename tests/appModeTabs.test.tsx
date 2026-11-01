@@ -37,6 +37,13 @@ describe('AppModeTabs', () => {
     expect(canvas).toContain('跟随系统');
     expect(canvas).toContain('深色');
     expect(canvas).toContain('浅色');
+    expect(canvas).toContain('aria-label="跟随系统"');
+    expect(canvas).toContain('aria-label="浅色"');
+    expect(canvas).toContain('aria-label="深色"');
+    expect(canvas).toContain('app-mode-tabs__appearance-label">主题</span>');
+    expect(canvas).not.toContain('<span>跟随系统</span>');
+    expect(canvas).not.toContain('<span>浅色</span>');
+    expect(canvas).not.toContain('<span>深色</span>');
     expect(canvas.indexOf('跟随系统')).toBeLessThan(canvas.indexOf('浅色'));
     expect(canvas.indexOf('浅色')).toBeLessThan(canvas.indexOf('深色'));
     expect(canvas).not.toContain('href="/"');
@@ -79,6 +86,21 @@ describe('AppModeTabs', () => {
     expect(CSS).toContain('transform: scale(0.8)');
     expect(CSS).toContain('@media (prefers-reduced-motion: reduce)');
     expect(CSS).not.toMatch(/transition:\s*all/);
+  });
+
+  it('外观切换收成三个紧凑等宽选项', () => {
+    expect(CSS).toMatch(
+      /\.app-mode-tabs__menu\s*\{[^}]*width:\s*296px[^}]*max-width:\s*calc\(100vw - var\(--spacing-6\)\)/s,
+    );
+    expect(CSS).toMatch(
+      /\.app-mode-tabs__appearance-row\s*\{[^}]*justify-content:\s*space-between/s,
+    );
+    expect(CSS).toMatch(
+      /\.app-mode-tabs__appearance\s*\{[^}]*width:\s*fit-content/s,
+    );
+    expect(CSS).toMatch(
+      /\.app-mode-tabs__theme-option\s*\{[^}]*width:\s*44px[^}]*flex:\s*0 0 44px/s,
+    );
   });
 });
 

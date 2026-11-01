@@ -90,17 +90,13 @@
   gap: var(--spacing-3);
   min-height: 96px;
   border-radius: var(--radius-card);
-  background: var(--color-ui-control-active);
+  background: var(--color-ui-control-panel);
   padding: var(--spacing-4);
   transition: background-color var(--motion-fast) var(--ease-out);
 }
 
 .chat-role-row:hover {
   background: var(--control-bg-selected);
-}
-
-.chat-role-row-general {
-  background: var(--color-ui-control-panel);
 }
 
 .chat-role-readonly-badge {
@@ -214,6 +210,18 @@
 .chat-roles-icon-button {
   border-color: transparent;
   background: transparent;
+}
+
+.chat-roles-button.is-primary {
+  border-color: transparent;
+  background: var(--color-paper);
+  color: var(--color-ink);
+  font-weight: var(--font-weight-medium);
+}
+
+.chat-roles-button.is-primary:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--color-paper) 88%, var(--color-text-tertiary));
+  color: var(--color-ink);
 }
 
 .chat-roles-text-button {

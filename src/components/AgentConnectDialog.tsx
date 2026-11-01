@@ -140,7 +140,7 @@ export default function AgentConnectDialog({
         <header className="agent-connect-dialog-header">
           <div className="agent-connect-dialog-heading">
             <span className={`agent-connect-dialog-icon${status.connected ? ' is-connected' : ''}`}>
-              <AgentConnectIcon size={18} />
+              <AgentConnectIcon size={22} />
             </span>
             <div>
               <h2 id="agent-connect-title">让你的 Agent 直接调用绘板创作</h2>
@@ -199,8 +199,6 @@ export default function AgentConnectDialog({
               <span className="agent-connect-agent-icon is-generic" aria-hidden="true">
                 <AgentBrandIcon kind="generic" />
               </span>
-              <span className="agent-connect-agent-label">通用 Agent</span>
-              <span className="agent-connect-agent-hint">复制连接指令</span>
               <span className="agent-connect-agent-copy" aria-hidden="true">
                 <CopyGlyph copied={copiedId === generic.id} />
               </span>

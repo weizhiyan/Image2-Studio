@@ -27,6 +27,18 @@ describe('AI 对话角色设置页', () => {
     expect(SETTINGS_CSS).toMatch(/\.model-config-modal-body\.model-config-roles-panel\s*\{[^}]*overflow:\s*hidden/s);
   });
 
+  it('保存设置位于最右侧，并使用纯白主操作样式', () => {
+    const footer = ROLE_SOURCE.match(
+      /<footer className="chat-role-editor-footer">([\s\S]*?)<\/footer>/,
+    )?.[1] ?? '';
+
+    expect(footer.indexOf('取消')).toBeLessThan(footer.indexOf('保存设置'));
+    expect(footer).toContain('chat-roles-button is-primary');
+    expect(ROLE_CSS).toMatch(
+      /\.chat-roles-button\.is-primary\s*\{[^}]*background:\s*var\(--color-paper\)[^}]*color:\s*var\(--color-ink\)/s,
+    );
+  });
+
   it('保留头像选项、自定义上传、系统提示词与 Skill 编辑能力', () => {
     expect(ROLE_SOURCE).toContain('{ROLE_AVATARS.map');
     expect(ROLE_SOURCE).toContain('上传自定义头像');
@@ -42,6 +54,22 @@ describe('AI 对话角色设置页', () => {
     expect(ROLE_SOURCE).toContain('max={10}');
   });
 
+  it('自定义角色卡与通用模式共用默认底色', () => {
+    expect(ROLE_CSS).toMatch(
+      /\.chat-role-row\s*\{[^}]*background:\s*var\(--color-ui-control-panel\)/s,
+    );
+    expect(ROLE_CSS).not.toContain('.chat-role-row-general');
+  });
+
+  it('模型概览卡与偏好档案角色卡共用同一默认底色', () => {
+    expect(SETTINGS_CSS).toMatch(
+      /\.model-config-overview-card\s*\{[^}]*background:\s*var\(--color-ui-control-panel\)/s,
+    );
+    expect(ROLE_CSS).toMatch(
+      /\.chat-role-row\s*\{[^}]*background:\s*var\(--color-ui-control-panel\)/s,
+    );
+  });
+
   it('模型设置弹层使用遮罩淡入与弹层弹性入场', () => {
     expect(SETTINGS_CSS).toMatch(/\.hb-modal-overlay\s*\{[^}]*animation:\s*fade-in/s);
     expect(SETTINGS_CSS).toMatch(/\.hb-modal-overlay\s*\{[^}]*background:\s*var\(--dialog-scrim\)/s);
@@ -49,6 +77,15 @@ describe('AI 对话角色设置页', () => {
     expect(SETTINGS_CSS).toMatch(/\.model-config-modal\s*\{[^}]*transform-origin:\s*center/s);
     expect(SETTINGS_CSS).toMatch(/\.model-config-modal\s*\{[^}]*animation:\s*spring-in var\(--motion-slower\) var\(--ease-emphasized\)/s);
     expect(SETTINGS_CSS).toMatch(/@media \(prefers-reduced-motion: reduce\)[\s\S]*\.model-config-modal\.is-closing\s*\{[^}]*animation:\s*none/s);
+  });
+
+  it('模型设置使用实色面板并关闭遮罩模糊', () => {
+    expect(SETTINGS_CSS).toMatch(
+      /\.hb-modal-overlay:has\(\.model-config-modal\)\s*\{[^}]*backdrop-filter:\s*none[^}]*-webkit-backdrop-filter:\s*none/s,
+    );
+    expect(SETTINGS_CSS).toMatch(
+      /\.model-config-modal\s*\{[^}]*background:\s*var\(--surface-modal-bg\)/s,
+    );
   });
 
   it('模型设置关闭时先收缩淡出再卸载', () => {

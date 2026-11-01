@@ -14,7 +14,7 @@
   border: 1px solid var(--surface-popover-border);
   border-radius: var(--radius-full);
   background: var(--surface-popover-glass-bg);
-  box-shadow: var(--shadow-sm);
+  box-shadow: none;
   backdrop-filter: var(--surface-popover-glass-blur);
   -webkit-backdrop-filter: var(--surface-popover-glass-blur);
 }

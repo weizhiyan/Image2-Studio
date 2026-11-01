@@ -47,7 +47,7 @@
   top: calc(100% + var(--spacing-1));
   left: 0;
   z-index: 2;
-  width: 280px;
+  width: 296px;
   max-width: calc(100vw - var(--spacing-6));
   padding: var(--spacing-1);
   border: 1px solid var(--surface-popover-border);
@@ -107,7 +107,25 @@
   background: var(--divider-subtle);
 }
 
+.app-mode-tabs__appearance-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--spacing-3);
+  padding: 0 var(--spacing-2) 0 var(--spacing-3);
+}
+
+.app-mode-tabs__appearance-label {
+  flex: 0 0 auto;
+  color: var(--color-text-secondary);
+  font-family: var(--font-sans);
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-medium);
+  line-height: var(--line-height-tight);
+}
+
 .app-mode-tabs__appearance {
+  width: fit-content;
   display: flex;
   gap: var(--spacing-1);
   padding: var(--spacing-1);
@@ -116,14 +134,14 @@
 }
 
 .app-mode-tabs__theme-option {
-  min-width: 0;
+  width: 44px;
   min-height: 32px;
-  flex: 1;
+  flex: 0 0 44px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   gap: var(--spacing-1);
-  padding: 0 var(--spacing-2);
+  padding: 0;
   border: 0;
   border-radius: var(--radius-2xs);
   background: transparent;
@@ -157,8 +175,8 @@
 }
 
 .app-mode-tabs__theme-icon {
-  width: var(--icon-glyph-sm);
-  height: var(--icon-glyph-sm);
+  width: var(--icon-glyph-md);
+  height: var(--icon-glyph-md);
   flex: 0 0 auto;
 }
 

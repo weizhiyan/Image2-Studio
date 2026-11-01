@@ -21,13 +21,15 @@ describe('连接第三方 Agent 弹窗', () => {
     );
 
     expect(html).toContain('让你的 Agent 直接调用绘板创作');
-    for (const label of ['Claude Code', 'Codex', 'WorkBuddy', '通用 Agent']) {
+    for (const label of ['Claude Code', 'Codex', 'WorkBuddy']) {
       expect(html).toContain(label);
     }
     expect(html).toContain('aria-label="复制 Claude Code 配置"');
     expect(html).toContain('aria-label="复制 Codex 配置"');
     expect(html).toContain('aria-label="复制 WorkBuddy 配置"');
     expect(html).toContain('aria-label="复制通用 Agent 配置"');
+    expect(html).not.toContain('>通用 Agent<');
+    expect(html).not.toContain('复制连接指令');
     expect(html).not.toContain('<pre');
     expect(html).not.toContain('codex mcp add');
     expect(html).not.toContain('mcp_servers.huiban');
@@ -53,5 +55,12 @@ describe('连接第三方 Agent 弹窗', () => {
     expect(AGENT_CSS).toMatch(/\.agent-connect-dialog\s*\{[^}]*transform-origin:\s*center/s);
     expect(AGENT_CSS).toMatch(/\.agent-connect-dialog\s*\{[^}]*animation:\s*spring-in var\(--motion-slower\) var\(--ease-emphasized\)/s);
     expect(AGENT_CSS).toMatch(/@media \(prefers-reduced-motion: reduce\)[\s\S]*\.agent-connect-dialog\s*\{[^}]*animation:\s*none/s);
+  });
+
+  it('头部图标为 44×44，通用 Agent 只保留一行图标', () => {
+    expect(AGENT_CSS).toMatch(/\.agent-connect-dialog-icon\s*\{[^}]*width:\s*44px/s);
+    expect(AGENT_CSS).toMatch(/\.agent-connect-dialog-icon\s*\{[^}]*height:\s*44px/s);
+    expect(AGENT_CSS).toMatch(/\.agent-connect-agent\.is-generic\s*\{[^}]*justify-content:\s*space-between/s);
+    expect(AGENT_CSS).not.toContain('.agent-connect-agent-hint');
   });
 });

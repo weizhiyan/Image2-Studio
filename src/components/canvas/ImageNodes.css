@@ -200,8 +200,8 @@
   gap: 7px;
   border: none;
   border-radius: var(--radius-sm);
-  background: color-mix(in srgb, var(--color-ui-control) 88%, transparent);
-  color: var(--color-text-secondary);
+  background: var(--topbar-control-bg);
+  color: var(--topbar-control-fg);
   padding: 0 var(--spacing-3);
   font-family: var(--font-sans);
   font-size: var(--font-size-sm);
@@ -219,7 +219,7 @@
 .image-canvas-btn:hover,
 
 .image-canvas-btn.active {
-  background: var(--color-ui-control-hover);
+  background: var(--topbar-control-bg-hover);
   color: var(--color-text-primary);
 }
 
@@ -1014,6 +1014,9 @@
   right: var(--spacing-2);
   bottom: var(--spacing-2);
   left: auto;
+  background: var(--image-node-overlay-bg);
+  box-shadow: inset 0 0 0 1px var(--image-node-overlay-border);
+  color: var(--image-node-overlay-fg);
   opacity: 0;
   transform: translateY(var(--spacing-1));
   transition:
@@ -1044,18 +1047,18 @@
   width: 24px;
   height: 24px;
   padding: 0;
-  border: 1px solid color-mix(in srgb, var(--color-ui-border-subtle) 70%, transparent);
+  border: 1px solid var(--image-node-overlay-border);
   border-radius: var(--radius-2xs);
-  background: color-mix(in srgb, var(--color-bg-base) 64%, transparent);
-  color: var(--color-text-secondary);
+  background: var(--image-node-overlay-bg);
+  color: var(--image-node-overlay-fg);
   cursor: pointer;
   transition: background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out);
 }
 
 .image-node-copy-button:hover,
 .image-node-copy-button:focus-visible {
-  background: color-mix(in srgb, var(--color-bg-base) 80%, transparent);
-  color: var(--color-text-primary);
+  background: var(--image-node-overlay-hover-bg);
+  color: var(--image-node-overlay-hover-fg);
 }
 
 .image-node-copy-button svg {

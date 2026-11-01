@@ -60,8 +60,8 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 32px;
-  height: 32px;
+  width: 44px;
+  height: 44px;
   flex: 0 0 auto;
   border: 1px solid var(--control-border);
   border-radius: var(--radius-sm);
@@ -164,6 +164,10 @@
   border-color: color-mix(in srgb, var(--color-accent-green) 42%, transparent);
 }
 
+.agent-connect-agent.is-generic {
+  justify-content: space-between;
+}
+
 .agent-connect-agent.is-copied .agent-connect-agent-copy {
   color: var(--color-accent-green);
 }
@@ -198,12 +202,6 @@
   text-overflow: ellipsis;
   white-space: nowrap;
   text-align: left;
-}
-
-.agent-connect-agent-hint {
-  flex: 0 0 auto;
-  color: var(--color-text-tertiary);
-  font-size: var(--font-size-xs);
 }
 
 .agent-connect-agent-copy {

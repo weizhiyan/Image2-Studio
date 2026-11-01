@@ -74,7 +74,8 @@
   --surface-popover-glass-shadow: 0 18px 42px var(--shadow-ink-deep);
   --surface-section-bg: var(--color-ui-control-panel);
   --surface-section-border: var(--color-ui-border-subtle);
-  --surface-modal-bg: color-mix(in srgb, var(--surface-panel-bg) 92%, transparent);
+  /* 居中弹窗统一表面色；深色固定为纯色，浅色使用纯白。 */
+  --surface-modal-bg: #282829;
   --surface-image-preview-bg: color-mix(in srgb, var(--color-ui-panel) 86%, transparent);
   --surface-image-preview-panel-bg: color-mix(in srgb, var(--color-ui-control) 82%, transparent);
   --surface-image-preview-control-bg: var(--color-ui-control);
@@ -117,6 +118,16 @@
   --control-border-hover: var(--color-ui-border);
   --control-border-focus: var(--color-border-focus);
   --agent-connect-card-bg: var(--control-bg);
+  /* 顶栏右侧控件：深色沿用半透明控制面；浅色改为纯白，避免画布网点透出。 */
+  --topbar-control-bg: color-mix(in srgb, var(--color-ui-control) 88%, transparent);
+  --topbar-control-bg-hover: var(--color-ui-control-hover);
+  --topbar-control-fg: var(--color-text-secondary);
+  /* 图片节点悬停控件：深色沿用原来的半透明浮层。 */
+  --image-node-overlay-bg: color-mix(in srgb, var(--color-bg-base) 64%, transparent);
+  --image-node-overlay-fg: var(--color-text-secondary);
+  --image-node-overlay-border: color-mix(in srgb, var(--color-ui-border-subtle) 70%, transparent);
+  --image-node-overlay-hover-bg: color-mix(in srgb, var(--color-bg-base) 80%, transparent);
+  --image-node-overlay-hover-fg: var(--color-text-primary);
   --chat-fab-border: color-mix(in srgb, var(--color-shadow) 20%, transparent);
   --focus-ring: none;
   --divider-subtle: var(--color-ui-border-subtle);
@@ -499,6 +510,16 @@ html.floating-shell {
   --control-border-hover: var(--color-ui-border);
   --control-border-focus: var(--color-border-focus);
   --agent-connect-card-bg: var(--color-ui-control-panel);
+  --topbar-control-bg: var(--color-paper);
+  --topbar-control-bg-hover: var(--color-ui-control-panel);
+  /* 纯白顶栏上比通用次级文字再重一档，避免控件文字发虚。 */
+  --topbar-control-fg: #34363B;
+  /* 浅色下这些控件压在图片上，必须脱离主题面底色，改用恒定深底白字。 */
+  --image-node-overlay-bg: var(--media-chrome-bg-strong);
+  --image-node-overlay-fg: var(--media-chrome-fg);
+  --image-node-overlay-border: var(--media-chrome-border);
+  --image-node-overlay-hover-bg: var(--media-chrome-active);
+  --image-node-overlay-hover-fg: var(--media-chrome-fg);
   --chat-fab-border: color-mix(in srgb, var(--color-shadow) 10%, transparent);
   --focus-ring: none;
   --divider-subtle: var(--color-ui-border-subtle);
@@ -517,7 +538,7 @@ html.floating-shell {
 
   /* 浅色滑块保持接近白（iOS 分段控件就是白滑块），关键是补上发丝描边 + 微阴影 ——
      原来那块 #FFFFFF 既无描边也无阴影，读起来像"一块纯白色"而不是"一个凸起的滑块"。 */
-  --segment-track-bg: color-mix(in srgb, var(--color-shadow) 8%, transparent);
+  --segment-track-bg: color-mix(in srgb, var(--color-shadow) 6%, transparent);
   --segment-thumb-bg: #FFFFFF;
   /* 浅色白滑块压在浅灰轨道上（Δ28），去掉发丝描边后全靠这层投影托住，所以比深色更重。 */
   --segment-thumb-shadow: 0 1px 3px rgb(17 19 24 / 15%), 0 0 1px rgb(17 19 24 / 7%);
