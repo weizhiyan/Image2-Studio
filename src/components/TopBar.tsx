@@ -34,6 +34,8 @@ export default function TopBar({
   onToggleSettings,
 }: TopBarProps) {
   const active = canvases.find((doc) => doc.id === activeId) || canvases[0];
+  // 空画布是当前草稿，可以显示在标题上，但不进入“切换画布”历史。
+  const menuCanvases = canvases.filter((doc) => doc.nodes.length > 0 || doc.edges.length > 0);
   const [menuOpen, setMenuOpen] = useState(false);
   const [editing, setEditing] = useState(false);
   const [nameDraft, setNameDraft] = useState(active?.name || '');
@@ -150,7 +152,7 @@ export default function TopBar({
               新建画布
             </button>
             <div className="workflow-menu-list">
-              {canvases.map((doc) => {
+              {menuCanvases.map((doc) => {
                 const thumbnailUrl = latestCanvasImageUrl(doc);
                 return (
                   <div
@@ -171,7 +173,7 @@ export default function TopBar({
                       </span>
                       <span className="workflow-menu-item-name">{doc.name}</span>
                     </button>
-                    {canvases.length > 1 ? (
+                    {menuCanvases.length > 1 ? (
                       <div className="workflow-menu-item-actions">
                         <button
                           type="button"

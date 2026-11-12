@@ -29,6 +29,19 @@ afterEach(() => {
 });
 
 describe('实时连接复用与释放', () => {
+  it('首次连接与断线重连后都重新核对画布，解除订阅后不再触发', () => {
+    const reconnect = vi.fn();
+    const dispose = subscribeCanvasUpdated('reconnect-canvas', vi.fn(), reconnect);
+    cleanups.push(dispose);
+    const source = FakeEventSource.instances[0];
+    source.dispatchEvent(new Event('open'));
+    source.dispatchEvent(new Event('open'));
+    expect(reconnect).toHaveBeenCalledTimes(2);
+    dispose();
+    source.dispatchEvent(new Event('open'));
+    expect(reconnect).toHaveBeenCalledTimes(2);
+  });
+
   it('图片、视频和画布同步共用一条连接，各自只接收对应事件', () => {
     const onImage = vi.fn();
     const onVideo = vi.fn();

@@ -268,6 +268,57 @@ describe('启动模型就绪状态', () => {
   });
 });
 
+describe('生效配置在不完整时让位给真正可用的那一路', () => {
+  const readyProfile = (id: string) => ({
+    ...imageProfile(id),
+    baseUrl: 'https://images.example.test/v1',
+    apiKey: `key-${id}`,
+    model: 'image-model',
+    models: ['image-model'],
+  });
+
+  it('选中的配置缺 Key 时，生效配置与就绪状态指向已配置的那一路', () => {
+    const incomplete = { ...imageProfile('active-empty'), model: 'image-model', models: ['image-model'] };
+    const ready = readyProfile('ready-b');
+    const settings = normalizeSettings({
+      profiles: [incomplete, ready],
+      activeProfileId: incomplete.id,
+    });
+
+    expect(activeProfile(settings).id).toBe('ready-b');
+    // 设置面板回显的仍是用户选中的那一路，保存时不会把它悄悄改掉
+    expect(publicView(settings).activeProfileId).toBe('active-empty');
+    expect(imageModelReadiness(settings)).toMatchObject({
+      configured: true,
+      modelsLoaded: true,
+      profileName: 'ready-b',
+    });
+  });
+
+  it('选中的配置完整时保持用户选择，不被另一路可用配置顶替', () => {
+    const active = readyProfile('active-a');
+    const other = readyProfile('other-b');
+    const settings = normalizeSettings({
+      profiles: [active, other],
+      activeProfileId: active.id,
+    });
+
+    expect(activeProfile(settings).id).toBe('active-a');
+    expect(publicView(settings).activeProfileId).toBe('active-a');
+  });
+
+  it('没有任何完整配置时保留选中的那一路，用于报错与设置定位', () => {
+    const active = { ...imageProfile('active-empty'), model: 'image-model', models: ['image-model'] };
+    const settings = normalizeSettings({ profiles: [active], activeProfileId: active.id });
+
+    expect(activeProfile(settings).id).toBe('active-empty');
+    expect(imageModelReadiness(settings)).toMatchObject({
+      configured: false,
+      profileName: 'active-empty',
+    });
+  });
+});
+
 describe('默认模型必须落在已勾选列表里（resolveDefaultModel）', () => {
   it('默认模型在列表里 → 原样保留', () => {
     expect(resolveDefaultModel('gpt-image-2.5', ['gpt-image-2.5', 'gpt-image-1'])).toBe('gpt-image-2.5');

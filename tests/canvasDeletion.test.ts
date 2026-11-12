@@ -4,6 +4,15 @@ import { readFileSync } from 'node:fs';
 const canvasPageSource = readFileSync(new URL('../src/pages/CanvasPage.tsx', import.meta.url), 'utf8');
 
 describe('canvas node deletion persistence', () => {
+  it('refuses to delete running generation nodes before the exit animation', () => {
+    const deletionGuard = canvasPageSource.match(/onBeforeDelete=\{async \(\{ nodes: nodesToRemove \}\) => \{([\s\S]*?)\n          \}\}/)?.[1] || '';
+
+    expect(deletionGuard).toContain("node.data.status === 'running' || node.data.videoStatus === 'running'");
+    expect(deletionGuard).toContain("showToast('生成中的节点不能删除，请等待生成完成');");
+    expect(deletionGuard).toContain('return false;');
+    expect(deletionGuard.indexOf('return false;')).toBeLessThan(deletionGuard.indexOf('setExitingNodeIds'));
+  });
+
   it('locks out remote snapshots from the start of the exit animation', () => {
     const deletionGuard = canvasPageSource.match(/onBeforeDelete=\{async \(\{ nodes: nodesToRemove \}\) => \{([\s\S]*?)\n          \}\}/)?.[1] || '';
 

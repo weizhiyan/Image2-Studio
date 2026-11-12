@@ -7,9 +7,10 @@ import { CANVASES_FILE, CANVAS_DOCS_FILE, CHAT_DOCS_FILE, HOST, MEDIA_DIR, PORT,
 import { createProfile, findProfile, imageModelReadiness, normalizeEnhanceLevel, publicView, readSettings, resolveTextProfile, resolveVideoProfile, writeSettings, type ModelProfile } from './settings.js';
 import { addManualPreference, clearPreferences, distillPreferences, removePreference, setPreferencesEnabled } from './preferences.js';
 import { generateImages, normalizeImageSize } from './imageApi.js';
+import { resolveResponseModel } from './imageRequestContext.js';
 import { detectReferenceUsage, directStyleNote, enhancePromptDetailed, fidelityForUsage, optimizeVideoPrompt, testTextProfile, usageForGenerateRequest } from './textApi.js';
 import { fetchProviderModels, fetchRemoteImage, testProviderConnection } from './providerApi.js';
-import { ackPendingLocate, addSseClient, countOpenTabs, peekPendingLocate, pushCanvasUpdated, pushImage, pushLocate, pushVideo } from './hub.js';
+import { ackPendingLocate, addSseClient, countOpenTabs, peekPendingLocate, pushCanvasUpdated, pushImage, pushLocate, pushNodeState, pushVideo } from './hub.js';
 import { ChatConflictError, clearChatThread, deleteChatThread, readChatThread, readChatThreads, removeChatMediaReferences, updateChatMemory, writeClientThread } from './chat.js';
 import { answerChatRun, buildAgentSystemSpec, confirmChatRun, getChatRunSnapshot, startChatRun, stopChatRun, stopThreadRuns, subscribeChatRun, waitChatRunReady, type StartRunRequest } from './runs.js';
 import { contentTypeOf, copyMediaFile, deleteMediaFile, imageExtensionOf, revealLocalFile, saveDataUrl, safeMediaPath } from './files.js';
@@ -18,6 +19,7 @@ import { detectVideoProtocol, ensureVideoApiMode } from './videoProtocol.js';
 import { claimVideoDownload, completeVideoTask, confirmVideoSubmission, failVideoSubmission, findVideoTaskByNode, getVideoTaskRecord, markVideoSubmissionUnknown, releaseVideoDownload, removeVideoTask, removeVideoTaskByNode, removeVideoTasksByCanvas, reserveVideoTask } from './videoTasks.js';
 import { describeImageHostFailure, defaultImageHost, imageHostReady, isLegacyDefaultImageHost, readImageHost, resolveImageHost, uploadToImageHost, writeImageHost, EMPTY_IMAGE_HOST, IMAGE_HOST_PRESETS, type ImageHostConfig } from './imageHost.js';
 import { isAgentPresenceFresh, readAgentPresence } from './agentPresence.js';
+import { readAgentSelection, writeAgentSelection } from './agentSelection.js';
 import { collectHistoryItems, normalizeHistoryDeleteTargets, removeHistoryTargetFromCanvas } from './history.js';
 import { addAsset, createAssetFolder, deleteAsset, deleteAssetFolder, listAssets, moveAsset, renameAssetFolder } from './assets.js';
 import { deletePromptSkill, listPromptSkills, savePromptSkill } from './skills.js';
@@ -292,6 +294,42 @@ export async function patchCanvasVideoNode(
   return Boolean(updatedAt);
 }
 
+/**
+ * 更新已有节点的 data，不创建新节点。
+ * 手动生图由 bridge 在请求结束后落结果，浏览器刷新后仍能从文档恢复；
+ * 节点已被删除（墓碑）时返回 false，避免迟到的结果把节点复活。
+ */
+export async function patchCanvasNodeData(
+  canvasId: string,
+  nodeId: string,
+  patch: Record<string, unknown>,
+): Promise<boolean> {
+  const updatedAt = await withCanvasWriteLock(async () => {
+    const docs = await readCanvasDocs();
+    const doc = docs[canvasId];
+    if (!doc || !Array.isArray(doc.nodes)) return '';
+    if (Object.hasOwn(doc.deletedNodeIds || {}, nodeId)) return '';
+    const index = doc.nodes.findIndex((raw) => String((raw as { id?: unknown })?.id || '') === nodeId);
+    if (index < 0) return '';
+    const node = doc.nodes[index] as { id: string; data?: Record<string, unknown> };
+    const nodes = [...doc.nodes];
+    nodes[index] = {
+      ...node,
+      data: { ...(node.data || {}), ...patch },
+    };
+    const now = Date.now();
+    const previous = Date.parse(String(doc.updatedAt || ''));
+    const timestamp = new Date(Math.max(now, Number.isFinite(previous) ? previous + 1 : now)).toISOString();
+    docs[canvasId] = { ...doc, nodes, updatedAt: timestamp };
+    await backupCanvasDocs();
+    await atomicWriteJson(CANVAS_DOCS_FILE, docs);
+    return timestamp;
+  });
+  if (!updatedAt) return false;
+  await pushCanvasUpdated({ type: 'canvas-updated', canvasId, updatedAt });
+  return true;
+}
+
 export interface AppendCanvasImageOptions {
   /** 聊天生图时把已有的参考图节点连到每张新结果上（同画布）。 */
   connectFrom?: string[];
@@ -351,6 +389,75 @@ export async function appendCanvasImageNodes(canvasId: string, nodes: CanvasNode
   });
 }
 
+/**
+ * 生成节点的 upsert：同一 id 覆盖，不存在则追加。
+ * 用于“先生成中占位，完成后回填同一节点”，以及失败时把占位改成错误态。
+ * 已删除的节点 id 受墓碑保护，不会被迟到的结果复活。
+ */
+export async function upsertCanvasNodes(
+  canvasId: string,
+  nodes: CanvasNodeRecord[],
+  options: AppendCanvasImageOptions = {},
+): Promise<boolean> {
+  if (nodes.length === 0) return false;
+  return withCanvasWriteLock(async () => {
+    const registry = await readRegistry();
+    const docs = await readCanvasDocs();
+    const previous = docs[canvasId];
+    if (!previous && !registry[canvasId]) return false;
+    const previousNodes = [...(previous?.nodes || [])];
+    const incoming = nodes.filter((node) => (
+      node?.id && !Object.hasOwn(previous?.deletedNodeIds || {}, node.id)
+    ));
+    if (incoming.length === 0) return true;
+
+    const indexById = new Map(previousNodes.map((node, index) => [String((node as { id?: string })?.id || ''), index]));
+    for (const node of incoming) {
+      const index = indexById.get(node.id);
+      if (index === undefined) {
+        indexById.set(node.id, previousNodes.length);
+        previousNodes.push(node);
+      } else {
+        previousNodes[index] = node;
+      }
+    }
+
+    const nodeIds = new Set(previousNodes.map((node) => String((node as { id?: string })?.id || '')));
+    const targetIds = incoming.map((node) => node.id).filter(Boolean);
+    const sourceIds = [...new Set((options.connectFrom || []).map((id) => String(id || '').trim()))]
+      .filter((id) => id && nodeIds.has(id) && !targetIds.includes(id));
+    const previousEdges = [...(previous?.edges || [])];
+    const edgeKeys = new Set(previousEdges.map((edge) => {
+      const item = edge as { source?: unknown; target?: unknown };
+      return `${String(item.source || '')}->${String(item.target || '')}`;
+    }));
+    const edgeIds = new Set(previousEdges.map((edge) => String((edge as { id?: unknown })?.id || '')));
+    for (const source of sourceIds) {
+      for (const target of targetIds) {
+        const key = `${source}->${target}`;
+        if (edgeKeys.has(key)) continue;
+        let edgeId = `edge_chat_${source}_${target}`;
+        for (let suffix = 2; edgeIds.has(edgeId); suffix += 1) edgeId = `edge_chat_${source}_${target}_${suffix}`;
+        edgeKeys.add(key);
+        edgeIds.add(edgeId);
+        previousEdges.push({ id: edgeId, source, sourceHandle: 'out', target, targetHandle: 'in' });
+      }
+    }
+
+    const previousAt = Date.parse(String(previous?.updatedAt || ''));
+    docs[canvasId] = {
+      ...previous,
+      name: registry[canvasId] || previous?.name || '未命名画布',
+      nodes: previousNodes,
+      edges: previousEdges,
+      updatedAt: new Date(Math.max(Date.now(), Number.isFinite(previousAt) ? previousAt + 1 : 0)).toISOString(),
+    };
+    await backupCanvasDocs();
+    await atomicWriteJson(CANVAS_DOCS_FILE, docs);
+    return true;
+  });
+}
+
 /** MCP 建画布：注册表与空文档一次到位；已存在时幂等返回原有名字，不覆盖内容。 */
 export async function createCanvasInRegistry(canvasId: string, name: string): Promise<{ id: string; name: string }> {
   const finalName = String(name || '').trim() || '新画布';
@@ -369,6 +476,57 @@ export async function createCanvasInRegistry(canvasId: string, name: string): Pr
     await writeRegistry(registry);
     return { id: canvasId, name: registry[canvasId] };
   });
+}
+
+/**
+ * bridge 重启后，上一进程里在途的生成不可能再有结果。
+ * MCP / 对话 / 浏览器手动生成都要收成错误态，避免画布永远停在“生成中”。
+ * 浏览器刷新不会走这里；手动生成的结果由 bridge 落盘，刷新后仍可恢复。
+ */
+export async function interruptStaleGenerationNodes(): Promise<void> {
+  const updates = await withCanvasWriteLock(async () => {
+    const docs = await readCanvasDocs();
+    const updates: Array<{ canvasId: string; updatedAt: string }> = [];
+    for (const [canvasId, doc] of Object.entries(docs)) {
+      const nodes = Array.isArray(doc.nodes) ? doc.nodes : [];
+      let docChanged = false;
+      const nextNodes = nodes.map((raw) => {
+        const node = raw as { data?: Record<string, unknown> };
+        const data = node.data;
+        const source = String(data?.source || '');
+        if (
+          data?.status !== 'running'
+          || (source !== 'mcp' && source !== 'chat' && source !== 'browser' && source !== '')
+        ) return raw;
+        docChanged = true;
+        return {
+          ...node,
+          data: {
+            ...data,
+            status: 'error',
+            error: 'Bridge 已重启，生成已中断，请重新生成',
+            stage: undefined,
+            runningDirect: undefined,
+            finishedAt: new Date().toISOString(),
+          },
+        };
+      });
+      if (!docChanged) continue;
+      const previousAt = Date.parse(String(doc.updatedAt || ''));
+      const updatedAt = new Date(Math.max(Date.now(), Number.isFinite(previousAt) ? previousAt + 1 : 0)).toISOString();
+      docs[canvasId] = {
+        ...doc,
+        nodes: nextNodes,
+        updatedAt,
+      };
+      updates.push({ canvasId, updatedAt });
+    }
+    if (updates.length === 0) return updates;
+    await backupCanvasDocs();
+    await atomicWriteJson(CANVAS_DOCS_FILE, docs);
+    return updates;
+  });
+  for (const update of updates) await pushCanvasUpdated({ type: 'canvas-updated', ...update });
 }
 
 /**
@@ -452,6 +610,31 @@ export function protectVideoTerminalNodes(
   return changed ? nodes : incomingNodes;
 }
 
+export function protectImageTerminalNodes(previousNodes: unknown[] | undefined, incomingNodes: unknown[]): unknown[] {
+  const previousById = new Map((previousNodes || []).map((raw) => {
+    const node = raw as { id?: string; data?: Record<string, unknown> };
+    return [node.id, node];
+  }));
+  return incomingNodes.map((raw) => {
+    const node = raw as { id?: string; data?: Record<string, unknown> };
+    const previous = previousById.get(node.id)?.data;
+    const incoming = node.data;
+    if (incoming?.status !== 'running' || !previous || previous.kind === 'video'
+      || (previous.status !== 'done' && previous.status !== 'error')) return raw;
+    const previousStart = Date.parse(String(previous.createdAt || previous.finishedAt || ''));
+    const incomingStart = Date.parse(String(incoming.createdAt || ''));
+    if (Number.isFinite(previousStart) && Number.isFinite(incomingStart) && incomingStart > previousStart) return raw;
+    const data = { ...incoming };
+    for (const key of [
+      'kind', 'status', 'error', 'stage', 'runningDirect', 'createdAt', 'finishedAt',
+      'imageUrl', 'fileName', 'size', 'width', 'height', 'versions', 'activeVersionId',
+      'reditBaseVersionId', 'enhancedPrompt', 'enhanceFailed', 'revisedPrompt',
+      'responseId', 'imageGenerationCallId', 'responseModel', 'responseProfileId',
+    ]) data[key] = previous[key];
+    return { ...node, data };
+  });
+}
+
 export function mergeCanvasSnapshot(
   previousNodes: unknown[] | undefined,
   incomingNodes: unknown[],
@@ -461,10 +644,10 @@ export function mergeCanvasSnapshot(
   return {
     // Incoming arrays are the user's full current snapshot. Unioning old entries here made
     // intentional node/edge deletions impossible and caused them to reappear after saving.
-    nodes: protectVideoTerminalNodes(
+    nodes: protectImageTerminalNodes(previousNodes, protectVideoTerminalNodes(
       previousNodes,
       keepExternalNodesOnSnapshot(previousNodes, incomingNodes, snapshotUpdatedAt),
-    ),
+    )),
     edges: incomingEdges,
   };
 }
@@ -564,7 +747,7 @@ export function mergeCanvasGraphChanges(
   const viewport = changes.viewport !== undefined ? changes.viewport : previous?.viewport;
   const merged: CanvasDocRecord = {
     name,
-    nodes: protectVideoTerminalNodes(previous?.nodes, nodes),
+    nodes: protectImageTerminalNodes(previous?.nodes, protectVideoTerminalNodes(previous?.nodes, nodes)),
     edges,
     ...(viewport ? { viewport } : {}),
     updatedAt,
@@ -578,11 +761,13 @@ export function mergeCanvasGraphChanges(
 
 export type InternalCanvasWriteOperation =
   | { op: 'appendImages'; canvasId: string; nodes: CanvasNodeRecord[] }
+  | { op: 'upsertImages'; canvasId: string; nodes: CanvasNodeRecord[]; connectFrom?: string[] }
   | { op: 'createCanvas'; canvasId: string; name: string }
   | { op: 'patchVideoNode'; canvasId: string; nodeId: string; patch: Record<string, unknown> };
 
 export interface InternalCanvasWriteResults {
   appendImages: boolean;
+  upsertImages: boolean;
   createCanvas: { id: string; name: string };
   patchVideoNode: boolean;
 }
@@ -621,6 +806,8 @@ function validInternalWrite(value: unknown): value is InternalCanvasWriteOperati
   if (!isRecord(value) || !validInternalId(value.canvasId)) return false;
   switch (value.op) {
     case 'appendImages': return Array.isArray(value.nodes) && value.nodes.length <= 100 && value.nodes.every(validCanvasNode);
+    case 'upsertImages': return Array.isArray(value.nodes) && value.nodes.length <= 100 && value.nodes.every(validCanvasNode)
+      && (value.connectFrom === undefined || (Array.isArray(value.connectFrom) && value.connectFrom.every(validInternalId)));
     case 'createCanvas': return typeof value.name === 'string' && value.name.length <= 500;
     case 'patchVideoNode': return validInternalId(value.nodeId) && validVideoPatch(value.patch);
     default: return false;
@@ -650,6 +837,12 @@ function validBroadcast(value: unknown): value is { kind: string; payload: Recor
   switch (value.kind) {
     case 'image': return validOptionalCanvas && validInternalId(p.nodeId)
       && ['prompt', 'fileName', 'url', 'jobId'].every((key) => typeof p[key] === 'string');
+    case 'node-state': return validInternalId(p.canvasId) && validInternalId(p.nodeId)
+      && ['started', 'done', 'error', 'stopped'].includes(String(p.phase))
+      && typeof p.at === 'string' && Number.isFinite(Date.parse(p.at))
+      && (p.node === undefined || validCanvasNode(p.node))
+      && (p.error === undefined || typeof p.error === 'string')
+      && (p.source === undefined || p.source === 'mcp' || p.source === 'chat');
     case 'locate': return validInternalId(p.canvasId) && validInternalId(p.nodeId)
       && typeof p.at === 'string' && Number.isFinite(Date.parse(p.at))
       && (p.onlyIfOffscreen === undefined || typeof p.onlyIfOffscreen === 'boolean');
@@ -693,6 +886,21 @@ export function createHttpServer() {
         });
         return;
       }
+      if (pathname === '/api/agent/selection' && req.method === 'GET') {
+        res.setHeader('Cache-Control', 'no-store');
+        json(res, 200, { code: 0, data: await readAgentSelection(), msg: 'ok' });
+        return;
+      }
+      if (pathname === '/api/agent/selection' && req.method === 'PUT') {
+        const body = await readBody(req).catch(() => ({})) as Record<string, unknown>;
+        const selection = await writeAgentSelection({
+          canvasId: body.canvasId,
+          nodeIds: body.nodeIds,
+          primaryNodeId: body.primaryNodeId,
+        });
+        json(res, 200, { code: 0, data: selection, msg: 'ok' });
+        return;
+      }
       if ((pathname === '/api/internal/write' || pathname === '/api/internal/broadcast') && req.method === 'POST') {
         if (!isInternalRequest(req)) {
           json(res, 403, { code: 1, data: null, msg: 'forbidden' });
@@ -713,6 +921,7 @@ export function createHttpServer() {
           let result: InternalCanvasWriteResults[keyof InternalCanvasWriteResults];
           switch (body.op) {
             case 'appendImages': result = await appendCanvasImageNodes(body.canvasId, body.nodes); break;
+            case 'upsertImages': result = await upsertCanvasNodes(body.canvasId, body.nodes, { connectFrom: body.connectFrom }); break;
             case 'createCanvas': result = await createCanvasInRegistry(body.canvasId, body.name); break;
             case 'patchVideoNode': result = await patchCanvasVideoNode(body.canvasId, body.nodeId, body.patch); break;
           }
@@ -725,6 +934,7 @@ export function createHttpServer() {
         }
         switch (body.kind) {
           case 'image': await pushImage(body.payload as never); break;
+          case 'node-state': await pushNodeState(body.payload as never); break;
           case 'locate': await pushLocate(body.payload as never); break;
           case 'video': await pushVideo(body.payload as never); break;
           case 'canvas-updated': await pushCanvasUpdated(body.payload as never); break;
@@ -1008,16 +1218,16 @@ function readReferenceUrls(body: { referenceDataUrl?: unknown; referenceDataUrls
         return;
       }
       if (pathname === '/api/generate' && req.method === 'POST') {
-        const body = await readBody(req) as Record<string, string>;
+        const body = await readBody(req) as Record<string, unknown>;
         const prompt = String(body.prompt || '').trim();
         if (!prompt) {
           json(res, 400, { code: 1, data: null, msg: '提示词不能为空' });
           return;
         }
         const settings = await readSettings();
-        const profile = findProfile(settings, body.profileId);
+        const profile = findProfile(settings, typeof body.profileId === 'string' ? body.profileId : undefined);
         // 参考图：单图（referenceDataUrl）与多图（referenceDataUrls，二次编辑时基准图 + 额外连线）都收
-        const rawReferences = (body as { referenceDataUrls?: unknown }).referenceDataUrls;
+        const rawReferences = body.referenceDataUrls;
         const referenceDataUrls = Array.isArray(rawReferences)
           ? rawReferences.map((item) => String(item || '').trim()).filter(Boolean)
           : [];
@@ -1036,49 +1246,153 @@ function readReferenceUrls(body: { referenceDataUrl?: unknown; referenceDataUrls
         // Responses 主模型接收原始上下文；Image API 直连（含兼容回退）继续使用参考图约束。
         const imagesPrompt = directStyleNote(prompt, usage);
         const finalPrompt = apiMode === 'images' ? imagesPrompt : prompt;
-        const images = await generateImages(profile, {
-          prompt: finalPrompt,
-          apiMode,
-          imagesPrompt,
-          size: body.size ? String(body.size) : undefined,
-          model: body.model ? String(body.model).trim() : undefined,
-          quality: body.quality === 'auto' || body.quality === 'low' || body.quality === 'medium' || body.quality === 'high' || body.quality === 'xhigh' || body.quality === 'max'
-            ? body.quality
-            : undefined,
-          inputFidelity: hasReferences ? fidelityForUsage(usage) : undefined,
-          n: body.n ? Number(body.n) : undefined,
-          referenceDataUrl: referenceDataUrl || undefined,
-          referenceDataUrls: referenceDataUrls.length > 0
-            ? referenceDataUrls
-            : (referenceDataUrl ? [referenceDataUrl] : undefined),
-          previousResponseId: body.previousResponseId ? String(body.previousResponseId) : undefined,
-          previousImageGenerationCallId: body.previousImageGenerationCallId ? String(body.previousImageGenerationCallId) : undefined,
-          responseModel: apiMode === 'responses' ? profile.model : undefined,
-        });
         const jobId = `job_${Date.now().toString(36)}`;
         const canvasId = String(body.canvasId || '');
+        const nodeId = String(body.nodeId || '');
         const originalPrompt = String(body.originalPrompt || '').trim() || prompt;
+        const startedAt = new Date().toISOString();
+        const normalizedSize = normalizeImageSize(body.size ? String(body.size) : profile.defaultSize);
+        const selectedModel = body.model ? String(body.model).trim() : profile.model;
+        const existingDoc = canvasId ? await readCanvasDoc(canvasId).catch(() => undefined) : undefined;
+        const existingNode = (existingDoc?.nodes || []).find((raw) => (
+          String((raw as { id?: unknown })?.id || '') === nodeId
+        )) as { data?: Record<string, unknown> } | undefined;
+        const existingVersions = (() => {
+          const versions = existingNode?.data?.versions;
+          return Array.isArray(versions) ? versions.filter((item) => item && typeof item === 'object') : [];
+        })();
+        const markGenerationError = async (message: string) => {
+          if (!canvasId || !nodeId) return;
+          await patchCanvasNodeData(canvasId, nodeId, {
+            status: 'error',
+            source: 'browser',
+            error: message,
+            stage: undefined,
+            runningDirect: undefined,
+            finishedAt: new Date().toISOString(),
+          }).catch(() => undefined);
+        };
+
+        let images: Awaited<ReturnType<typeof generateImages>>;
+        try {
+          images = await generateImages(profile, {
+            prompt: finalPrompt,
+            apiMode,
+            imagesPrompt,
+            size: body.size ? String(body.size) : undefined,
+            model: body.model ? String(body.model).trim() : undefined,
+            quality: body.quality === 'auto' || body.quality === 'low' || body.quality === 'medium' || body.quality === 'high' || body.quality === 'xhigh' || body.quality === 'max'
+              ? body.quality
+              : undefined,
+            inputFidelity: hasReferences ? fidelityForUsage(usage) : undefined,
+            n: body.n ? Number(body.n) : undefined,
+            referenceDataUrl: referenceDataUrl || undefined,
+            referenceDataUrls: referenceDataUrls.length > 0
+              ? referenceDataUrls
+              : (referenceDataUrl ? [referenceDataUrl] : undefined),
+            previousResponseId: body.previousResponseId ? String(body.previousResponseId) : undefined,
+            previousImageGenerationCallId: body.previousImageGenerationCallId ? String(body.previousImageGenerationCallId) : undefined,
+            reusePreviousImage: body.reusePreviousImage === true ? true : undefined,
+            responseModel: apiMode === 'responses' ? resolveResponseModel(profile) : undefined,
+          });
+        } catch (error) {
+          await markGenerationError(error instanceof Error ? error.message : '生图失败');
+          throw error;
+        }
+        if (images.length === 0) {
+          const message = '生图接口没有返回图片';
+          await markGenerationError(message);
+          throw new Error(message);
+        }
+
+        const finishedAt = new Date().toISOString();
+        const versionedImages = images.map((image, index) => ({
+          ...image,
+          versionId: `ver_${jobId}_${index}`,
+        }));
+        const actualSize = Number(images[0]?.width) > 0 && Number(images[0]?.height) > 0
+          ? `${Number(images[0].width)}x${Number(images[0].height)}`
+          : normalizedSize;
+        const newVersions = versionedImages.map((image) => ({
+          id: image.versionId,
+          imageUrl: image.url,
+          fileName: image.fileName,
+          prompt: originalPrompt,
+          model: selectedModel,
+          size: Number(image.width) > 0 && Number(image.height) > 0
+            ? `${Number(image.width)}x${Number(image.height)}`
+            : normalizedSize,
+          ...(Number(image.width) > 0 && Number(image.height) > 0
+            ? { width: Number(image.width), height: Number(image.height) }
+            : {}),
+          createdAt: startedAt,
+          finishedAt,
+          enhancedPrompt: finalPrompt !== originalPrompt ? finalPrompt : undefined,
+          revisedPrompt: image.revisedPrompt,
+          responseId: image.responseId,
+          imageGenerationCallId: image.imageGenerationCallId,
+          responseModel: image.responseModel,
+          responseProfileId: image.responseId ? profile.id : undefined,
+        }));
+        const newVersionIds = new Set(newVersions.map((version) => version.id));
+        const versions = [
+          ...existingVersions.filter((version) => (
+            !newVersionIds.has(String((version as { id?: unknown })?.id || ''))
+          )),
+          ...newVersions,
+        ];
+        const firstVersion = newVersions[0];
+        if (canvasId && nodeId) {
+          await patchCanvasNodeData(canvasId, nodeId, {
+            kind: 'image',
+            status: 'done',
+            source: 'browser',
+            error: '',
+            imageUrl: firstVersion.imageUrl,
+            fileName: firstVersion.fileName,
+            size: actualSize,
+            ...(Number(firstVersion.width) > 0 && Number(firstVersion.height) > 0
+              ? { width: Number(firstVersion.width), height: Number(firstVersion.height) }
+              : {}),
+            model: selectedModel,
+            versions,
+            activeVersionId: firstVersion.id,
+            createdAt: startedAt,
+            finishedAt,
+            stage: undefined,
+            runningDirect: undefined,
+            enhancedPrompt: firstVersion.enhancedPrompt || '',
+            revisedPrompt: firstVersion.revisedPrompt,
+            responseId: firstVersion.responseId,
+            imageGenerationCallId: firstVersion.imageGenerationCallId,
+            responseModel: firstVersion.responseModel,
+            responseProfileId: firstVersion.responseProfileId,
+          }).catch(() => undefined);
+        }
         // 广播给所有订阅该画布的标签页（含发起页自身按 nodeId 去重）
         if (canvasId) {
           pushImage({
             type: 'image',
             canvasId,
-            nodeId: String(body.nodeId || ''),
+            nodeId,
             prompt: originalPrompt,
             usedPrompt: finalPrompt,
-            revisedPrompt: images[0].revisedPrompt,
-            responseId: images[0].responseId,
-            imageGenerationCallId: images[0].imageGenerationCallId,
-            responseModel: images[0].responseModel,
+            revisedPrompt: versionedImages[0].revisedPrompt,
+            responseId: versionedImages[0].responseId,
+            imageGenerationCallId: versionedImages[0].imageGenerationCallId,
+            responseModel: versionedImages[0].responseModel,
             responseProfileId: profile.id,
-            model: body.model ? String(body.model).trim() : profile.model,
-            size: normalizeImageSize(body.size ? String(body.size) : profile.defaultSize),
-            fileName: images[0].fileName,
-            url: images[0].url,
+            model: selectedModel,
+            size: actualSize,
+            ...(Number(firstVersion.width) > 0 && Number(firstVersion.height) > 0
+              ? { width: Number(firstVersion.width), height: Number(firstVersion.height) }
+              : {}),
+            fileName: versionedImages[0].fileName,
+            url: versionedImages[0].url,
             jobId,
           });
         }
-        json(res, 200, { code: 0, data: { ok: true, jobId, images }, msg: 'ok' });
+        json(res, 200, { code: 0, data: { ok: true, jobId, images: versionedImages }, msg: 'ok' });
         return;
       }
       /* ── 视频生成 ──
@@ -1694,17 +2008,20 @@ function readReferenceUrls(body: { referenceDataUrl?: unknown; referenceDataUrls
         const ids = new Set([...Object.keys(registry), ...Object.keys(docs)]);
         json(res, 200, {
           code: 0,
-          data: [...ids].map((id) => {
-            const doc = docs[id];
-            return {
-              id,
-              name: doc?.name || registry[id] || '未命名画布',
-              nodes: doc?.nodes || [],
-              edges: doc?.edges || [],
-              ...(doc?.viewport ? { viewport: doc.viewport } : {}),
-              updatedAt: doc?.updatedAt || '',
-            };
-          }),
+          data: [...ids]
+            .map((id) => {
+              const doc = docs[id];
+              return {
+                id,
+                name: doc?.name || registry[id] || '未命名画布',
+                nodes: doc?.nodes || [],
+                edges: doc?.edges || [],
+                ...(doc?.viewport ? { viewport: doc.viewport } : {}),
+                updatedAt: doc?.updatedAt || '',
+              };
+            })
+            // 没有节点的画布只是草稿：可以留在 registry 供 MCP 继续使用，但不进历史列表。
+            .filter((doc) => doc.nodes.length > 0 || doc.edges.length > 0),
           msg: 'ok',
         });
         return;

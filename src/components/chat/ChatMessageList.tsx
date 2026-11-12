@@ -10,6 +10,7 @@ import './ChatPanel.css';
 
 const SINGLE_MEDIA_MAX = 240;
 const GRID_MEDIA_MAX = 136;
+const FOLLOW_BOTTOM_THRESHOLD = 8;
 
 /** 聊天结果图使用固定上限，容器按生成尺寸比例收缩，不跟随对话面板宽度拉伸。 */
 function mediaBox(size: string, maxDimension: number): { width: number; height: number } {
@@ -226,6 +227,25 @@ function useCopyFeedback(): [boolean, (text: string) => void] {
     });
   };
   return [copied, copy];
+}
+
+function ReasoningDetails({ reasoning, active }: { reasoning: string; active: boolean }) {
+  const [manualOpen, setManualOpen] = useState<boolean | null>(null);
+
+  useEffect(() => {
+    setManualOpen(null);
+  }, [active]);
+
+  return (
+    <details
+      className="hb-chat-reasoning"
+      open={manualOpen ?? active}
+      onToggle={(event) => setManualOpen(event.currentTarget.open)}
+    >
+      <summary>思考过程</summary>
+      <div className="hb-chat-reasoning-body">{reasoning}</div>
+    </details>
+  );
 }
 
 function ToolCallCard({ call, onRetry }: { call: ChatToolCall; onRetry?: () => void }) {
@@ -499,10 +519,7 @@ function MessageRow({
         </div>
       ) : null}
       {message.reasoning ? (
-        <details className="hb-chat-reasoning" open>
-          <summary>思考过程</summary>
-          <div className="hb-chat-reasoning-body">{message.reasoning}</div>
-        </details>
+        <ReasoningDetails reasoning={message.reasoning} active={message.status === 'running'} />
       ) : null}
       {displayContent ? <MarkdownText text={displayContent} /> : null}
       {message.toolCalls?.map((call) => (
@@ -610,6 +627,7 @@ export default function ChatMessageList({
   const thread = useChatStore(activeThreadOf);
   const scrollRef = useRef<HTMLDivElement>(null);
   const followLatestRef = useRef(true);
+  const programmaticScrollRef = useRef(false);
   const previousThreadIdRef = useRef('');
   const previousLastMessageIdRef = useRef('');
   const setMessageScrollTop = useChatStore((state) => state.setMessageScrollTop);
@@ -633,7 +651,11 @@ export default function ChatMessageList({
     }
     previousLastMessageIdRef.current = lastMessage?.id || '';
     if (lastRunning && followLatestRef.current) {
+      programmaticScrollRef.current = true;
       element.scrollTop = element.scrollHeight;
+      window.requestAnimationFrame(() => {
+        programmaticScrollRef.current = false;
+      });
       return;
     }
     if (threadChanged && messageScrollTop > 0) element.scrollTop = messageScrollTop;
@@ -658,9 +680,14 @@ export default function ChatMessageList({
       ref={scrollRef}
       onScroll={(event) => {
         const element = event.currentTarget;
-        const distanceFromBottom = element.scrollHeight - element.scrollTop - element.clientHeight;
-        followLatestRef.current = distanceFromBottom <= 24;
+        if (!programmaticScrollRef.current) {
+          const distanceFromBottom = element.scrollHeight - element.scrollTop - element.clientHeight;
+          followLatestRef.current = distanceFromBottom <= FOLLOW_BOTTOM_THRESHOLD;
+        }
         setMessageScrollTop(element.scrollTop);
+      }}
+      onWheel={(event) => {
+        if (event.deltaY < 0) followLatestRef.current = false;
       }}
     >
       {messages.map((message) => (

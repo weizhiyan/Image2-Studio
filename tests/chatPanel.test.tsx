@@ -124,8 +124,19 @@ describe('clarification and cost controls', () => {
     expect(html).toContain('本次 3 张');
     expect(html).toContain('累计 4 张');
     expect(html).toContain('费用未知');
+    expect(html).toContain('class="hb-chat-confirmation-prompt"');
+    expect(html).toContain('<code>image prompt</code>');
     expect(html).toContain('确认生成');
     expect(html).toContain('取消生成');
+    expect(CHAT_CSS).toMatch(
+      /\.hb-chat-confirmation\s*\{[^}]*border:\s*1px solid var\(--control-border\)[^}]*background:\s*var\(--chat-confirmation-bg\)/s,
+    );
+    expect(CHAT_CSS).toMatch(
+      /\.hb-chat-confirmation-prompt\s*\{[^}]*background:\s*var\(--chat-confirmation-code-bg\)[^}]*font-family:\s*var\(--font-mono\)[^}]*font-size:\s*var\(--font-size-code\)/s,
+    );
+    expect(CHAT_CSS).toMatch(
+      /\.hb-chat-confirmation-actions button:last-child:hover:not\(:disabled\)\s*\{[^}]*background:\s*var\(--color-action-send-hover\)/s,
+    );
   });
   it('renders an open text question without forced choices and distinguishes optional skip from cancelling run', async () => {
     const { default: Modal } = await import('@/components/chat/ClarificationModal');
@@ -176,7 +187,22 @@ describe('ChatMessageList', () => {
     expect(html).toContain('思考过程');
     expect(html).toContain('先确认画幅和主色');
     expect(html).toContain('海报已经生成。');
+    expect(html).not.toMatch(/<details class="hb-chat-reasoning"[^>]*\sopen/);
     expect(html.indexOf('先确认画幅和主色')).toBeLessThan(html.indexOf('海报已经生成。'));
+  });
+
+  it('思考过程在运行中展开，结束后由状态切换自动收起', () => {
+    useChatStore.getState().appendMessage('thread-1', { role: 'user', content: '生成一张海报' });
+    useChatStore.getState().appendMessage('thread-1', {
+      role: 'assistant',
+      content: '',
+      reasoning: '正在分析画幅。',
+      status: 'running',
+    });
+    const running = renderToStaticMarkup(<ChatMessageList {...handlers} />);
+    expect(running).toMatch(/<details class="hb-chat-reasoning"[^>]*\sopen/);
+    expect(CHAT_MESSAGE_LIST_SOURCE).toContain('setManualOpen(null);');
+    expect(CHAT_MESSAGE_LIST_SOURCE).toContain("active={message.status === 'running'}");
   });
 
   it('哪一条回答用了角色，就在该条消息的操作排标出对应角色', () => {
@@ -322,6 +348,21 @@ describe('ChatMessageList', () => {
     expect(CHAT_CSS).toMatch(/\.hb-chat-media-cell img\s*\{[^}]*object-fit:\s*contain/s);
     expect(CHAT_MESSAGE_LIST_SOURCE).toContain('const SINGLE_MEDIA_MAX = 240;');
     expect(CHAT_MESSAGE_LIST_SOURCE).toContain('const GRID_MEDIA_MAX = 136;');
+  });
+
+  it('消息区上下贴边、左右留 12px，并为滚动条预留双侧槽位', () => {
+    expect(CHAT_CSS).toMatch(
+      /\.hb-chat-messages\s*\{[^}]*scrollbar-gutter:\s*stable both-edges[^}]*padding:\s*0 var\(--spacing-3\)/s,
+    );
+  });
+
+  it('生成中用户上滚立即停止跟随，程序性置底不会重新打开跟随', () => {
+    expect(CHAT_MESSAGE_LIST_SOURCE).toContain('const programmaticScrollRef = useRef(false);');
+    expect(CHAT_MESSAGE_LIST_SOURCE).toContain('if (event.deltaY < 0) followLatestRef.current = false;');
+    expect(CHAT_MESSAGE_LIST_SOURCE).toContain('const FOLLOW_BOTTOM_THRESHOLD = 8;');
+    expect(CHAT_MESSAGE_LIST_SOURCE).toMatch(
+      /if \(!programmaticScrollRef\.current\) \{[\s\S]*?FOLLOW_BOTTOM_THRESHOLD/s,
+    );
   });
 
   it('横图按宽高比收窄高度，竖图按宽高比收窄宽度', () => {

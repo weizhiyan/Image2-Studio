@@ -12,6 +12,8 @@ const ANIMATIONS = readSource('../src/styles/animations.css');
 const CONTROLS = readSource('../src/components/canvas/CanvasControls.css');
 const IMAGE_NODES = readSource('../src/components/canvas/ImageNodes.css');
 const CANVAS_PAGE = readSource('../src/pages/canvas-page.css');
+const CHAT_PANEL = readSource('../src/components/chat/ChatPanel.css');
+const CLARIFICATION = readSource('../src/components/chat/ClarificationModal.css');
 const FLOW_EDGE = readSource('../src/components/canvas/FlowEdge.tsx');
 const AGENT_CONNECT = readSource('../src/components/AgentConnectDialog.css');
 const APP_MODE_TABS = readSource('../src/components/AppModeTabs.tsx');
@@ -102,6 +104,19 @@ describe('浅色模式细节', () => {
     );
   });
 
+  it('浅色用户消息气泡使用浅灰面，与纯白对话面板分层', () => {
+    const backgrounds = [...TOKENS.matchAll(/--chat-user-bubble-bg:\s*([^;]+);/g)]
+      .map((match) => match[1].trim());
+
+    expect(backgrounds).toEqual([
+      'color-mix(in srgb, var(--color-paper) 6%, transparent)',
+      'var(--color-ui-control-panel)',
+    ]);
+    expect(CHAT_PANEL).toMatch(
+      /\.hb-chat-msg-user \.hb-chat-bubble\s*\{[^}]*background:\s*var\(--chat-user-bubble-bg\)/s,
+    );
+  });
+
   it('浅色图片悬浮控件压在照片上时改为恒定深底白字', () => {
     const backgrounds = [...TOKENS.matchAll(/--image-node-overlay-bg:\s*([^;]+);/g)]
       .map((match) => match[1].trim());
@@ -109,11 +124,11 @@ describe('浅色模式细节', () => {
       .map((match) => match[1].trim());
 
     expect(backgrounds).toEqual([
-      'color-mix(in srgb, var(--color-bg-base) 64%, transparent)',
-      'var(--media-chrome-bg-strong)',
+      'color-mix(in srgb, var(--color-bg-base) 40%, transparent)',
+      'color-mix(in srgb, var(--color-ink) 40%, transparent)',
     ]);
     expect(foregrounds).toEqual([
-      'var(--color-text-secondary)',
+      'var(--media-chrome-fg)',
       'var(--media-chrome-fg)',
     ]);
     expect(IMAGE_NODES).toMatch(
@@ -121,6 +136,57 @@ describe('浅色模式细节', () => {
     );
     expect(IMAGE_NODES).toMatch(
       /\.image-node-copy-button\s*\{[^}]*background:\s*var\(--image-node-overlay-bg\)[^}]*color:\s*var\(--image-node-overlay-fg\)/s,
+    );
+    expect(IMAGE_NODES).toMatch(
+      /\.image-node-size-badge\s*\{[^}]*border-radius:\s*var\(--radius-xs\)/s,
+    );
+    expect(IMAGE_NODES).toMatch(
+      /\.image-node-copy-button\s*\{[^}]*border-radius:\s*var\(--radius-xs\)/s,
+    );
+    expect(TOKENS).toContain('--image-node-overlay-blur: blur(12px) saturate(120%);');
+    expect(IMAGE_NODES).toMatch(
+      /\.image-node-pixel-size\s*\{[^}]*backdrop-filter:\s*var\(--image-node-overlay-blur\)[^}]*-webkit-backdrop-filter:\s*var\(--image-node-overlay-blur\)/s,
+    );
+    expect(IMAGE_NODES).toMatch(
+      /\.image-node-copy-button\s*\{[^}]*backdrop-filter:\s*var\(--image-node-overlay-blur\)[^}]*-webkit-backdrop-filter:\s*var\(--image-node-overlay-blur\)/s,
+    );
+  });
+
+  it('浅色输入框引用 chip 使用纯白底，和画布主题保持同一套表面层级', () => {
+    const backgrounds = [...TOKENS.matchAll(/--chat-inline-ref-bg:\s*([^;]+);/g)]
+      .map((match) => match[1].trim());
+
+    expect(backgrounds).toEqual([
+      'var(--color-ui-control-panel)',
+      'var(--color-paper)',
+    ]);
+    expect(CHAT_PANEL).toMatch(
+      /\.hb-chat-inline-ref\s*\{[^}]*background:\s*var\(--chat-inline-ref-bg\)/s,
+    );
+  });
+
+  it('澄清弹窗次要按钮浅色为白色实底，禁用与焦点态有明确层级', () => {
+    const secondary = [...TOKENS.matchAll(/--clarification-secondary-bg:\s*([^;]+);/g)]
+      .map((match) => match[1].trim());
+    const disabled = [...TOKENS.matchAll(/--clarification-primary-disabled-bg:\s*([^;]+);/g)]
+      .map((match) => match[1].trim());
+
+    expect(secondary).toEqual([
+      'var(--color-ui-control-hover)',
+      'var(--color-paper)',
+    ]);
+    expect(disabled).toEqual([
+      'color-mix(in srgb, var(--color-paper) 8%, transparent)',
+      'color-mix(in srgb, var(--color-ink) 8%, transparent)',
+    ]);
+    expect(CLARIFICATION).toMatch(
+      /\.hb-clarification-secondary\s*\{[^}]*background:\s*var\(--clarification-secondary-bg\)/s,
+    );
+    expect(CLARIFICATION).toMatch(
+      /\.hb-clarification-primary:disabled\s*\{[^}]*background:\s*var\(--clarification-primary-disabled-bg\)[^}]*color:\s*var\(--clarification-primary-disabled-fg\)/s,
+    );
+    expect(CLARIFICATION).toMatch(
+      /\.hb-clarification-secondary:focus-visible,\s*\.hb-clarification-primary:focus-visible\s*\{[^}]*outline:\s*1px solid var\(--control-border-focus\)/s,
     );
   });
 });

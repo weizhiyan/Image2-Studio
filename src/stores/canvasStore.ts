@@ -10,6 +10,8 @@ interface CanvasState {
   activeId: string;
   cursor: { x: number; y: number };
   createCanvas: (name?: string) => string;
+  /** 删除尚未写入任何节点的空草稿；它不属于历史画布。 */
+  discardEmptyCanvas: (id: string) => void;
   renameCanvas: (id: string, name: string) => void;
   deleteCanvas: (id: string) => void;
   setActive: (id: string) => void;
@@ -419,6 +421,29 @@ function pickVideoTerminalFields(data: Record<string, unknown>): Record<string, 
  *
  * 用户主动重新生成时 createdAt 会刷新到完成时间之后，此时不补，允许清空旧视频。
  */
+export function protectImageTerminalNodes(chosen: CanvasDoc, other: CanvasDoc): CanvasDoc {
+  const otherById = new Map(other.nodes.map((node) => [node.id, node]));
+  let changed = false;
+  const nodes = chosen.nodes.map((node) => {
+    const previous = otherById.get(node.id)?.data;
+    if (node.data.status !== 'running' || !previous || previous.kind === 'video'
+      || (previous.status !== 'done' && previous.status !== 'error')) return node;
+    const previousStart = Date.parse(String(previous.createdAt || previous.finishedAt || ''));
+    const incomingStart = Date.parse(String(node.data.createdAt || ''));
+    if (Number.isFinite(previousStart) && Number.isFinite(incomingStart) && incomingStart > previousStart) return node;
+    changed = true;
+    const data = { ...node.data };
+    for (const key of [
+      'kind', 'status', 'error', 'stage', 'runningDirect', 'createdAt', 'finishedAt',
+      'imageUrl', 'fileName', 'size', 'width', 'height', 'versions', 'activeVersionId',
+      'reditBaseVersionId', 'enhancedPrompt', 'enhanceFailed', 'revisedPrompt',
+      'responseId', 'imageGenerationCallId', 'responseModel', 'responseProfileId',
+    ] as const) Object.assign(data, { [key]: previous[key] });
+    return { ...node, data };
+  });
+  return changed ? { ...chosen, nodes } : chosen;
+}
+
 export function protectVideoTerminalNodes(chosen: CanvasDoc, other: CanvasDoc): CanvasDoc {
   if (!Array.isArray(chosen.nodes) || !Array.isArray(other.nodes) || other.nodes.length === 0) return chosen;
   const otherById = new Map(other.nodes.map((node) => [node.id, node]));
@@ -514,11 +539,28 @@ export const useCanvasStore = create<CanvasState>()(
       cursor: { x: 80, y: 80 },
 
       createCanvas: (name) => {
-        const doc = emptyCanvas(name?.trim() || `画布 ${get().canvases.length + 1}`);
-        set((state) => ({ canvases: [...state.canvases, doc], activeId: doc.id }));
-        void registerCanvas(doc.id, doc.name);
+        const state = get();
+        const doc = emptyCanvas(name?.trim() || `画布 ${state.canvases.length + 1}`);
+        // 上一张还是空草稿时直接替换掉：未添加节点的画布不进历史，也不留下空壳。
+        const canvases = state.canvases.filter((canvas) => (
+          canvas.id !== state.activeId
+          || canvas.nodes.length > 0
+          || canvas.edges.length > 0
+        ));
+        set({ canvases: [...canvases, doc], activeId: doc.id });
         return doc.id;
       },
+
+      discardEmptyCanvas: (id) => set((state) => {
+        const target = state.canvases.find((doc) => doc.id === id);
+        if (!target || target.nodes.length > 0 || target.edges.length > 0) return state;
+        const canvases = state.canvases.filter((doc) => doc.id !== id);
+        if (canvases.length === 0) return state;
+        return {
+          canvases,
+          activeId: state.activeId === id ? canvases[0].id : state.activeId,
+        };
+      }),
 
       renameCanvas: (id, name) => {
         const trimmed = name.trim();
@@ -538,7 +580,14 @@ export const useCanvasStore = create<CanvasState>()(
         });
       },
 
-      setActive: (id) => set({ activeId: id }),
+      setActive: (id) => set((state) => {
+        if (id === state.activeId) return state;
+        const current = state.canvases.find((doc) => doc.id === state.activeId);
+        const canvases = current && current.nodes.length === 0 && current.edges.length === 0
+          ? state.canvases.filter((doc) => doc.id !== current.id)
+          : state.canvases;
+        return { canvases, activeId: id };
+      }),
 
       addNode: (node) => {
         set((state) => ({
@@ -634,9 +683,9 @@ export const useCanvasStore = create<CanvasState>()(
           const remoteNewer = Date.parse(doc.updatedAt || '') > Date.parse(local.updatedAt || '');
           // 按 updatedAt 选整份文档，但视频终态永远以「已出成品」的那份为准：
           // 旧快照的 updatedAt 可能更新，却不该把刚生成的视频冲掉。
-          merged[index] = normalizeCanvasDoc(remoteNewer
+          merged[index] = normalizeCanvasDoc(protectImageTerminalNodes(remoteNewer
             ? protectVideoTerminalNodes(doc, local)
-            : protectVideoTerminalNodes(local, doc));
+            : protectVideoTerminalNodes(local, doc), remoteNewer ? local : doc));
         }
         return {
           canvases: merged,

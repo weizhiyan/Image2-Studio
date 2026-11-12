@@ -53,6 +53,8 @@ const TRANSIENT_NETWORK_CODES = new Set([
   'ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'ENOTFOUND', 'EAI_AGAIN',
   'UND_ERR_CONNECT_TIMEOUT', 'UND_ERR_HEADERS_TIMEOUT', 'UND_ERR_SOCKET',
 ]);
+const AGENT_NETWORK_MAX_ATTEMPTS = 3;
+const AGENT_NETWORK_RETRY_DELAYS_MS = [300, 900];
 
 function networkErrorCode(error: unknown): string {
   const value = error as { code?: unknown; cause?: { code?: unknown; errors?: Array<{ code?: unknown }> } } | null;
@@ -74,28 +76,45 @@ function networkErrorMessage(error: unknown): string {
   return `语言模型请求失败：无法连接上游或代理${code ? `（${code}）` : ''}。请检查模型 Base URL、系统代理和网络后重试。`;
 }
 
-/** 只对请求建立阶段的瞬时网络失败重试一次；流中断与已收到响应的情况不在这里重试。 */
+function waitForAgentRetry(delayMs: number, signal?: AbortSignal | null): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new Error('aborted'));
+      return;
+    }
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(new Error('aborted'));
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, delayMs);
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
+/** 只对请求建立阶段的瞬时网络失败做短退避重试；流中断与已收到响应的情况不在这里重试。 */
 async function fetchAgent(url: string, init: RequestInit): Promise<Response> {
-  try {
-    return await fetch(url, init);
-  } catch (error) {
-    if (init.signal?.aborted || !isTransientNetworkError(error)) throw error;
-    await new Promise<void>((resolve, reject) => {
-      if (init.signal?.aborted) { reject(error); return; }
-      const timer = setTimeout(resolve, 500);
-      init.signal?.addEventListener('abort', () => {
-        clearTimeout(timer);
-        reject(error);
-      }, { once: true });
-    });
+  let lastError: unknown;
+  for (let attempt = 0; attempt < AGENT_NETWORK_MAX_ATTEMPTS; attempt += 1) {
     try {
       return await fetch(url, init);
-    } catch (retryError) {
-      const wrapped = new Error(networkErrorMessage(retryError)) as Error & { networkFailure?: boolean };
-      wrapped.networkFailure = true;
-      throw wrapped;
+    } catch (error) {
+      if (init.signal?.aborted || !isTransientNetworkError(error)) throw error;
+      lastError = error;
+      const delay = AGENT_NETWORK_RETRY_DELAYS_MS[attempt];
+      if (delay === undefined) break;
+      try {
+        await waitForAgentRetry(delay, init.signal);
+      } catch {
+        throw error;
+      }
     }
   }
+  const wrapped = new Error(networkErrorMessage(lastError)) as Error & { networkFailure?: boolean };
+  wrapped.networkFailure = true;
+  throw wrapped;
 }
 
 class AgentToolProtocolError extends Error {}
@@ -681,7 +700,7 @@ export function jsonProtocolSpec(): string {
     '{"action": "generate_image", "args": {"prompt": "按统一视觉规则整理、可直接执行的最终生图提示词", "originalPrompt": "用户原始意图与本次修改要求", "referenceImages": [1], "referenceUsage": "style", "ratio": "1:1", "count": 1}}',
     '```',
     'prompt 是由当前 Agent 按系统统一视觉规则整理的最终生图提示词，原样提交生图模型，不再另调优化模型。完整保留精确图中文字、否定约束、必须保留项与修改边界；originalPrompt 可选，用于留档原始意图。',
-    '普通歧义优先自然语言追问；仅关键多项决策使用 ask_user。questions 为1-4题；type=single/multiple 时至少2选项；type=text 为开放输入、可省略 options；optional=true 允许只跳过该题，不取消整个任务。',
+    '普通生图或改图请求信息足够时直接输出 generate_image 动作，不附带需求复述、方案或确认提问；可用合理默认值补足的普通歧义不追问。只有缺少会实质改变成图结果且无法合理确定的关键信息时才使用 ask_user。questions 为1-4题；type=single/multiple 时至少2选项；type=text 为开放输入、可省略 options；optional=true 允许只跳过该题，不取消整个任务。',
     '```json',
     '{"action":"ask_user","args":{"questions":[{"id":"subject","title":"画面主体是什么？","type":"single","options":[{"label":"产品本身"},{"label":"使用场景"}]}]}}',
     '```',

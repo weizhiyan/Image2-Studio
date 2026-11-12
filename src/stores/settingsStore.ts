@@ -73,12 +73,20 @@ export const useSettingsStore = create<SettingsState>((set) => ({
   },
 }));
 
-/** 当前生效的那一路配置：没配好时返回 null，调用方据此拦到设置面板。 */
-export function activeProfileOf(settings: MediaSettings | null): ModelProfileView | null {
+/** 显式指定优先；未指定时优先完整可用的配置，避免默认生成落到缺 Key 的那一路。 */
+export function activeProfileOf(settings: MediaSettings | null, profileId?: string): ModelProfileView | null {
   if (!settings || settings.profiles.length === 0) return null;
-  return settings.profiles.find((profile) => profile.id === settings.activeProfileId)
-    || settings.profiles[0]
-    || null;
+  const explicit = settings.profiles.find((profile) => profile.id === profileId);
+  if (explicit) return explicit;
+  const active = settings.profiles.find((profile) => profile.id === settings.activeProfileId);
+  if (active && profileReady(active) && Boolean(active.baseUrl && active.baseUrl.trim())) return active;
+  const ready = settings.profiles.find((profile) => (
+    (profile.kind || 'image') === 'image'
+    && profile.enabled !== false
+    && profileReady(profile)
+    && Boolean(profile.baseUrl && profile.baseUrl.trim())
+  ));
+  return ready || active || settings.profiles[0] || null;
 }
 
 /** 某个 profile 是否可以直接生图（有 Key 且有模型）。 */

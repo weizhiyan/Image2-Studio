@@ -423,7 +423,7 @@ function ImageConfirmation({ runId, confirmation }: { runId: string; confirmatio
   };
   return <section className="hb-chat-confirmation" aria-label="确认图像生成">
     <strong>确认生成图片</strong>
-    <p>{confirmation.prompt}</p>
+    <pre className="hb-chat-confirmation-prompt"><code>{confirmation.prompt}</code></pre>
     <p>{confirmation.model} · {confirmation.size}</p>
     <p>本次 {confirmation.count} 张 · 累计 {confirmation.totalCount} 张 · 费用未知</p>
     <small>{expired ? '确认已过期，不能生成' : '只有确认后才会请求生成；取消不会请求生图。'}</small>

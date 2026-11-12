@@ -322,6 +322,24 @@ export async function putCanvasDoc(doc: CanvasDoc): Promise<void> {
   });
 }
 
+/** 为空草稿显式建档：只带空变更集，不会把服务端已有内容冲掉；空文档仍不会出现在历史列表。 */
+export async function ensureCanvasDoc(doc: Pick<CanvasDoc, 'id' | 'name'>): Promise<void> {
+  const response = await fetch(`/api/canvases/${encodeURIComponent(doc.id)}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      name: doc.name,
+      graphChanges: {
+        nodeUpserts: [],
+        nodeDeletes: [],
+        edgeUpserts: [],
+        edgeDeletes: [],
+      },
+    }),
+  });
+  if (!response.ok) throw new Error(`画布建档失败（HTTP ${response.status}）`);
+}
+
 export async function deleteCanvasDoc(canvasId: string): Promise<void> {
   canvasBaselines.delete(canvasId);
   await fetch(`/api/canvases/${encodeURIComponent(canvasId)}`, { method: 'DELETE' }).catch(() => undefined);
@@ -630,6 +648,8 @@ export interface GenerateRequest {
   previousResponseId?: string;
   /** Responses image_generation_call id from the selected base image. */
   previousImageGenerationCallId?: string;
+  /** Only omit an unchanged base image after validating the same model/context. */
+  reusePreviousImage?: boolean;
   /** 提示词编排阶段判定的参考图用法，避免 provider 再用正则猜一次。 */
   referenceUsage?: 'style' | 'edit';
 }
@@ -700,6 +720,9 @@ export interface PushedImageEvent {
   revisedPrompt?: string;
   model?: string;
   size?: string;
+  /** 最终位图的真实像素宽高；与请求 size 可能不同。 */
+  width?: number;
+  height?: number;
   responseId?: string;
   imageGenerationCallId?: string;
   responseModel?: string;
@@ -709,6 +732,34 @@ export interface PushedImageEvent {
   jobId: string;
   /** mcp = Codex 推来的图；chat = 对话 agent 生图工具产的图。 */
   source?: 'mcp' | 'chat';
+}
+
+export type PushedNodeStatePhase = 'started' | 'done' | 'error' | 'stopped';
+
+/** 生成生命周期：先推 started 占位节点，完成后推 done 的完整节点；失败/停止推 error/stopped。 */
+export interface PushedNodeStateEvent {
+  type: 'node-state';
+  canvasId: string;
+  nodeId: string;
+  phase: PushedNodeStatePhase;
+  at: string;
+  node?: CanvasDoc['nodes'][number];
+  error?: string;
+  source?: 'mcp' | 'chat';
+}
+
+export function subscribeNodeState(canvasId: string, onState: (event: PushedNodeStateEvent) => void): () => void {
+  const handler = (event: MessageEvent<string>) => {
+    try {
+      const parsed = JSON.parse(event.data) as PushedNodeStateEvent;
+      if (parsed?.type === 'node-state' && parsed.canvasId === canvasId) onState(parsed);
+    } catch {
+      /* 单条脏数据不该打断订阅 */
+    }
+  };
+  return subscribeEventStream(`/api/events?canvasId=${encodeURIComponent(canvasId)}`, [
+    { type: 'node-state', handler: handler as EventListener },
+  ]);
 }
 
 /** 订阅 Codex 推来的新图。EventSource 断线由浏览器自动重试。 */
@@ -724,6 +775,27 @@ export function subscribePushedImages(canvasId: string, onImage: (event: PushedI
   return subscribeEventStream(`/api/events?canvasId=${encodeURIComponent(canvasId)}`, [
     { type: 'image', handler: handler as EventListener },
   ]);
+}
+
+export interface AgentSelection {
+  canvasId?: string;
+  nodeIds?: string[];
+  primaryNodeId?: string;
+  updatedAt?: string;
+}
+
+/** 浏览器把当前画布选中态写到 bridge，MCP stdio 与内置对话都从这里读同一份选择。 */
+export async function putAgentSelection(input: {
+  canvasId?: string;
+  nodeIds?: string[];
+  primaryNodeId?: string;
+}): Promise<void> {
+  const response = await fetch('/api/agent/selection', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input),
+  });
+  if (!response.ok) throw new Error(`同步选中节点失败（HTTP ${response.status}）`);
 }
 
 /* ── 视频任务 ──
@@ -977,7 +1049,7 @@ export interface CanvasUpdatedEvent {
 }
 
 /** 订阅同一画布的远端写入（局域网其他页面）：收到后拉最新文档合并，看到对方的上传与编辑。 */
-export function subscribeCanvasUpdated(canvasId: string, onUpdate: (event: CanvasUpdatedEvent) => void): () => void {
+export function subscribeCanvasUpdated(canvasId: string, onUpdate: (event: CanvasUpdatedEvent) => void, onReconnect?: () => void): () => void {
   const handler = (event: MessageEvent<string>) => {
     try {
       const parsed = JSON.parse(event.data) as CanvasUpdatedEvent;
@@ -991,6 +1063,7 @@ export function subscribeCanvasUpdated(canvasId: string, onUpdate: (event: Canva
   };
   return subscribeEventStream(`/api/events?canvasId=${encodeURIComponent(canvasId)}`, [
     { type: 'canvas-updated', handler: handler as EventListener },
+    ...(onReconnect ? [{ type: 'open', handler: onReconnect as EventListener }] : []),
   ]);
 }
 

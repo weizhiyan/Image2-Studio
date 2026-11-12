@@ -29,3 +29,53 @@
 .image-node-version-top .image-node-version-actions {
   flex: 0 0 auto;
 }
+
+.image-node-version-stack img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  border-radius: inherit;
+}
+
+.image-node-version-stack i {
+  overflow: hidden;
+}
+
+.image-flow-node.has-versions .image-node-composer-shell,
+.image-flow-node.has-versions > .image-node-body > .image-node-placeholder {
+  z-index: 1;
+}
+
+.image-flow-node.has-versions .image-node-running-size {
+  right: auto;
+  left: var(--spacing-3);
+}
+
+.image-flow-node.versions-expanded .image-node-composer-shell,
+.image-flow-node.versions-expanded > .image-node-body > .image-node-placeholder {
+  display: none;
+}
+
+.image-flow-node.versions-leaving .image-node-composer-shell,
+.image-flow-node.versions-leaving > .image-node-body > .image-node-placeholder {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: var(--image-node-width);
+}
+
+.image-node-version-current-note {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: var(--spacing-2);
+  height: 100%;
+  padding: var(--spacing-6);
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-sm);
+  overflow-wrap: anywhere;
+}
+
+.image-node-version-current-note strong {
+  color: var(--color-text-primary);
+}

@@ -5,7 +5,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 const mocks = vi.hoisted(() => ({
   callAgentModel: vi.fn(),
   generateImages: vi.fn(),
-  appendCanvasImageNodes: vi.fn(async () => true),
+  upsertCanvasNodes: vi.fn(async () => true),
   saved: [] as Array<Record<string, any>>,
   threads: new Map<string, Record<string, any>>(),
 }));
@@ -22,8 +22,8 @@ vi.mock('../bridge/settings.js', () => {
 });
 vi.mock('../bridge/agent.js', async (original) => ({ ...await original<typeof import('../bridge/agent')>(), callAgentModel: mocks.callAgentModel }));
 vi.mock('../bridge/imageApi.js', async (original) => ({ ...await original<typeof import('../bridge/imageApi')>(), generateImages: mocks.generateImages }));
-vi.mock('../bridge/http.js', () => ({ appendCanvasImageNodes: mocks.appendCanvasImageNodes, readCanvasDoc: async () => ({ nodes: [] }) }));
-vi.mock('../bridge/hub.js', () => ({ pushImage: async () => {} }));
+vi.mock('../bridge/http.js', () => ({ upsertCanvasNodes: mocks.upsertCanvasNodes, readCanvasDoc: async () => ({ nodes: [] }) }));
+vi.mock('../bridge/hub.js', () => ({ pushImage: async () => {}, pushLocate: async () => {}, pushNodeState: async () => {} }));
 vi.mock('../bridge/chat.js', () => ({
   readChatThreads: async () => [],
   readChatThread: async (id: string) => mocks.threads.get(id) || null,
@@ -56,7 +56,7 @@ function request(id: string): import('../bridge/runs').StartRunRequest {
   };
 }
 beforeEach(() => {
-  mocks.callAgentModel.mockReset(); mocks.generateImages.mockReset(); mocks.appendCanvasImageNodes.mockClear(); mocks.saved.length = 0;
+  mocks.callAgentModel.mockReset(); mocks.generateImages.mockReset(); mocks.upsertCanvasNodes.mockClear(); mocks.saved.length = 0;
 });
 
 describe('run 权威快照与提交栅栏', () => {

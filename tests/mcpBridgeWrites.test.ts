@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 
 const root = await fs.mkdtemp(path.join(os.tmpdir(), 'huiban-mcp-writes-'));
 process.env.HUIBAN_DATA_ROOT = root;
-const { appendCanvasImageNodes, createCanvasInRegistry, createHttpServer } = await import('../bridge/http');
+const { appendCanvasImageNodes, createCanvasInRegistry, createHttpServer, interruptStaleGenerationNodes, patchCanvasNodeData, upsertCanvasNodes } = await import('../bridge/http');
 const { defaultMcpDeps } = await import('../bridge/mcp');
 const { setBroadcastForwardBase, peekPendingLocate, ackPendingLocate } = await import('../bridge/hub');
 const server = createHttpServer();
@@ -41,7 +41,7 @@ afterAll(async () => {
 describe('MCP 主 bridge 唯一写入者', () => {
   it('index 恢复丢失 run 只在持有端口分支执行，不实际启动入口', async () => {
     const source = await fs.readFile(new URL('../bridge/index.ts', import.meta.url), 'utf8');
-    expect(source).toMatch(/if\s*\(ownsPort\)\s*(?:\{\s*)?await reconcileLostRuns\(\)/);
+    expect(source).toMatch(/if\s*\(ownsPort\)\s*\{[\s\S]*?await\s+interruptStaleGenerationNodes\(\);[\s\S]*?await\s+reconcileLostRuns\(\);[\s\S]*?\}/);
   });
 
   it('同 id 已删除节点不得被旧 MCP 重放追加复活', async () => {
@@ -50,6 +50,106 @@ describe('MCP 主 bridge 唯一写入者', () => {
     } }));
     await appendCanvasImageNodes('c1', [node('deleted'), node('fresh')]);
     expect((await readDocs()).c1.nodes.map((item: { id: string }) => item.id)).toEqual(['fresh']);
+  });
+
+  it('upsert 同 id 回填不重复，connectFrom 只生成一次边', async () => {
+    await fs.writeFile(docsFile, JSON.stringify({ c1: {
+      name: '画布',
+      nodes: [node('ref'), { ...node('out'), data: { kind: 'image', source: 'mcp', status: 'running' } }],
+      edges: [],
+    } }));
+    await upsertCanvasNodes('c1', [{
+      ...node('out'),
+      data: { kind: 'image', source: 'mcp', status: 'done', imageUrl: '/api/files/out.png' },
+    }], { connectFrom: ['ref'] });
+    let doc = (await readDocs()).c1;
+    expect(doc.nodes).toHaveLength(2);
+    expect(doc.nodes.find((item: { id: string }) => item.id === 'out').data).toMatchObject({
+      status: 'done',
+      imageUrl: '/api/files/out.png',
+    });
+    expect(doc.edges).toHaveLength(1);
+    expect(doc.edges[0]).toMatchObject({ source: 'ref', target: 'out' });
+
+    await upsertCanvasNodes('c1', [node('out')], { connectFrom: ['ref'] });
+    doc = (await readDocs()).c1;
+    expect(doc.nodes).toHaveLength(2);
+    expect(doc.edges).toHaveLength(1);
+  });
+
+  it('upsert 同样受删除墓碑保护，迟到的结果不能复活已删节点', async () => {
+    await fs.writeFile(docsFile, JSON.stringify({ c1: {
+      name: '画布',
+      nodes: [],
+      edges: [],
+      deletedNodeIds: { gone: new Date().toISOString() },
+    } }));
+    await upsertCanvasNodes('c1', [node('gone'), node('fresh')]);
+    expect((await readDocs()).c1.nodes.map((item: { id: string }) => item.id)).toEqual(['fresh']);
+  });
+
+  it('bridge 重启收尾 mcp/chat/browser 的在途节点，不误伤已完成节点', async () => {
+    await fs.writeFile(docsFile, JSON.stringify({ c1: {
+      name: '画布',
+      nodes: [
+        { ...node('mcp-running'), data: { kind: 'image', source: 'mcp', status: 'running' } },
+        { ...node('chat-running'), data: { kind: 'image', source: 'chat', status: 'running' } },
+        { ...node('browser-running'), data: {
+          kind: 'composer', source: 'browser', status: 'running', stage: 'generate', runningDirect: true,
+          versions: [{ id: 'v1', imageUrl: '/api/files/previous.png' }], activeVersionId: 'v1', reditBaseVersionId: 'v1',
+        } },
+        { ...node('legacy-running'), data: { kind: 'image', status: 'running' } },
+        { ...node('mcp-done'), data: { kind: 'image', source: 'mcp', status: 'done' } },
+      ],
+      edges: [],
+    } }));
+    await interruptStaleGenerationNodes();
+    const nodes = (await readDocs()).c1.nodes as Array<{ id: string; data: { status: string; error?: string } }>;
+    expect(nodes.find((item) => item.id === 'mcp-running')?.data).toMatchObject({
+      status: 'error',
+      error: expect.stringContaining('Bridge 已重启'),
+    });
+    expect(nodes.find((item) => item.id === 'chat-running')?.data.status).toBe('error');
+    expect(nodes.find((item) => item.id === 'browser-running')?.data.status).toBe('error');
+    expect(nodes.find((item) => item.id === 'browser-running')?.data).toMatchObject({
+      finishedAt: expect.any(String),
+      versions: [{ id: 'v1', imageUrl: '/api/files/previous.png' }], activeVersionId: 'v1', reditBaseVersionId: 'v1',
+    });
+    expect(nodes.find((item) => item.id === 'browser-running')?.data).not.toHaveProperty('stage');
+    expect(nodes.find((item) => item.id === 'browser-running')?.data).not.toHaveProperty('runningDirect');
+    expect(nodes.find((item) => item.id === 'legacy-running')?.data.status).toBe('error');
+    expect(nodes.find((item) => item.id === 'mcp-done')?.data.status).toBe('done');
+  });
+
+  it('手动生成结果可回填已有节点，但不会复活已删除节点', async () => {
+    await fs.writeFile(docsFile, JSON.stringify({ c1: {
+      name: '画布',
+      nodes: [{ ...node('manual'), data: { kind: 'composer', source: 'browser', status: 'running' } }],
+      edges: [],
+      deletedNodeIds: { gone: new Date().toISOString() },
+    } }));
+    expect(await patchCanvasNodeData('c1', 'manual', {
+      kind: 'image',
+      status: 'done',
+      imageUrl: '/api/files/manual.png',
+      source: 'browser',
+    })).toBe(true);
+    expect(await patchCanvasNodeData('c1', 'gone', {
+      status: 'done',
+      imageUrl: '/api/files/gone.png',
+    })).toBe(false);
+    expect(await patchCanvasNodeData('c1', 'missing', {
+      status: 'done',
+      imageUrl: '/api/files/missing.png',
+    })).toBe(false);
+    const doc = (await readDocs()).c1;
+    expect(doc.nodes.find((item: { id: string }) => item.id === 'manual')?.data).toMatchObject({
+      kind: 'image',
+      status: 'done',
+      imageUrl: '/api/files/manual.png',
+      source: 'browser',
+    });
+    expect(doc.nodes.some((item: { id: string }) => item.id === 'gone')).toBe(false);
   });
 
   it('聊天生成按参考图连到每张候选，重复追加不重复连边', async () => {
@@ -107,6 +207,28 @@ describe('MCP 主 bridge 唯一写入者', () => {
     expect((await post({ op: 'createCanvas', canvasId: 'c2', name: '第二张' }, { Connection: 'close' })).status).toBe(403);
   });
 
+  it('浏览器选中态经 /api/agent/selection 保存，MCP 读到同一份 nodeIds', async () => {
+    const put = await fetch(`${base}/api/agent/selection`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ canvasId: 'c1', nodeIds: ['ref', 'ref', 'other'], primaryNodeId: 'ref' }),
+    });
+    expect(put.status).toBe(200);
+    const putBody = await put.json();
+    expect(putBody.data).toMatchObject({
+      canvasId: 'c1',
+      nodeIds: ['ref', 'other'],
+      primaryNodeId: 'ref',
+    });
+    const get = await fetch(`${base}/api/agent/selection`);
+    expect(get.status).toBe(200);
+    expect((await get.json()).data).toMatchObject({
+      canvasId: 'c1',
+      nodeIds: ['ref', 'other'],
+      primaryNodeId: 'ref',
+    });
+  });
+
   it('追加保留全部文档元数据与删除墓碑，旧基线不能复活删除节点', async () => {
     const previous = {
       name: '画布', nodes: [node('kept')], edges: [], viewport: { x: 1, y: 2, zoom: 0.8 },
@@ -157,6 +279,7 @@ describe('MCP 主 bridge 唯一写入者', () => {
 
   it('internal typed 操作追加、创建、视频更新且保留广播兼容', async () => {
     expect((await post({ op: 'appendImages', canvasId: 'c1', nodes: [node('n1')] })).status).toBe(200);
+    expect((await post({ op: 'upsertImages', canvasId: 'c1', nodes: [node('n1')] })).status).toBe(200);
     const created = await post({ op: 'createCanvas', canvasId: 'c2', name: '第二张' });
     expect(await created.json()).toMatchObject({ code: 0, data: { id: 'c2', name: '第二张' } });
     const docs = await readDocs();
@@ -176,6 +299,7 @@ describe('MCP 主 bridge 唯一写入者', () => {
     { op: 'appendImages', canvasId: 'c1', nodes: [null] },
     { op: 'appendImages', canvasId: 'c1', nodes: [{ ...node('n1'), position: { x: '0', y: 0 } }] },
     { op: 'appendImages', canvasId: 'c1', nodes: [{ ...node('n1'), data: [] }] },
+    { op: 'upsertImages', canvasId: 'c1', nodes: [node('n1')], connectFrom: ['../x'] },
     { op: 'patchVideoNode', canvasId: 'c1', nodeId: '../x', patch: {} },
     { op: 'patchVideoNode', canvasId: 'c1', nodeId: 'n1', patch: { videoSeconds: 'six' } },
     { op: 'patchVideoNode', canvasId: 'c1', nodeId: 'n1', patch: { arbitraryPath: '/tmp/x' } },
@@ -215,10 +339,11 @@ describe('MCP 主 bridge 唯一写入者', () => {
     });
     vi.stubGlobal('fetch', mock);
     await defaultMcpDeps.appendCanvasImageNodes('c1', [node('n1')]);
+    await defaultMcpDeps.upsertCanvasNodes('c1', [node('n1')], { connectFrom: ['ref'] });
     await defaultMcpDeps.createCanvas('c2', '第二张');
     await defaultMcpDeps.patchVideoNode!('c1', 'video1', { prompt: '镜头推进' });
-    expect(mock.mock.calls).toHaveLength(3);
-    expect(mock.mock.calls.map((call) => JSON.parse(String((call as unknown as [string, RequestInit])[1].body)).op)).toEqual(['appendImages', 'createCanvas', 'patchVideoNode']);
+    expect(mock.mock.calls).toHaveLength(4);
+    expect(mock.mock.calls.map((call) => JSON.parse(String((call as unknown as [string, RequestInit])[1].body)).op)).toEqual(['appendImages', 'upsertImages', 'createCanvas', 'patchVideoNode']);
     expect(await fs.readFile(docsFile, 'utf8')).toBe(before);
     vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ code: 1, msg: 'disk full' }), { status: 503 })));
     await expect(defaultMcpDeps.appendCanvasImageNodes('c1', [node('n2')])).rejects.toThrow(/disk full|503/);

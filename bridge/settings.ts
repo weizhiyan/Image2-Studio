@@ -421,8 +421,47 @@ async function readSettingsUnlocked(): Promise<StoredSettings> {
   }
 }
 
-/** 当前生效的那一路生图配置：语言模型不参与「默认生图」竞选。 */
+/** 一路生图配置是否真的能直接出图：启用、有地址、有 Key、有默认模型。 */
+function imageProfileReady(profile: ModelProfile): boolean {
+  return profile.enabled !== false
+    && Boolean(profile.baseUrl.trim())
+    && Boolean(profile.apiKey.trim())
+    && Boolean(profile.model.trim());
+}
+
+/**
+ * 实际生效的生图配置：选中的那路完整就用它；否则让位给第一路真正可用的。
+ * 避免「另一路明明配好了，界面却提示没有可用配置、默认生成报缺 Key」。
+ * 全都不完整时保留选中项（或第一路启用项），让报错和设置入口指向用户正在编辑的配置。
+ */
+function effectiveImageProfile(settings: StoredSettings): ModelProfile | undefined {
+  const imageProfiles = settings.profiles.filter((profile) => profile.kind === 'image');
+  if (imageProfiles.length === 0) return undefined;
+  const active = imageProfiles.find((profile) => profile.id === settings.activeProfileId);
+  if (active && imageProfileReady(active)) return active;
+  const ready = imageProfiles.find((profile) => imageProfileReady(profile));
+  if (ready) return ready;
+  return (active && active.enabled !== false ? active : undefined)
+    || imageProfiles.find((profile) => profile.enabled !== false)
+    || imageProfiles[0];
+}
+
+/** 实际用于生图的那一路：语言模型不参与「默认生图」竞选。 */
 export function activeProfile(settings: StoredSettings): ModelProfile {
+  const imageProfiles = settings.profiles.filter((profile) => profile.kind === 'image');
+  if (imageProfiles.length > 0) {
+    const effective = effectiveImageProfile(settings);
+    if (effective) return effective;
+  }
+  return storedActiveProfile(settings);
+}
+
+/**
+ * 配置里选中的那一路（跳过停用项，全停用时退回原池）。
+ * publicView 用它回显「用户选的配置」；生效回退只在解析生图路径时发生，
+ * 避免打开设置面板保存一次就把用户选中的配置悄悄改掉。
+ */
+export function storedActiveProfile(settings: StoredSettings): ModelProfile {
   const imageProfiles = settings.profiles.filter((profile) => profile.kind === 'image');
   const pool = imageProfiles.length > 0 ? imageProfiles : settings.profiles;
   // 停用的不参与竞选；全停用时退回原池，别让生图直接没有配置可用
@@ -433,21 +472,10 @@ export function activeProfile(settings: StoredSettings): ModelProfile {
 }
 
 export function imageModelReadiness(settings: StoredSettings) {
-  const imageProfiles = settings.profiles.filter((profile) => profile.kind === 'image');
-  const active = imageProfiles.find((profile) => (
-    profile.id === settings.activeProfileId && profile.enabled !== false
-  ));
-  const profile = active || imageProfiles.find((item) => item.enabled !== false) || imageProfiles[0];
-  const configured = Boolean(
-    profile
-    && profile.enabled !== false
-    && profile.baseUrl.trim()
-    && profile.apiKey.trim()
-    && profile.model.trim(),
-  );
+  const profile = effectiveImageProfile(settings);
 
   return {
-    configured,
+    configured: Boolean(profile && imageProfileReady(profile)),
     modelsLoaded: Boolean(profile?.models.length),
     profileName: profile?.name || '',
     modelName: profile?.model || '',
@@ -652,7 +680,7 @@ export function publicView(settings: StoredSettings) {
       enabled: profile.enabled !== false,
       keyConfigured: Boolean(profile.apiKey),
     })),
-    activeProfileId: activeProfile(settings).id,
+    activeProfileId: storedActiveProfile(settings).id,
     direct: settings.direct !== false,
     promptOptimizationEnabled: settings.promptOptimizationEnabled,
     textProfileId: settings.textProfileId,

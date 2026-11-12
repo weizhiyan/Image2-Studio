@@ -24,6 +24,7 @@
   --media-chrome-fg-muted: color-mix(in srgb, var(--color-paper) 72%, transparent);
   --media-chrome-border: color-mix(in srgb, var(--color-paper) 12%, transparent);
   --media-chrome-active: color-mix(in srgb, var(--color-paper) 14%, transparent);
+  --image-node-overlay-blur: blur(12px) saturate(120%);
   --chat-role-avatar-outline: color-mix(in srgb, var(--color-paper) 40%, transparent);
   --chat-role-avatar-outline-width: 1.5px;
 }
@@ -84,6 +85,14 @@
   --work-dialog-bg: rgb(24 24 26 / 90%);
   --work-dialog-control-bg: #303034;
   --work-dialog-message-bg: var(--color-surface-control);
+  --chat-confirmation-bg: color-mix(in srgb, var(--color-paper) 5%, var(--work-dialog-control-bg));
+  --chat-confirmation-code-bg: var(--color-ui-control-panel);
+  --chat-user-bubble-bg: color-mix(in srgb, var(--color-paper) 6%, transparent);
+  --chat-inline-ref-bg: var(--color-ui-control-panel);
+  --clarification-secondary-bg: var(--color-ui-control-hover);
+  --clarification-secondary-hover-bg: var(--color-ui-control-active);
+  --clarification-primary-disabled-bg: color-mix(in srgb, var(--color-paper) 8%, transparent);
+  --clarification-primary-disabled-fg: var(--color-text-secondary);
   --work-dialog-minimized-bg: rgb(71 71 77 / 50%);
   --work-dialog-border: rgb(255 255 255 / 5%);
   --work-dialog-focus-bg: rgb(255 255 255 / 6%);
@@ -123,11 +132,13 @@
   --topbar-control-bg-hover: var(--color-ui-control-hover);
   --topbar-control-fg: var(--color-text-secondary);
   /* 图片节点悬停控件：深色沿用原来的半透明浮层。 */
-  --image-node-overlay-bg: color-mix(in srgb, var(--color-bg-base) 64%, transparent);
-  --image-node-overlay-fg: var(--color-text-secondary);
+  --image-node-overlay-bg: color-mix(in srgb, var(--color-bg-base) 40%, transparent);
+  --image-node-overlay-fg: var(--media-chrome-fg);
   --image-node-overlay-border: color-mix(in srgb, var(--color-ui-border-subtle) 70%, transparent);
-  --image-node-overlay-hover-bg: color-mix(in srgb, var(--color-bg-base) 80%, transparent);
+  --image-node-overlay-hover-bg: color-mix(in srgb, var(--color-bg-base) 60%, transparent);
   --image-node-overlay-hover-fg: var(--color-text-primary);
+  /* 智能生成运行卡：深色沿用矩阵底，浅色改为纯白。 */
+  --running-card-bg: color-mix(in srgb, var(--color-bg-base) 88%, var(--color-ui-panel));
   --chat-fab-border: color-mix(in srgb, var(--color-shadow) 20%, transparent);
   --focus-ring: none;
   --divider-subtle: var(--color-ui-border-subtle);
@@ -485,6 +496,14 @@ html.floating-shell {
   --work-dialog-bg: var(--color-ui-panel);
   --work-dialog-control-bg: var(--color-ui-control-panel);
   --work-dialog-message-bg: var(--color-ui-control-panel);
+  --chat-confirmation-bg: var(--color-paper);
+  --chat-confirmation-code-bg: var(--color-ui-control-panel);
+  --chat-user-bubble-bg: var(--color-ui-control-panel);
+  --chat-inline-ref-bg: var(--color-paper);
+  --clarification-secondary-bg: var(--color-paper);
+  --clarification-secondary-hover-bg: var(--color-ui-control-active);
+  --clarification-primary-disabled-bg: color-mix(in srgb, var(--color-ink) 8%, transparent);
+  --clarification-primary-disabled-fg: var(--color-text-secondary);
   --work-dialog-minimized-bg: rgb(255 255 255 / 80%);
   --work-dialog-border: rgb(17 19 24 / 6%);
   --work-dialog-focus-bg: rgb(17 19 24 / 6%);
@@ -515,11 +534,12 @@ html.floating-shell {
   /* 纯白顶栏上比通用次级文字再重一档，避免控件文字发虚。 */
   --topbar-control-fg: #34363B;
   /* 浅色下这些控件压在图片上，必须脱离主题面底色，改用恒定深底白字。 */
-  --image-node-overlay-bg: var(--media-chrome-bg-strong);
+  --image-node-overlay-bg: color-mix(in srgb, var(--color-ink) 40%, transparent);
   --image-node-overlay-fg: var(--media-chrome-fg);
   --image-node-overlay-border: var(--media-chrome-border);
-  --image-node-overlay-hover-bg: var(--media-chrome-active);
+  --image-node-overlay-hover-bg: color-mix(in srgb, var(--color-ink) 60%, transparent);
   --image-node-overlay-hover-fg: var(--media-chrome-fg);
+  --running-card-bg: var(--color-paper);
   --chat-fab-border: color-mix(in srgb, var(--color-shadow) 10%, transparent);
   --focus-ring: none;
   --divider-subtle: var(--color-ui-border-subtle);

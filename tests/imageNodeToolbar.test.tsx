@@ -61,6 +61,18 @@ function renderImageNode(data: CanvasNodeData): string {
 }
 
 describe('图片节点工具栏', () => {
+  it.each(['running', 'error', 'idle'] as const)('二次编辑在 %s 状态下保留单张历史的叠层与展开入口', (status) => {
+    const html = renderImageNode({
+      kind: 'composer', status, imageUrl: '', versions: [version('previous')],
+      activeVersionId: 'previous', reditBaseVersionId: 'previous',
+      ...(status === 'error' ? { error: 'Bridge 已重启，生成已中断' } : {}),
+    } as CanvasNodeData);
+    expect(html).toContain('image-node-version-stack');
+    expect(html).toContain('aria-label="历史版本：共 1 张"');
+    expect(html).toContain('/api/files/previous.png');
+    expect(html.includes('正在生成图像')).toBe(status === 'running');
+  });
+
   it('每个图标按钮都有可访问名称、功能气泡和对应描述关系', () => {
     const html = renderToStaticMarkup(
       <NodeSelectionToolbar

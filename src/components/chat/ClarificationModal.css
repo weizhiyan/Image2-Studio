@@ -333,7 +333,7 @@
 }
 
 .hb-clarification-secondary {
-  background: var(--color-ui-control-hover);
+  background: var(--clarification-secondary-bg);
   color: var(--color-text-primary);
 }
 
@@ -344,7 +344,7 @@
 
 .hb-clarification-secondary:hover,
 .hb-clarification-secondary:focus-visible {
-  background: var(--color-ui-control-active);
+  background: var(--clarification-secondary-hover-bg);
 }
 
 .hb-clarification-primary:hover:not(:disabled),
@@ -354,7 +354,14 @@
 
 .hb-clarification-primary:disabled {
   cursor: not-allowed;
-  opacity: 0.42;
+  background: var(--clarification-primary-disabled-bg);
+  color: var(--clarification-primary-disabled-fg);
+}
+
+.hb-clarification-secondary:focus-visible,
+.hb-clarification-primary:focus-visible {
+  outline: 1px solid var(--control-border-focus);
+  outline-offset: 2px;
 }
 
 @media (max-width: 560px) {

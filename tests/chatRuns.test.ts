@@ -2,22 +2,30 @@ import { EventEmitter } from 'node:events';
 import type { ServerResponse } from 'node:http';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { normalizeAskUserQuestions, type AgentTurn } from '../bridge/agent';
-import { answerChatRun, confirmChatRun, getChatRunSnapshot, startChatRun, stopChatRun, subscribeChatRun, type StartRunRequest } from '../bridge/runs';
+import { answerChatRun, buildAgentSystemSpec, confirmChatRun, getChatRunSnapshot, startChatRun, stopChatRun, subscribeChatRun, type StartRunRequest } from '../bridge/runs';
 
 const mocks = vi.hoisted(() => ({
   pushImage: vi.fn(),
-  appendCanvasImageNodes: vi.fn(async () => true),
+  pushLocate: vi.fn(),
+  pushNodeState: vi.fn(),
+  upsertCanvasNodes: vi.fn(async () => true),
   readCanvasDoc: vi.fn(async () => ({ nodes: [] as Array<Record<string, unknown>> })),
   callAgentModel: vi.fn(),
   generateImages: vi.fn(),
   savedThreads: new Map<string, import('../bridge/chat').ChatThreadRecord>(),
   writeClientThread: vi.fn(),
   writeRunThread: vi.fn(),
+  imageProfileOverrides: {} as Record<string, unknown>,
+  direct: true,
 }));
 
-vi.mock('../bridge/hub.js', () => ({ pushImage: mocks.pushImage }));
+vi.mock('../bridge/hub.js', () => ({
+  pushImage: mocks.pushImage,
+  pushLocate: mocks.pushLocate,
+  pushNodeState: mocks.pushNodeState,
+}));
 vi.mock('../bridge/http.js', () => ({
-  appendCanvasImageNodes: mocks.appendCanvasImageNodes,
+  upsertCanvasNodes: mocks.upsertCanvasNodes,
   readCanvasDoc: mocks.readCanvasDoc,
 }));
 // In-memory persistence adapter: exercise the runner's CAS/owned-message contract
@@ -85,10 +93,10 @@ vi.mock('../bridge/settings.js', async (importOriginal) => {
   return {
     ...actual,
     readSettings: vi.fn(async () => ({
-      profiles: [image, text], direct: true, enhanceLevel: 'balanced',
+      profiles: [{ ...image, ...mocks.imageProfileOverrides }, text], direct: mocks.direct, enhanceLevel: 'balanced',
       preferences: { enabled: false, entries: [] },
     })),
-    findProfile: vi.fn(() => image),
+    findProfile: vi.fn(() => ({ ...image, ...mocks.imageProfileOverrides })),
     resolveTextProfile: vi.fn(() => text),
     resolveTextModel: vi.fn((profile: { model: string; enabledModels?: string[] }, requested?: string) => (
       requested && profile.enabledModels?.includes(requested) ? requested : profile.model
@@ -110,14 +118,32 @@ async function approvePendingImages(runId: string, callId: string): Promise<void
   expect(confirmChatRun(runId, callId, true)).toBe(true);
 }
 
+describe('Agent 出图回复规则', () => {
+  it('普通生图直接执行、完成后简短告知，同时保留方案讨论和必要追问', () => {
+    const spec = buildAgentSystemSpec();
+    expect(spec).toContain('普通生图或改图请求信息足够时，直接调用 `generate_image`');
+    expect(spec).toContain('交互设计、UI 设计，或用户明确要求讨论、分析、比较方案时，可以先给简短方案');
+    expect(spec).toContain('用户明确要求直接出图时仍直接生成');
+    expect(spec).toContain('无法从上下文或合理默认值确定的关键信息');
+    expect(spec).toContain('以上直接出图与简短回复规则也适用于当前角色及其 Skill');
+    expect(spec).toContain('生成成功后默认只用一句简短告知');
+    expect(spec).toContain('生成失败、部分完成或仍有阻塞时如实简短说明');
+    expect(spec).not.toContain('300-400 字');
+  });
+});
+
 describe('chat run image delivery', () => {
   beforeEach(() => {
+    mocks.imageProfileOverrides = {};
+    mocks.direct = true;
     mocks.savedThreads.clear();
     mocks.writeClientThread.mockClear();
     mocks.callAgentModel.mockReset();
-    mocks.appendCanvasImageNodes.mockClear();
+    mocks.upsertCanvasNodes.mockClear();
     mocks.readCanvasDoc.mockReset().mockResolvedValue({ nodes: [] });
     mocks.pushImage.mockClear();
+    mocks.pushLocate.mockClear();
+    mocks.pushNodeState.mockClear();
     mocks.writeRunThread.mockClear();
     mocks.generateImages.mockReset().mockResolvedValue([
       { url: '/api/files/first.png', fileName: 'first.png' },
@@ -152,11 +178,139 @@ describe('chat run image delivery', () => {
         ],
       },
     });
-    await vi.waitFor(() => expect(mocks.appendCanvasImageNodes).toHaveBeenCalled());
-    const [, nodes, options] = mocks.appendCanvasImageNodes.mock.calls[0] as unknown as [string, Array<{ id: string; position: { x: number; y: number } }>, { connectFrom: string[] }];
-    expect(options.connectFrom).toEqual(['ref-node']);
+    await vi.waitFor(() => expect(mocks.upsertCanvasNodes).toHaveBeenCalledTimes(2));
+    const calls = mocks.upsertCanvasNodes.mock.calls as unknown as Array<[
+      string,
+      Array<{ id: string; position: { x: number; y: number }; data: { status: string } }>,
+      { connectFrom: string[] } | undefined,
+    ]>;
+    const placeholderNodes = calls[0][1];
+    expect(placeholderNodes[0].data.status).toBe('running');
+    expect(mocks.pushNodeState).toHaveBeenCalledWith(expect.objectContaining({ phase: 'started', source: 'chat' }));
+    expect(mocks.pushLocate).toHaveBeenCalledWith(expect.objectContaining({
+      canvasId: 'canvas-ref-edge',
+      nodeId: placeholderNodes[0].id,
+      onlyIfOffscreen: true,
+    }));
+    const finalCall = calls.find(([, , options]) => Boolean(options));
+    expect(finalCall).toBeDefined();
+    const [, nodes, options] = finalCall!;
+    expect(options!.connectFrom).toEqual(['ref-node']);
     expect(nodes[0].position).toEqual({ x: 540, y: 100 });
     await vi.waitFor(() => expect(mocks.writeRunThread).toHaveBeenCalled());
+    expect(mocks.callAgentModel.mock.calls[0][1].systemSpec).toContain('生成成功后默认只用一句简短告知');
+    const resultMessages = mocks.callAgentModel.mock.calls[1][1].messages;
+    expect(resultMessages).toContainEqual(expect.objectContaining({
+      role: 'tool', toolCallId: 'call-ref',
+      content: expect.stringContaining('图片已展示，默认只需一句简短告知，不要主动点评或复述提示词'),
+    }));
+  });
+
+  it('聊天多图按真实位图尺寸重排落点，竖图和横图互不重叠', async () => {
+    const referenceImage = 'data:image/png;base64,dGVzdC1yZWY=';
+    mocks.readCanvasDoc.mockResolvedValue({
+      nodes: [{
+        id: 'ref-node', type: 'flow-image', position: { x: 100, y: 100 },
+        data: {
+          kind: 'image', size: '1536x1536', width: 1536, height: 1536,
+          imageUrl: referenceImage, versions: [{ id: 'ver-ref', imageUrl: referenceImage }],
+        },
+      }],
+    });
+    mocks.generateImages.mockReset().mockResolvedValue([
+      { url: '/api/files/tall.png', fileName: 'tall.png', width: 1024, height: 1536 },
+      { url: '/api/files/wide.png', fileName: 'wide.png', width: 1536, height: 1024 },
+    ]);
+    mocks.callAgentModel.mockReset()
+      .mockResolvedValueOnce({
+        text: '', protocol: 'tools',
+        toolCalls: [{ id: 'call-size', name: 'generate_image', args: { prompt: '一竖一横', referenceUsage: 'edit', count: 2 } }],
+      })
+      .mockResolvedValueOnce({ text: '已完成。', toolCalls: [], protocol: 'tools' });
+    const now = new Date().toISOString();
+    const runId = startChatRun({
+      threadId: 'thread-size', canvasId: 'canvas-size', assistantMessageId: 'assistant-size',
+      references: [{ canvasId: 'canvas-size', nodeId: 'ref-node', versionId: 'ver-ref' }],
+      thread: {
+        id: 'thread-size', canvasId: 'canvas-size', title: '真实尺寸', createdAt: now, updatedAt: now,
+        messages: [
+          { id: 'user-size', role: 'user', content: '一竖一横', createdAt: now },
+          { id: 'assistant-size', role: 'assistant', content: '', status: 'running', createdAt: now },
+        ],
+      },
+    });
+    await approvePendingImages(runId, 'call-size');
+    await vi.waitFor(() => expect(mocks.upsertCanvasNodes).toHaveBeenCalledTimes(2));
+    const calls = mocks.upsertCanvasNodes.mock.calls as unknown as Array<[
+      string,
+      Array<{ position: { x: number; y: number }; data: Record<string, unknown> }>,
+      { connectFrom: string[] } | undefined,
+    ]>;
+    const finalCall = calls.find(([, , options]) => Boolean(options));
+    expect(finalCall).toBeDefined();
+    const [, nodes] = finalCall!;
+    expect(nodes.map((node) => node.position)).toEqual([
+      { x: 540, y: 100 },
+      { x: 540, y: 568 },
+    ]);
+    expect(nodes.map((node) => node.data)).toEqual([
+      expect.objectContaining({ width: 1024, height: 1536, size: '1024x1536' }),
+      expect.objectContaining({ width: 1536, height: 1024, size: '1536x1024' }),
+    ]);
+    expect(mocks.pushImage.mock.calls.map(([payload]) => payload)).toEqual([
+      expect.objectContaining({ size: '1024x1536', width: 1024, height: 1536 }),
+      expect.objectContaining({ size: '1536x1024', width: 1536, height: 1024 }),
+    ]);
+    await vi.waitFor(() => expect(mocks.writeRunThread).toHaveBeenCalled());
+  });
+
+  it.each([
+    { name: 'same', newReference: false, model: 'image-model', reuse: true },
+    { name: 'new-reference', newReference: true, model: 'image-model', reuse: false },
+    { name: 'new-model', newReference: false, model: 'image-v2', reuse: false },
+  ])('聊天 Responses 保留独立主模型与完整素材：$name', async ({ name, newReference, model, reuse }) => {
+    mocks.direct = false;
+    mocks.imageProfileOverrides = {
+      model, models: [model], enabledModels: [model], imageApiMode: 'responses', responsesModel: 'same-provider-reasoner',
+    };
+    const baseImage = 'data:image/png;base64,QUJD';
+    const newImage = 'data:image/png;base64,REVG';
+    mocks.readCanvasDoc.mockResolvedValue({ nodes: [
+      { id: 'base-node', type: 'flow-image', position: { x: 0, y: 0 }, data: {
+        kind: 'image', imageUrl: baseImage, versions: [{ id: 'ver-base', imageUrl: baseImage,
+          responseId: 'resp_base', imageGenerationCallId: 'ig_base', responseProfileId: 'image',
+          responseModel: 'same-provider-reasoner', model: 'image-model' }],
+      } },
+      { id: 'new-node', type: 'flow-image', position: { x: 0, y: 500 }, data: {
+        kind: 'image', imageUrl: newImage, versions: [{ id: 'ver-new', imageUrl: newImage }],
+      } },
+    ] });
+    mocks.generateImages.mockResolvedValue([{ url: '/api/files/next.png', fileName: 'next.png' }]);
+    mocks.callAgentModel.mockResolvedValueOnce({
+      text: '', protocol: 'tools', toolCalls: [{ id: `call-${name}`, name: 'generate_image', args: {
+        prompt: '继续修改背景', referenceUsage: 'edit', baseVersionId: 'ver-base',
+        referenceImages: newReference ? [1] : [], count: 1,
+      } }],
+    }).mockResolvedValueOnce({ text: '已完成。', toolCalls: [], protocol: 'tools' });
+    const now = new Date().toISOString();
+    const threadId = `thread-model-${name}`;
+    const assistantMessageId = `assistant-model-${name}`;
+    const run = startChatRun({ threadId, canvasId: 'canvas-model', assistantMessageId,
+      references: newReference ? [{ nodeId: 'new-node', versionId: 'ver-new' }] : [],
+      previousVersionId: 'ver-base', previousCanvasId: 'canvas-model',
+      thread: { id: threadId, canvasId: 'canvas-model', title: '修改', createdAt: now, updatedAt: now, messages: [
+        { id: `user-${name}`, role: 'user', content: '继续修改背景', createdAt: now },
+        { id: assistantMessageId, role: 'assistant', content: '', status: 'running', createdAt: now },
+      ] },
+    });
+    await vi.waitFor(() => expect(getChatRunSnapshot(run)?.status).toBe('done'));
+    const params = mocks.generateImages.mock.calls[0][1];
+    expect(params.responseModel).toBe('same-provider-reasoner');
+    expect(params.model).toBe(model);
+    expect(params.referenceDataUrls).toEqual(newReference ? [baseImage, newImage] : [baseImage]);
+    expect(params.previousResponseId).toBe(reuse ? 'resp_base' : undefined);
+    expect(params.previousImageGenerationCallId).toBe(reuse ? 'ig_base' : undefined);
+    expect(params.reusePreviousImage).toBe(reuse ? true : undefined);
   });
 
   it('继续编辑上一版时，从上一版节点连线并摆在它右侧', async () => {
@@ -186,9 +340,16 @@ describe('chat run image delivery', () => {
         ],
       },
     });
-    await vi.waitFor(() => expect(mocks.appendCanvasImageNodes).toHaveBeenCalled());
-    const [, nodes, options] = mocks.appendCanvasImageNodes.mock.calls[0] as unknown as [string, Array<{ id: string; position: { x: number; y: number } }>, { connectFrom: string[] }];
-    expect(options.connectFrom).toEqual(['base-node']);
+    await vi.waitFor(() => expect(mocks.upsertCanvasNodes).toHaveBeenCalledTimes(2));
+    const calls = mocks.upsertCanvasNodes.mock.calls as unknown as Array<[
+      string,
+      Array<{ id: string; position: { x: number; y: number } }>,
+      { connectFrom: string[] } | undefined,
+    ]>;
+    const finalCall = calls.find(([, , options]) => Boolean(options));
+    expect(finalCall).toBeDefined();
+    const [, nodes, options] = finalCall!;
+    expect(options!.connectFrom).toEqual(['base-node']);
     expect(nodes[0].position).toEqual({ x: 640, y: 150 });
     await vi.waitFor(() => expect(mocks.writeRunThread).toHaveBeenCalled());
   });
@@ -241,9 +402,16 @@ describe('chat run image delivery', () => {
       },
     });
 
-    await vi.waitFor(() => expect(mocks.appendCanvasImageNodes).toHaveBeenCalled());
-    const [, nodes, options] = mocks.appendCanvasImageNodes.mock.calls[0] as unknown as [string, Array<{ position: { x: number; y: number } }>, { connectFrom: string[] }];
-    expect(options.connectFrom).toEqual(['anchor-node']);
+    await vi.waitFor(() => expect(mocks.upsertCanvasNodes).toHaveBeenCalledTimes(2));
+    const calls = mocks.upsertCanvasNodes.mock.calls as unknown as Array<[
+      string,
+      Array<{ position: { x: number; y: number } }>,
+      { connectFrom: string[] } | undefined,
+    ]>;
+    const finalCall = calls.find(([, , options]) => Boolean(options));
+    expect(finalCall).toBeDefined();
+    const [, nodes, options] = finalCall!;
+    expect(options!.connectFrom).toEqual(['anchor-node']);
     expect(nodes[0].position).toEqual({ x: 540, y: 468 });
     expect(mocks.generateImages).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
       referenceDataUrls: expect.arrayContaining([anchorImage]),
@@ -394,9 +562,10 @@ describe('chat run image delivery', () => {
     try {
       await approvePendingImages(runId, 'call-test');
       await vi.waitFor(() => expect(mocks.callAgentModel).toHaveBeenCalledTimes(2));
-      expect(mocks.appendCanvasImageNodes).toHaveBeenCalledTimes(1);
+      expect(mocks.upsertCanvasNodes).toHaveBeenCalledTimes(2);
       expect(mocks.pushImage).toHaveBeenCalledTimes(2);
-      expect(mocks.appendCanvasImageNodes.mock.invocationCallOrder[0]).toBeLessThan(mocks.pushImage.mock.invocationCallOrder[0]);
+      expect(mocks.upsertCanvasNodes.mock.invocationCallOrder[0]).toBeLessThan(mocks.generateImages.mock.invocationCallOrder[0]);
+      expect(mocks.upsertCanvasNodes.mock.invocationCallOrder[1]).toBeLessThan(mocks.pushImage.mock.invocationCallOrder[0]);
       expect(mocks.pushImage.mock.calls.map(([payload]) => payload.fileName)).toEqual(['first.png', 'second.png']);
       expect(mocks.pushImage.mock.calls[0][0]).toMatchObject({ canvasId: 'canvas-test', source: 'chat', jobId: runId });
       expect(events(chunks).filter((entry) => entry.event === 'image_completed')).toHaveLength(2);
@@ -417,6 +586,48 @@ describe('chat run image delivery', () => {
       releaseReply({ text: '', toolCalls: [], protocol: 'tools' });
       client.emit('close');
     }
+  });
+
+  it('生图失败时把已落盘的生成中占位改成错误态', async () => {
+    mocks.generateImages.mockRejectedValueOnce(new Error('upstream boom'));
+    mocks.callAgentModel.mockResolvedValueOnce({
+      text: '',
+      protocol: 'tools',
+      toolCalls: [{
+        id: 'call-fail',
+        name: 'generate_image',
+        args: { prompt: '这次会失败', count: 1 },
+      }],
+    });
+    const now = new Date().toISOString();
+    const request: StartRunRequest = {
+      threadId: 'thread-fail', canvasId: 'canvas-fail', assistantMessageId: 'assistant-fail', references: [],
+      thread: {
+        id: 'thread-fail', canvasId: 'canvas-fail', title: '失败占位', createdAt: now, updatedAt: now,
+        messages: [
+          { id: 'user-fail', role: 'user', content: '生成一张', createdAt: now },
+          { id: 'assistant-fail', role: 'assistant', content: '', status: 'running', createdAt: now },
+        ],
+      },
+    };
+    const runId = startChatRun(request);
+    await vi.waitFor(() => expect(mocks.generateImages).toHaveBeenCalled());
+    await vi.waitFor(() => expect(getChatRunSnapshot(runId)?.status).toBe('error'));
+
+    const calls = mocks.upsertCanvasNodes.mock.calls as unknown as Array<[
+      string,
+      Array<{ data: Record<string, unknown> }>,
+      { connectFrom?: string[] } | undefined,
+    ]>;
+    expect(calls).toHaveLength(2);
+    expect(calls[1][1][0].data).toMatchObject({
+      status: 'error',
+      error: expect.stringContaining('upstream boom'),
+    });
+    expect(mocks.pushNodeState).toHaveBeenCalledWith(expect.objectContaining({
+      phase: 'error',
+      source: 'chat',
+    }));
   });
 
   it('生图后把候选图与编号回喂给模型', async () => {
@@ -504,14 +715,14 @@ describe('chat run image delivery', () => {
     const runId = startChatRun(request);
     await vi.waitFor(() => expect(getChatRunSnapshot(runId)?.status).toBe('error'));
     expect(savedMessage('thread-protocol', 'assistant-protocol')).toMatchObject({ status: 'error', error: expect.stringContaining('本次未提交生成') });
-    expect(mocks.appendCanvasImageNodes).not.toHaveBeenCalled();
+    expect(mocks.upsertCanvasNodes).not.toHaveBeenCalled();
     expect(mocks.pushImage).not.toHaveBeenCalled();
     expect(mocks.callAgentModel).toHaveBeenCalledTimes(1);
   });
 
   it('结构化追问会暂停当前 run，提交答案后继续同一轮', async () => {
     mocks.callAgentModel.mockReset();
-    mocks.appendCanvasImageNodes.mockClear();
+    mocks.upsertCanvasNodes.mockClear();
     mocks.pushImage.mockClear();
     mocks.callAgentModel
       .mockResolvedValueOnce({

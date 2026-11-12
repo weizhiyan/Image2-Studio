@@ -614,9 +614,10 @@ export function RunningMatrix({ params, mode, inline = false }: { params: Matrix
     let raf = 0;
 
     const rebuild = () => {
-      const rect = box.getBoundingClientRect();
-      w = Math.max(1, Math.round(rect.width));
-      h = Math.max(1, Math.round(rect.height));
+      // clientWidth / clientHeight 是布局尺寸，不受 React Flow 的缩放 transform 影响。
+      // 用 getBoundingClientRect() 会把屏幕缩放也吃进来，点阵在卡片里就会被二次放大 / 缩小。
+      w = Math.max(1, Math.round(box.clientWidth));
+      h = Math.max(1, Math.round(box.clientHeight));
       const dpr = Math.min(window.devicePixelRatio || 1, 2);
       canvas.width = Math.round(w * dpr);
       canvas.height = Math.round(h * dpr);

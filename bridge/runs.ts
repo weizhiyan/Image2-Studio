@@ -3,12 +3,13 @@ import path from 'node:path';
 import type { ServerResponse } from 'node:http';
 import { MEDIA_DIR } from './paths.js';
 import { imageExtensionOf } from './files.js';
-import { pushImage } from './hub.js';
+import { pushImage, pushLocate, pushNodeState } from './hub.js';
 import { findProfile, readSettings, resolveTextModel, resolveTextProfile, normalizeChatRuntimeSettings, type ModelProfile } from './settings.js';
 import { generateImages, IMAGE_GENERATION_TIMEOUT_MESSAGE, IMAGE_GENERATION_TIMEOUT_MS } from './imageApi.js';
+import { resolveImageContinuation, resolveResponseModel } from './imageRequestContext.js';
 import { detectReferenceUsage, enhancePromptDetailed, fidelityForUsage, buildVisualPromptRules, callTextModel, type EnhanceParams, type PromptEnhancementResult } from './textApi.js';
 import { applyMemoryCompaction, buildMemoryContext, memoryPromptBlock, type MemoryImageRef, type MemoryMessage, type PersistedMemory } from './chatMemory.js';
-import { appendCanvasImageNodes, readCanvasDoc, type CanvasNodeRecord } from './http.js';
+import { readCanvasDoc, upsertCanvasNodes, type CanvasNodeRecord } from './http.js';
 import { readChatThreads, readChatThread, writeClientThread, writeRunThread } from './chat.js';
 import { askUserToolDef, callAgentModel, generateImageToolDef, normalizeAskUserQuestions, type AgentMessage, type AgentToolCall, type AskUserQuestion } from './agent.js';
 import { normalizePromptRoleSnapshot, promptRoleContext, type PromptRoleSnapshot } from './skills.js';
@@ -81,6 +82,8 @@ export interface GeneratedMedia {
   enhancementWarning?: string;
   model: string;
   size: string;
+  width?: number;
+  height?: number;
 }
 
 /** 本轮实际送入生图链路的上下文状态，前端用于显示可验证的上下文徽标。 */
@@ -559,7 +562,6 @@ interface CanvasBox { x: number; y: number; width: number; height: number }
 
 const CHAT_RESULT_GAP_X = 120;
 const CHAT_RESULT_GAP_Y = 48;
-const CHAT_RESULT_FALLBACK_GAP = 420;
 
 /** 与前端 aspect.ts 同口径：优先位图宽高，其次 size，比例 = 宽 / 高。 */
 function canvasNodeAspect(data: Record<string, unknown> | undefined): number {
@@ -625,19 +627,24 @@ export function layoutChatResultPositions(options: {
   anchor?: CanvasBox | null;
   count: number;
   size?: string;
+  /** 每张结果的实际尺寸（生成后从位图读取）；缺省回落到 size。 */
+  sizes?: Array<string | undefined>;
   existing?: CanvasBox[];
 }): Array<{ x: number; y: number }> {
   const count = Math.max(0, Math.floor(options.count));
   if (count === 0) return [];
-  const aspect = canvasNodeAspect({ size: options.size });
-  const width = cardWidthForAspect(aspect);
-  const height = Math.max(160, Math.round(width / aspect));
+  const boxFor = (index: number): { width: number; height: number } => {
+    const aspect = canvasNodeAspect({ size: options.sizes?.[index] || options.size });
+    const width = cardWidthForAspect(aspect);
+    return { width, height: Math.max(160, Math.round(width / aspect)) };
+  };
   const existing = (options.existing || []).filter((box) => Number.isFinite(box.x) && Number.isFinite(box.y));
   const anchor = options.anchor;
   if (anchor) {
     const positions: Array<{ x: number; y: number }> = [];
     let y = anchor.y;
     for (let index = 0; index < count; index += 1) {
+      const { width, height } = boxFor(index);
       let candidate: CanvasBox = { x: anchor.x + anchor.width + CHAT_RESULT_GAP_X, y, width, height };
       // 与已有节点重叠时整列下移；迭代上限防止异常数据死循环。
       for (let attempt = 0; attempt < 40; attempt += 1) {
@@ -648,14 +655,33 @@ export function layoutChatResultPositions(options: {
         candidate = { ...candidate, y: blocker.y + blocker.height + CHAT_RESULT_GAP_Y };
       }
       positions.push({ x: candidate.x, y: candidate.y });
-      y = candidate.y + height + CHAT_RESULT_GAP_Y;
+      y = candidate.y + candidate.height + CHAT_RESULT_GAP_Y;
     }
     return positions;
   }
-  const rightmost = existing.reduce<CanvasBox | null>((best, box) => (!best || box.x > best.x ? box : best), null);
-  const startX = rightmost ? rightmost.x + CHAT_RESULT_FALLBACK_GAP : 80;
+  // 按「最右边缘」而不是 x 起点选列，避免宽节点从更靠左的 x 伸出来时被新结果压住。
+  const rightmost = existing.reduce<CanvasBox | null>(
+    (best, box) => (!best || box.x + box.width > best.x + best.width ? box : best),
+    null,
+  );
+  const startX = rightmost ? rightmost.x + rightmost.width + CHAT_RESULT_GAP_X : 80;
   const startY = rightmost ? rightmost.y : 80;
-  return Array.from({ length: count }, (_, index) => ({ x: startX + index * 40, y: startY + index * 40 }));
+  const positions: Array<{ x: number; y: number }> = [];
+  let y = startY;
+  for (let index = 0; index < count; index += 1) {
+    const { width, height } = boxFor(index);
+    let candidate: CanvasBox = { x: startX, y, width, height };
+    for (let attempt = 0; attempt < 40; attempt += 1) {
+      const blocker = existing
+        .filter((box) => boxesOverlap(candidate, box, 24))
+        .sort((a, b) => a.y - b.y)[0];
+      if (!blocker) break;
+      candidate = { ...candidate, y: blocker.y + blocker.height + CHAT_RESULT_GAP_Y };
+    }
+    positions.push({ x: candidate.x, y: candidate.y });
+    y = candidate.y + candidate.height + CHAT_RESULT_GAP_Y;
+  }
+  return positions;
 }
 
 /** 解析引用图 → dataURL 数组（顺序 = 用户消息里「图 N」的顺序）。 */
@@ -843,70 +869,203 @@ async function executeGenerateImage(
   const usedPrompt = prompt;
   const enhancedPrompt = prompt;
   const enhancementWarning: string | undefined = undefined;
+  const resolvedSize = size || String(profile.defaultSize || '');
+  const doc = await readCanvasDoc(runContext.canvasId).catch(() => null);
+  const nodes = (Array.isArray(doc?.nodes) ? doc!.nodes : []) as CanvasNodeLike[];
+  const startedAt = new Date().toISOString();
+  const anchorNode = anchorNodeId ? nodes.find((node) => String(node.id || '') === anchorNodeId) : undefined;
+  const placeholderPositions = layoutChatResultPositions({
+    anchor: anchorNode ? estimateCanvasBox(anchorNode) : null,
+    count,
+    size: resolvedSize,
+    existing: nodes.map((node) => estimateCanvasBox(node)),
+  });
+  const placeholderRecords: CanvasNodeRecord[] = Array.from({ length: count }, (_, index) => {
+    const nodeId = `chat_${run.id}_${callId}_${index}`;
+    return {
+      id: nodeId,
+      type: 'flow-image',
+      position: placeholderPositions[index] || { x: 80 + index * 40, y: 80 + index * 40 },
+      data: {
+        kind: 'image',
+        label: 'AI 对话',
+        cardWidth: 320,
+        prompt,
+        status: 'running',
+        size: resolvedSize,
+        model: runContext.imageModel || profile.model,
+        source: 'chat',
+        createdAt: startedAt,
+        enhancedPrompt,
+        originalPrompt,
+        runningDirect: false,
+        versions: [],
+      },
+    };
+  });
+  const markPlaceholdersFailed = async (
+    records: CanvasNodeRecord[],
+    message: string,
+    phase: 'error' | 'stopped' = 'error',
+  ) => {
+    if (records.length === 0) return;
+    const errorMessage = phase === 'stopped' ? '生成已停止' : message;
+    const failedAt = new Date().toISOString();
+    const failedRecords = records.map((node) => ({
+      ...node,
+      data: {
+        ...node.data,
+        status: 'error',
+        error: errorMessage,
+        runningDirect: undefined,
+        finishedAt: failedAt,
+      },
+    })) as CanvasNodeRecord[];
+    try {
+      await upsertCanvasNodes(runContext.canvasId, failedRecords);
+    } catch {
+      /* 生成失败状态是补充信息；画布已删时不再覆盖原错误 */
+    }
+    for (const node of failedRecords) {
+      try {
+        await pushNodeState({
+          type: 'node-state',
+          canvasId: runContext.canvasId,
+          nodeId: node.id,
+          phase,
+          at: new Date().toISOString(),
+          node,
+          error: errorMessage,
+          source: 'chat',
+        });
+      } catch {
+        break;
+      }
+    }
+  };
   emit(run, { type: 'tool_progress', callId, step: 'Agent 已按统一规则整理提示词' });
   if (run.status !== 'running' || run.abort.signal.aborted) throw new Error('生成已停止');
   emit(run, { type: 'tool_progress', callId, step: '正在调用生图工具' });
 
-  // responseId 续接与 redit 同口径：只续同一路配置、同一 Responses 主模型的版本
-  const generationProfileId = String(baseVersion?.responseProfileId || '');
-  const responseProfile = settings.profiles.find((item) => item.id === generationProfileId);
-  const sameProfile = Boolean(responseProfile) && responseProfile!.id === profile.id;
-  const sameModel = String(baseVersion?.responseModel || '') === String(profile.model || '')
-    && String(baseVersion?.model || runContext.imageModel || profile.model || '') === String(runContext.imageModel || profile.model || '');
-  const previousResponseId = usage === 'edit' && explicitReferenceUrls.length === 0 && apiMode === 'responses' && sameProfile && sameModel && baseVersion?.responseId
-    ? String(baseVersion.responseId)
-    : undefined;
+  // 先落“生成中”占位并立即定位，再等生图接口。浏览器关掉也不会留下一个看不见的空白等待。
+  if (!await upsertCanvasNodes(runContext.canvasId, placeholderRecords)) {
+    throw new Error('结果画布已删除，未写入生成节点');
+  }
+  for (const node of placeholderRecords) {
+    try {
+      await pushNodeState({
+        type: 'node-state',
+        canvasId: runContext.canvasId,
+        nodeId: node.id,
+        phase: 'started',
+        at: new Date().toISOString(),
+        node,
+        source: 'chat',
+      });
+    } catch {
+      break;
+    }
+  }
+  try {
+    await pushLocate({
+      type: 'locate',
+      canvasId: runContext.canvasId,
+      nodeId: placeholderRecords[0].id,
+      at: new Date().toISOString(),
+      onlyIfOffscreen: true,
+    });
+  } catch {
+    /* 定位失败不影响生成，节点已经落盘 */
+  }
+  if (run.status !== 'running' || run.abort.signal.aborted) {
+    await markPlaceholdersFailed(placeholderRecords, '生成已停止', 'stopped');
+    throw new Error('生成已停止');
+  }
 
-  const images = await generateImages(profile, {
-    prompt: usedPrompt,
-    model: runContext.imageModel || profile.model,
+  // 只有同一基准、同一路 outer/tool 配置可续接；显式新参考始终完整上传。
+  const continuation = resolveImageContinuation({
+    base: baseVersion || undefined,
+    profile,
     apiMode,
-    size,
-    n: count,
-    referenceDataUrls: resolved.urls.length > 0 ? resolved.urls : undefined,
-    inputFidelity: resolved.urls.length > 0 ? fidelityForUsage(usage) : undefined,
-    previousResponseId,
-    previousImageGenerationCallId: previousResponseId ? (String(baseVersion?.imageGenerationCallId || '') || undefined) : undefined,
-    responseModel: apiMode === 'responses' ? profile.model : undefined,
-    signal: run.abort.signal,
+    model: runContext.imageModel || profile.model,
+    isEdit: usage === 'edit',
+    hasNewReferences: explicitReferenceUrls.length > 0 || resolved.urls.some((url) => url !== baseDataUrl),
   });
+  const { previousResponseId, previousImageGenerationCallId, reusePreviousImage } = continuation;
 
-  if (run.status !== 'running' || run.abort.signal.aborted) throw new Error('生成已停止');
+  let images: Awaited<ReturnType<typeof generateImages>>;
+  try {
+    images = await generateImages(profile, {
+      prompt: usedPrompt,
+      model: runContext.imageModel || profile.model,
+      apiMode,
+      size,
+      n: count,
+      referenceDataUrls: resolved.urls.length > 0 ? resolved.urls : undefined,
+      inputFidelity: resolved.urls.length > 0 ? fidelityForUsage(usage) : undefined,
+      previousResponseId,
+      previousImageGenerationCallId,
+      reusePreviousImage,
+      responseModel: apiMode === 'responses' ? resolveResponseModel(profile) : undefined,
+      signal: run.abort.signal,
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    const stopped = run.status !== 'running' || run.abort.signal.aborted || /abort|停止/i.test(message);
+    await markPlaceholdersFailed(placeholderRecords, message, stopped ? 'stopped' : 'error');
+    throw error;
+  }
+
+  if (images.length === 0) {
+    await markPlaceholdersFailed(placeholderRecords, '生图接口没有返回图片');
+    throw new Error('生图接口没有返回图片');
+  }
+  if (run.status !== 'running' || run.abort.signal.aborted) {
+    await markPlaceholdersFailed(placeholderRecords, '生成已停止', 'stopped');
+    throw new Error('生成已停止');
+  }
   const runContextState: ChatRunContext = {
     baseVersionId: baseVersion?.id ? String(baseVersion.id) : undefined,
     responseId: String(images[0]?.responseId || previousResponseId || '') || undefined,
     referenceCount: resolved.urls.length,
-    resetReason: baseVersion && !previousResponseId
-      ? (sameProfile && sameModel
-        ? '本轮使用了新的参考图或全新需求，上下文从这里重新开始'
-        : '模型配置或接口模式变化，无法续接上一轮上下文')
-      : undefined,
+    resetReason: continuation.resetReason,
   };
 
-  // 节点落盘：bridge 统一创建（与 MCP 推图同一条写入链），浏览器关掉也不丢。
-  // 节点 id 由 runId + callId + 序号确定性生成：重复事件不会建出重复节点。
-  const doc = await readCanvasDoc(runContext.canvasId).catch(() => null);
-  const nodes = (Array.isArray(doc?.nodes) ? doc!.nodes : []) as CanvasNodeLike[];
   const now = new Date().toISOString();
-  const resolvedSize = size || String(profile.defaultSize || '');
-  const anchorNode = anchorNodeId ? nodes.find((node) => String(node.id || '') === anchorNodeId) : undefined;
-  // 最新结果放在参考图（或上一版结果）右侧，按列向下排并避开已有节点。
-  const positions = layoutChatResultPositions({
-    anchor: anchorNode ? estimateCanvasBox(anchorNode) : null,
-    count: images.length,
-    size: resolvedSize,
-    existing: nodes.map((node) => estimateCanvasBox(node)),
-  });
   const media: GeneratedMedia[] = [];
   const nodeRecords: CanvasNodeRecord[] = [];
+  const actualSizes = images.map((image) => (
+    Number(image.width) > 0 && Number(image.height) > 0
+      ? `${Number(image.width)}x${Number(image.height)}`
+      : resolvedSize
+  ));
+  // 生图期间用户可能移动或新增了节点：完成时以最新文档为避让基准，
+  // 并排除本轮占位节点，否则结果会为了躲开自己的占位而整体偏移。
+  const finalDoc = await readCanvasDoc(runContext.canvasId).catch(() => null);
+  const finalNodes = (Array.isArray(finalDoc?.nodes) ? finalDoc!.nodes : nodes) as CanvasNodeLike[];
+  const placeholderIds = new Set(placeholderRecords.map((node) => String(node.id || '')));
+  const finalAnchorNode = anchorNodeId
+    ? finalNodes.find((node) => String(node.id || '') === anchorNodeId) || anchorNode
+    : undefined;
+  const layoutNodes = finalNodes.filter((node) => !placeholderIds.has(String(node.id || '')));
+  // 请求尺寸可能被中转站改成长边 1536 或按内容改比例；结果落位必须按真实位图宽高重排，
+  // 否则竖图会按方图高度估算，下一张结果正好压在上一个节点底部。
+  const finalPositions = layoutChatResultPositions({
+    anchor: finalAnchorNode ? estimateCanvasBox(finalAnchorNode) : null,
+    count: images.length,
+    size: resolvedSize,
+    sizes: actualSizes,
+    existing: layoutNodes.map((node) => estimateCanvasBox(node)),
+  });
 
   images.forEach((image, index) => {
-    const nodeId = `chat_${run.id}_${callId}_${index}`;
+    const nodeId = placeholderRecords[index]?.id || `chat_${run.id}_${callId}_${index}`;
     const versionId = `ver_${nodeId}`;
+    const actualSize = actualSizes[index] || resolvedSize;
     nodeRecords.push({
       id: nodeId,
       type: 'flow-image',
-      position: positions[index] || { x: 80 + index * 40, y: 80 + index * 40 },
+      position: finalPositions[index] || { x: 80 + index * 40, y: 80 + index * 40 },
       data: {
         kind: 'image',
         label: 'AI 对话',
@@ -915,10 +1074,13 @@ async function executeGenerateImage(
         status: 'done',
         imageUrl: image.url,
         fileName: image.fileName,
-        size: resolvedSize,
+        size: actualSize,
+        ...(Number(image.width) > 0 && Number(image.height) > 0
+          ? { width: Number(image.width), height: Number(image.height) }
+          : {}),
         model: runContext.imageModel || profile.model,
         source: 'chat',
-        createdAt: now,
+        createdAt: startedAt,
         finishedAt: now,
         enhancedPrompt,
         originalPrompt,
@@ -934,8 +1096,11 @@ async function executeGenerateImage(
           fileName: image.fileName,
           prompt,
           model: runContext.imageModel || profile.model,
-          size: resolvedSize,
-          createdAt: now,
+          size: actualSize,
+          ...(Number(image.width) > 0 && Number(image.height) > 0
+            ? { width: Number(image.width), height: Number(image.height) }
+            : {}),
+          createdAt: startedAt,
           finishedAt: now,
           enhancedPrompt,
           originalPrompt,
@@ -962,15 +1127,49 @@ async function executeGenerateImage(
       referenceUsage: usage,
       enhancementWarning: enhancementWarning || undefined,
       model: runContext.imageModel || profile.model,
-      size: resolvedSize,
+      size: actualSize,
+      ...(Number(image.width) > 0 && Number(image.height) > 0
+        ? { width: Number(image.width), height: Number(image.height) }
+        : {}),
     });
   });
 
-  if (run.status !== 'running' || run.abort.signal.aborted) throw new Error('生成已停止');
+  if (run.status !== 'running' || run.abort.signal.aborted) {
+    await markPlaceholdersFailed(placeholderRecords, '生成已停止', 'stopped');
+    throw new Error('生成已停止');
+  }
   const existingThread = await readChatThread(run.threadId);
-  if (!existingThread || Number(existingThread.generation || 0) !== run.generation || run.status !== 'running') throw new Error('对话已清空或删除');
-  if (!await appendCanvasImageNodes(runContext.canvasId, nodeRecords, { connectFrom })) throw new Error('结果画布已删除，未写入生成节点');
+  if (!existingThread || Number(existingThread.generation || 0) !== run.generation || run.status !== 'running') {
+    await markPlaceholdersFailed(placeholderRecords, '对话已清空或删除');
+    throw new Error('对话已清空或删除');
+  }
+  if (!await upsertCanvasNodes(runContext.canvasId, nodeRecords, { connectFrom })) {
+    await markPlaceholdersFailed(placeholderRecords, '结果画布已删除，未写入生成节点');
+    throw new Error('结果画布已删除，未写入生成节点');
+  }
+  // 生图接口少返回时，把多出来的占位节点收成失败态，避免永远停在“生成中”。
+  if (placeholderRecords.length > nodeRecords.length) {
+    await markPlaceholdersFailed(
+      placeholderRecords.slice(nodeRecords.length),
+      '生图接口返回的图片数量少于请求数量',
+    );
+  }
   if (run.status !== 'running' || run.abort.signal.aborted) return { media: [], context: runContextState };
+  for (const node of nodeRecords) {
+    try {
+      await pushNodeState({
+        type: 'node-state',
+        canvasId: runContext.canvasId,
+        nodeId: node.id,
+        phase: 'done',
+        at: new Date().toISOString(),
+        node,
+        source: 'chat',
+      });
+    } catch {
+      break;
+    }
+  }
   for (const item of media) {
     await pushImage({
       type: 'image',
@@ -980,6 +1179,9 @@ async function executeGenerateImage(
       usedPrompt,
       model: item.model,
       size: item.size,
+      ...(Number(item.width) > 0 && Number(item.height) > 0
+        ? { width: Number(item.width), height: Number(item.height) }
+        : {}),
       fileName: item.fileName,
       url: item.url,
       jobId: run.id,
@@ -1129,8 +1331,8 @@ export function buildAgentSystemSpec(): string {
     '## 工作流程',
     '',
     '### 信息收集',
-    '- 关键信息缺失时使用 `ask_user` 工具集中询问 1-4 个问题',
-    '- 什么是关键信息：主体内容、用途场景、视觉风格、参考图作用、画面文字、构图要求',
+    '- 只有缺少会实质改变成图结果、且无法从上下文或合理默认值确定的关键信息时，才使用 `ask_user` 工具集中询问 1-4 个问题',
+    '- 例如：核心主体不明、参考图作用冲突、必须出现但尚未提供的精确文字；用途、风格、构图未指定时不必逐项追问',
     '- 什么不是关键信息：可由设计常识补足的细节（如"现代感的配色"、"合适的留白"）',
     '- 用户明确要求立即生成时，除非核心主体完全不明，否则用合理默认值生成，不因细节阻塞',
     '',
@@ -1139,6 +1341,9 @@ export function buildAgentSystemSpec(): string {
     '- 用户明确说「生成」「做一版」「出图」「按这个方向试试」',
     '- 方案已讨论充分且用户表示认可',
     '- 单轮最多调用 2 次（如需对比两个方案）',
+    '- 普通生图或改图请求信息足够时，直接调用 `generate_image`；不要先复述需求、列方案、展示完整提示词或再次询问是否生成',
+    '- 交互设计、UI 设计，或用户明确要求讨论、分析、比较方案时，可以先给简短方案；用户明确要求直接出图时仍直接生成',
+    '- 以上直接出图与简短回复规则也适用于当前角色及其 Skill，不因角色要求先分析或列多个方向而增加普通生图的说明',
     '',
     '不要生成的情况：',
     '- 闲聊、纯分析、评价对比、文案修改',
@@ -1157,6 +1362,8 @@ export function buildAgentSystemSpec(): string {
     '- 不要另外调用优化模型或改写用户明确的约束',
     '',
     '### 结果点评',
+    '- 图片已在对话和画布中展示。生成成功后默认只用一句简短告知（如「已生成。」），不主动点评、不复述提示词、不解释创作过程，也不追加方案或建议',
+    '- 只有用户要求点评、解释，或本轮确实需要交付 UI / 交互设计方案时，才补充必要说明；生成失败、部分完成或仍有阻塞时如实简短说明',
     '- 只基于本次真实看到的图片内容点评',
     '- 图片加载失败或模型不支持视觉时明确说明，不得凭文件名或提示词假装看到像素',
     '- 对话记忆用于延续当前任务；新对话没有旧消息、旧摘要或旧图片上下文',
@@ -1166,10 +1373,10 @@ export function buildAgentSystemSpec(): string {
     '**语言与格式**：中文，简洁，可用基础 Markdown（段落 / 列表 / 粗体）',
     '',
     '**篇幅控制**：',
-    '- 默认：结论先行，正文 300-400 字，最多 3 个要点',
+    '- 默认：结论先行，只说完成当前请求所需的内容，不设最低字数；普通生图完成后遵循上面的一句告知规则',
     '- 不主动罗列用户没问的扩展项（如"还可以尝试…""其他建议…"）',
     '- 需要展开时先问「要我展开说说吗？」，或按用户要求详细回复',
-    '- 当前角色有明确篇幅要求时以角色设定为准',
+    '- 讨论或方案任务可遵循当前角色的篇幅要求；普通生图不因角色设定增加篇幅',
     '',
     '**提示词原则**：',
     '- 优先用正面描述（如"明亮的色调"而非"不要暗色"）',
@@ -1326,7 +1533,7 @@ async function executeRun(run: ChatRun, request: StartRunRequest): Promise<void>
         if (run.status !== 'running') break;
         if (call.name === 'ask_user') {
           if (clarificationCount >= 2) {
-            messages.push({ role: 'tool', toolCallId: call.id, content: '追问次数已达上限。请根据已有信息做出明确建议，再询问用户是否生成。' });
+            messages.push({ role: 'tool', toolCallId: call.id, content: '追问次数已达上限。用户已要求生成且核心主体明确时，根据已有信息和合理默认值直接生成；仍无法执行时简短说明阻塞，不要重复询问是否生成。' });
             continue;
           }
           const questions = normalizeAskUserQuestions(call.args.questions);
@@ -1482,7 +1689,7 @@ async function executeRun(run: ChatRun, request: StartRunRequest): Promise<void>
           messages.push({
             role: 'tool',
             toolCallId: call.id,
-            content: `已生成 ${generated.length} 张候选图，批次 ${call.id}。只有提供的视觉附件实际可见时才能点评；缺失图片不得猜测。\n${candidateLines.join('\n')}\n最终提示词：${String(call.args.prompt || '')}`,
+            content: `已生成 ${generated.length} 张候选图，批次 ${call.id}。图片已展示，默认只需一句简短告知，不要主动点评或复述提示词；用户要求点评或本轮需交付 UI / 交互方案时才补充必要说明。只有提供的视觉附件实际可见时才能点评；缺失图片不得猜测。\n${candidateLines.join('\n')}\n最终提示词：${String(call.args.prompt || '')}`,
           });
         } catch (err) {
           if (run.status !== 'running') return;

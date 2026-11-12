@@ -8,6 +8,7 @@ import {
   NODE_EVENTS,
   type NodeAnimationDoneDetail,
   type NodeConnectDetail,
+  type NodeImageSizeDetail,
   type NodePromptDetail,
   type NodeReferenceRemoveDetail,
   type NodeReferenceReorderDetail,
@@ -86,7 +87,8 @@ function NodeVersionBadge({ total, expanded, onToggle }: {
       aria-label={`历史版本：共 ${total} 张`}
       aria-expanded={expanded}
       title={`共 ${total} 张图片 · 点击${expanded ? '收起' : '展开'}`}
-      onClick={onToggle}
+      onPointerDown={(event) => event.stopPropagation()}
+      onClick={(event) => { event.stopPropagation(); onToggle(); }}
     >
       <span>{total}</span>
       <ChevronDownIcon />
@@ -133,6 +135,10 @@ function NodeRunningVisual({ data, elapsed }: { data: CanvasNodeData; elapsed: s
       </span>
     </>
   );
+}
+
+function runningSurfaceClass(data: CanvasNodeData): string {
+  return `image-node-composer-running${data.runningDirect === false ? ' is-enhanced' : ''}`;
 }
 
 /**
@@ -350,9 +356,21 @@ export default function FlowImageNode({ id, data, selected }: NodeProps) {
     ? pixelSizeOf(naturalImageSize.width, naturalImageSize.height)
     : null;
   const pixelSize = storedPixelSize || naturalPixelSize;
+  // 历史节点可能只存了请求尺寸（例如 1536x1536），实际位图却是 1024x1536。
+  // 图片加载完成前先按真实宽高排卡片，避免出现一帧方图裁切；同时把尺寸回填事件发给页面落库。
+  const layoutData = naturalPixelSize
+    && (naturalPixelSize.width !== Number(d.width || 0) || naturalPixelSize.height !== Number(d.height || 0))
+    ? {
+      ...d,
+      width: naturalPixelSize.width,
+      height: naturalPixelSize.height,
+      size: `${naturalPixelSize.width}x${naturalPixelSize.height}`,
+    }
+    : d;
   const versionCount = versions.length;
   // 版本大于 1 才有“多版本”语言：卡片背后叠层 + 右上角数字箭头角标
-  const hasVersions = versionCount > 1;
+  const hasVersions = versionCount > 1 || (versionCount > 0 && (isComposer || isRunning));
+  const showCurrentAttempt = hasVersions && (isComposer || isRunning);
   const [versionsExpanded, setVersionsExpanded] = useState(false);
   // 展开 → 收起之间留一段退场：宫格卡片先散着消失，节点再缩回单图尺寸
   const [versionsRendered, setVersionsRendered] = useState(false);
@@ -489,7 +507,7 @@ export default function FlowImageNode({ id, data, selected }: NodeProps) {
   useEffect(() => {
     if (!isEditing) return;
     const input = composerInputRef.current;
-    if (!input) { console.warn('[HBDBG] editing but no ref', id); return; }
+    if (!input) return;
     let frame = 0;
     let tries = 0;
     const placeCaret = () => {
@@ -616,7 +634,7 @@ export default function FlowImageNode({ id, data, selected }: NodeProps) {
   return (
     <div
       className={`image-flow-node image-node-${kind} ${isGenerator && !imageUrl && !videoDone ? 'image-node-composer-card' : ''} ${hasManualHeight ? 'has-manual-height' : ''} ${imageUrl || videoDone ? 'has-image' : 'is-empty'} ${selected ? 'selected' : ''} ${isRunning ? 'is-running' : ''} ${videoRunning ? 'is-running is-video-running' : ''} ${(d.status === 'error' || videoFailed) && !busy ? 'is-error' : ''} ${hasVersions ? 'has-versions' : ''} ${versionsExpanded ? 'versions-expanded' : (versionsRendered ? 'versions-leaving' : '')} ${isRedit ? 'is-redit' : ''}`}
-      style={nodeStyleVars(d) as CSSProperties}
+      style={nodeStyleVars(layoutData) as CSSProperties}
       // 入场 / 退场 / 新鲜高亮播完即通知页面摘 class，比定时器兜底精确
       onAnimationEnd={(event) => {
         event.stopPropagation();
@@ -672,10 +690,13 @@ export default function FlowImageNode({ id, data, selected }: NodeProps) {
             ) : null}
           </div>
         ) : null}
+        {hasVersions && (!imageUrl || isRunning) && !versionsRendered ? (
+          <NodeVersionBadge total={versionCount} expanded={versionsExpanded} onToggle={toggleVersions} />
+        ) : null}
         {isGenerator && !imageUrl && !videoDone ? (
           <div className={`image-node-composer-shell ${busy ? 'running' : ''} ${isEditing ? 'editing' : ''}`}>
             {isRunning ? (
-              <div className="image-node-composer-running" role="status" aria-live="polite">
+              <div className={runningSurfaceClass(d)} role="status" aria-live="polite">
                 <NodeRunningVisual data={d} elapsed={elapsed} />
               </div>
             ) : null}
@@ -924,7 +945,15 @@ export default function FlowImageNode({ id, data, selected }: NodeProps) {
 
         {/* 图片节点：可整块拖拽（不带 nodrag），双击开大图预览由页面层 onNodeDoubleClick 处理 */}
         {/* 多版本提示层：卡片背后两张错位旋转的复印件，一眼看出“这张图还有别的版本” */}
-        {hasVersions && imageUrl && !isRunning ? <span className="image-node-version-stack" aria-hidden="true"><i /><i /></span> : null}
+        {hasVersions ? (
+          <span className="image-node-version-stack" aria-hidden="true">
+            {[0, 1].map((index) => (
+              <i key={index}>
+                <CanvasImage src={gridVersions[Math.min(index, versionCount - 1)].imageUrl} alt="" draggable={false} />
+              </i>
+            ))}
+          </span>
+        ) : null}
         {imageUrl && !isRunning ? (
           <div
             className="image-node-media"
@@ -941,6 +970,14 @@ export default function FlowImageNode({ id, data, selected }: NodeProps) {
               onLoad={(event) => {
                 const next = pixelSizeOf(event.currentTarget.naturalWidth, event.currentTarget.naturalHeight);
                 if (!next) return;
+                if (storedPixelSize?.width !== next.width || storedPixelSize?.height !== next.height) {
+                  emitEvent<NodeImageSizeDetail>(NODE_EVENTS.imageSize, {
+                    nodeId: id,
+                    url: imageUrl,
+                    width: next.width,
+                    height: next.height,
+                  });
+                }
                 setNaturalImageSize((current) => (
                   current?.url === imageUrl
                     && current.width === next.width
@@ -1069,8 +1106,23 @@ export default function FlowImageNode({ id, data, selected }: NodeProps) {
         {/* 版本宫格：展开后整块替换主图——当前版本打头、新→旧铺成两列，每张与收起时等大；
             点空白 / Esc / 换选自动收起，双击某一版开灯箱，hover 可下载；
             非主图卡还能一键置顶为主图（主图卡自己就是最上方，不出现置顶钮） */}
-        {hasVersions && versionsRendered && !isRunning ? (
+        {hasVersions && versionsRendered ? (
           <div className="image-node-versions" role="group" aria-label="历史版本">
+            {showCurrentAttempt ? (
+              <figure className="image-node-version image-node-version-current">
+                {isRunning ? (
+                  <div className={runningSurfaceClass(d)} role="status" aria-live="polite">
+                    <NodeRunningVisual data={d} elapsed={elapsed} />
+                  </div>
+                ) : (
+                  <div className="image-node-version-current-note" role={d.status === 'error' ? 'alert' : 'note'}>
+                    <strong>{d.status === 'error' ? '本次生成未完成' : '正在编辑下一版'}</strong>
+                    <span>{d.status === 'error' ? d.error || '请收起后重新生成' : '收起历史版本可继续编辑提示词'}</span>
+                  </div>
+                )}
+                <NodeVersionBadge total={versionCount} expanded onToggle={toggleVersions} />
+              </figure>
+            ) : null}
             {gridVersions.map((version) => {
               const isActive = version.id === String(activeVersion?.id || '');
               const label = versionLabel(versionIndexOf(d, version.id));
@@ -1078,7 +1130,15 @@ export default function FlowImageNode({ id, data, selected }: NodeProps) {
                 <figure
                   key={version.id}
                   className={`image-node-version ${isActive ? 'is-active' : ''}`}
+                  style={{ '--image-aspect-ratio': nodeAspectRatio(version) } as CSSProperties}
+                  tabIndex={0}
+                  aria-label={`${label}，按回车预览`}
                   title={version.prompt || version.fileName}
+                  onKeyDown={(event) => {
+                    if (event.key !== 'Enter' || event.target !== event.currentTarget) return;
+                    event.stopPropagation();
+                    emitEvent<NodePreviewDetail>(NODE_EVENTS.preview, { nodeId: id, version });
+                  }}
                   onDoubleClick={(event) => {
                     event.stopPropagation();
                     emitEvent<NodePreviewDetail>(NODE_EVENTS.preview, { nodeId: id, version });
@@ -1102,7 +1162,7 @@ export default function FlowImageNode({ id, data, selected }: NodeProps) {
                       >
                         <DownloadIcon />
                       </a>
-                      {isActive ? null : (
+                      {isActive || busy || isComposer ? null : (
                         <button
                           type="button"
                           className="image-node-version-action nodrag"
@@ -1117,7 +1177,7 @@ export default function FlowImageNode({ id, data, selected }: NodeProps) {
                         </button>
                       )}
                     </div>
-                    {isActive ? (
+                    {isActive && !showCurrentAttempt ? (
                       <NodeVersionBadge
                         total={versionCount}
                         expanded
@@ -1141,7 +1201,7 @@ export default function FlowImageNode({ id, data, selected }: NodeProps) {
           />
         ) : null}
 
-        {!imageUrl && !isGenerator ? (
+        {(!imageUrl || isRunning) && !isGenerator ? (
           <div className={`image-node-placeholder ${isRunning ? 'running' : ''} ${d.status === 'error' ? 'failed' : ''}`}>
             {sizeLabel && !isRunning ? <span className="image-node-size-badge">{sizeLabel}</span> : null}
             {isRunning ? <NodeRunningVisual data={d} elapsed={elapsed} /> : null}

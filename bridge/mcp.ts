@@ -5,6 +5,7 @@ import {
 } from '@modelcontextprotocol/sdk/types.js';
 import { findProfile, normalizeEnhanceLevel, publicView, readSettings, resolveTextProfile } from './settings.js';
 import { generateImages, normalizeImageSize } from './imageApi.js';
+import { resolveResponseModel } from './imageRequestContext.js';
 import {
   buildSystemSpec,
   detectReferenceUsage,
@@ -13,7 +14,7 @@ import {
   fidelityForUsage,
   LEVEL_SPECS,
 } from './textApi.js';
-import { broadcastForwardBase, countOpenTabs, isBroadcastForwarded, pushImage, pushLocate } from './hub.js';
+import { broadcastForwardBase, countOpenTabs, isBroadcastForwarded, pushImage, pushLocate, pushNodeState } from './hub.js';
 import { fetchRemoteImage } from './providerApi.js';
 import { mediaFileToDataUrl } from './files.js';
 import { clearAgentPresence, markAgentPresence } from './agentPresence.js';
@@ -23,11 +24,14 @@ import {
   patchCanvasVideoNode,
   readCanvasDoc,
   readCanvasRegistry,
+  upsertCanvasNodes,
 } from './http.js';
 import type { CanvasNodeRecord, CanvasDocRecord, InternalCanvasWriteOperation, InternalCanvasWriteResults } from './http.js';
 import { listEnabledPromptSkills, type PromptSkill } from './skills.js';
 import { PORT } from './paths.js';
 import { findVideoTaskByNode } from './videoTasks.js';
+import { readAgentSelection, type AgentSelectionRecord } from './agentSelection.js';
+import { estimateCanvasBox, layoutChatResultPositions } from './runs.js';
 
 /* ── 工具说明(Agent 面向的导览) ── */
 const TOOL_GUIDE = [
@@ -35,6 +39,7 @@ const TOOL_GUIDE = [
   '- `huiban_canvases`:列出已注册画布(id / 名称 / 节点数 / 更新时间);生成前先调用它拿 canvasId。',
   '- `huiban_canvas_create`:新建画布({ name }),返回 canvasId。用户说”新建画布”而不想离开对话时用它。',
   '- `huiban_nodes`:列出某画布上的节点(含 imageUrl / fileName),想拿画布里已有的图当参考图时先用它。',
+  '- `huiban_selection`:读取用户当前画布上选中的节点。用户说「这张图 / 当前选中的图 / 把它改成」时先调用它。',
   '- `huiban_locate`:把用户的浏览器带到某个节点跟前(跨画布也会先切过去再居中)。huiban_generate 默认已自动定位;这个工具用于「再定位一次」「看早先那张」,或上次用了 locate:false 时补上。',
   '- `huiban_models`:列出每路生图配置的模型清单与默认模型;多 Key / 多中转站时配合 profileId 切换。',
   '- `huiban_config`:查看生图配置状态(不返回 Key)。',
@@ -49,6 +54,7 @@ const TOOL_GUIDE = [
   '提示词三步:huiban_prompt_guide 读规范 →(可选)huiban_optimize 让服务端优化 → huiban_generate 出图。',
   '带参考图:huiban_generate{prompt, referenceImages:[“/api/files/x.png”], inputFidelity:”high”}(图生图);inputFidelity:”low” 是风格参考。',
   'referenceImages 支持三种:画布媒体路径 /api/files/xxx.png、http(s) 图片链接(bridge 会代取落地)、data:image base64。',
+  '用户选中的画布图片:huiban_selection 拿 nodeId → huiban_generate{referenceNodeIds:[nodeId], connectFrom:[nodeId]}。不传参考图时，huiban_generate 默认也会把当前选中图片当作参考并连回原图；不想带选中态就显式传 useSelection:false。',
 ].join('\n');
 
 /** 比例档位 → 生图尺寸。与前端工具栏的 RATIO_PRESETS 对齐，数值最终仍过 normalizeImageSize 规范化。 */
@@ -75,10 +81,13 @@ export interface McpDeps {
   generateImages: typeof generateImages;
   pushImage: (payload: Parameters<typeof pushImage>[0]) => void | Promise<void>;
   pushLocate: (payload: Parameters<typeof pushLocate>[0]) => void | Promise<void>;
+  pushNodeState: typeof pushNodeState;
   appendCanvasImageNodes: typeof appendCanvasImageNodes;
+  upsertCanvasNodes: typeof upsertCanvasNodes;
   countOpenTabs: () => number | Promise<number>;
   createCanvas: (canvasId: string, name: string) => Promise<{ id: string; name: string }>;
   resolveReferenceDataUrls: (inputs: string[]) => Promise<Array<{ dataUrl: string; url: string }>>;
+  readAgentSelection: () => Promise<AgentSelectionRecord>;
   listPromptSkills?: () => Promise<PromptSkill[]>;
   patchVideoNode?: typeof patchCanvasVideoNode;
 }
@@ -125,6 +134,45 @@ function stringList(value: unknown): string[] {
     : (typeof value === 'string' && value.trim() ? [value.trim()] : []);
 }
 
+function activeImageUrlOfNode(node: Record<string, any>): string {
+  const data = node?.data && typeof node.data === 'object' ? node.data as Record<string, any> : {};
+  const versions = Array.isArray(data.versions) ? data.versions as Array<Record<string, any>> : [];
+  const active = versions.find((version) => String(version.id || '') === String(data.activeVersionId || ''))
+    || versions[versions.length - 1];
+  return String(active?.imageUrl || data.imageUrl || data.referenceDataUrl || '').trim();
+}
+
+function nodeReferenceInputs(
+  nodes: Array<Record<string, any>>,
+  nodeIds: string[],
+  options: { strict?: boolean } = {},
+): Array<{ id: string; url: string; label: string }> {
+  const out: Array<{ id: string; url: string; label: string }> = [];
+  for (const nodeId of [...new Set(nodeIds.map((id) => String(id || '').trim()).filter(Boolean))]) {
+    const node = nodes.find((item) => String(item?.id || '') === nodeId);
+    if (!node) {
+      if (options.strict) throw new Error(`画布上没有节点 ${nodeId}`);
+      continue;
+    }
+    const kind = String(node?.data?.kind || '');
+    if (kind !== 'image' && kind !== 'reference') {
+      if (options.strict) throw new Error(`节点 ${nodeId} 不是图片节点，不能作为参考图`);
+      continue;
+    }
+    const url = activeImageUrlOfNode(node);
+    if (!url) {
+      if (options.strict) throw new Error(`节点 ${nodeId} 还没有可用的图片`);
+      continue;
+    }
+    out.push({
+      id: nodeId,
+      url,
+      label: String(node?.data?.label || node?.data?.prompt || '画布选中图').slice(0, 80),
+    });
+  }
+  return out;
+}
+
 export function listMcpTools(): Array<Record<string, unknown>> {
   return [
     {
@@ -141,6 +189,20 @@ export function listMcpTools(): Array<Record<string, unknown>> {
             type: 'array',
             items: { type: 'string' },
             description: '参考图（图生图 / 风格参考）：/api/files/xxx.png、http(s) 图片链接、data:image base64；可用 huiban_nodes 先找画布里已有的图',
+          },
+          referenceNodeIds: {
+            type: 'array',
+            items: { type: 'string' },
+            description: '画布节点 id（来自 huiban_selection / huiban_nodes）。会取节点当前主图作为参考图，并默认把结果连回该节点',
+          },
+          connectFrom: {
+            type: 'array',
+            items: { type: 'string' },
+            description: '生成结果要连接的源节点 id。传 referenceNodeIds 时通常不用再传；显式传可覆盖/追加连线来源',
+          },
+          useSelection: {
+            type: 'boolean',
+            description: '是否自动使用用户当前选中的画布图片（默认 true；没有显式 referenceImages / referenceNodeIds 时生效）。不想带选中态就传 false',
           },
           referenceUsage: { type: 'string', enum: ['edit', 'style'], description: '参考图用途：edit=图生图（严格保主体，等价 inputFidelity:high）；style=风格参考（放开束缚，等价 inputFidelity:low）' },
           inputFidelity: { type: 'string', enum: ['high', 'low'], description: 'GPT-image 参考图保真度，仅带参考图时生效：high=保留参考图细节，low=自由发挥' },
@@ -180,6 +242,14 @@ export function listMcpTools(): Array<Record<string, unknown>> {
           limit: { type: 'number', description: '最多返回几条，默认 50，最大 200' },
         },
         required: ['canvasId'],
+      },
+    },
+    {
+      name: 'huiban_selection',
+      description: '读取用户当前在绘板画布上选中的节点（canvasId / nodeIds / primaryNodeId）并返回节点详情。用户说“这张图 / 当前选中的图 / 把它改成”时先调用它，再把 primaryNodeId 传给 huiban_generate.referenceNodeIds。',
+      inputSchema: {
+        type: 'object' as const,
+        properties: {},
       },
     },
     {
@@ -582,7 +652,7 @@ export async function callMcpTool(
   if (name === 'huiban_canvases') {
     const registry = await deps.readCanvasRegistry();
     const ids = Object.keys(registry);
-    const canvases = await Promise.all(ids.map(async (id) => {
+    const canvases = (await Promise.all(ids.map(async (id) => {
       const doc = await deps.readCanvasDoc(id);
       return {
         id,
@@ -590,7 +660,9 @@ export async function callMcpTool(
         nodeCount: Array.isArray(doc?.nodes) ? doc?.nodes.length : 0,
         updatedAt: doc?.updatedAt || '',
       };
-    }));
+    })))
+      // 空画布只是草稿：不进入历史列表；仍可直接拿 huiban_canvas_create 返回的 id 生成。
+      .filter((canvas) => canvas.nodeCount > 0);
     return toolText(canvases);
   }
 
@@ -612,6 +684,8 @@ export async function callMcpTool(
     if (!canvasId) throw new Error('canvasId 不能为空（先用 huiban_canvases 拿）');
     const doc = await deps.readCanvasDoc(canvasId);
     if (!doc) throw new Error(`画布不存在：${canvasId}（先用 huiban_canvases 查看，或用 huiban_canvas_create 新建）`);
+    const selection = await deps.readAgentSelection();
+    const selectedIds = selection.canvasId === canvasId ? new Set(selection.nodeIds || []) : new Set<string>();
     const kind = pickString(args.kind);
     const limit = Math.min(Math.max(Math.floor(Number(args.limit)) || 50, 1), 200);
     const nodes = (Array.isArray(doc.nodes) ? doc.nodes : []) as Array<Record<string, any>>;
@@ -628,11 +702,62 @@ export async function callMcpTool(
         model: String(node?.data?.model || ''),
         createdAt: String(node?.data?.createdAt || ''),
         versionCount: Array.isArray(node?.data?.versions) ? node.data.versions.length : 0,
+        selected: selectedIds.has(String(node?.id || '')),
       }));
     return toolText({
       canvasId,
       total: matched.length,
+      ...(selection.canvasId === canvasId ? {
+        selection: {
+          nodeIds: selection.nodeIds || [],
+          primaryNodeId: selection.primaryNodeId || '',
+          updatedAt: selection.updatedAt || '',
+        },
+      } : {}),
       nodes: matched.slice(0, limit),
+    });
+  }
+
+  if (name === 'huiban_selection') {
+    const selection = await deps.readAgentSelection();
+    const canvasId = pickString(selection.canvasId);
+    const nodeIds = Array.isArray(selection.nodeIds) ? selection.nodeIds : [];
+    if (!canvasId || nodeIds.length === 0) {
+      return toolText({
+        selected: false,
+        canvasId: canvasId || null,
+        nodeIds: [],
+        hint: '用户当前没有选中画布节点。先让用户选中一张图，或改用 huiban_nodes 找参考图。',
+      });
+    }
+    const doc = await deps.readCanvasDoc(canvasId).catch(() => undefined);
+    const nodes = (Array.isArray(doc?.nodes) ? doc!.nodes : []) as Array<Record<string, any>>;
+    const selected = nodeIds
+      .map((id) => nodes.find((node) => String(node?.id || '') === id))
+      .filter((node): node is Record<string, any> => Boolean(node))
+      .map((node) => ({
+        id: String(node.id || ''),
+        kind: String(node?.data?.kind || ''),
+        label: String(node?.data?.label || ''),
+        prompt: String(node?.data?.prompt || ''),
+        imageUrl: activeImageUrlOfNode(node),
+        fileName: String(node?.data?.fileName || ''),
+        size: String(node?.data?.size || ''),
+        model: String(node?.data?.model || ''),
+        activeVersionId: String(node?.data?.activeVersionId || ''),
+        selected: true,
+      }));
+    const liveNodeIds = selected.map((node) => node.id);
+    return toolText({
+      selected: selected.length > 0,
+      canvasId,
+      nodeIds: liveNodeIds,
+      primaryNodeId: liveNodeIds.includes(pickString(selection.primaryNodeId))
+        ? pickString(selection.primaryNodeId)
+        : (liveNodeIds[0] || ''),
+      updatedAt: selection.updatedAt || '',
+      nodes: selected,
+      ...(selected.length === 0 ? { hint: '选中的节点已不在画布上；请让用户重新选择。' } : {}),
     });
   }
 
@@ -679,7 +804,10 @@ export async function callMcpTool(
     const settings = await deps.readSettings();
     const profile = findProfile(settings, typeof args.profileId === 'string' ? args.profileId : undefined);
     if (!profile.apiKey) throw new Error('尚未配置 API Key：请在绘板「生图设置」里填一路生图配置');
-    const canvasId = pickString(args.canvasId);
+    let canvasId = pickString(args.canvasId);
+    const selection = await deps.readAgentSelection().catch(() => ({} as AgentSelectionRecord));
+    const useSelection = args.useSelection !== false;
+    // canvasId 仍以显式传参为准；selection 只提供“当前选中节点”这一层上下文，不偷偷改落点。
     let canvasDoc: CanvasDocRecord | undefined;
     if (canvasId) {
       // 先校验画布再花钱生成：坏 canvasId 不该先烧一次接口调用
@@ -702,9 +830,54 @@ export async function callMcpTool(
     }
     const size = normalizeImageSize(sizeInput || profile.defaultSize);
 
-    // 参考图：外部入口（路径 / 链接 / dataURL）→ dataURL 喂接口，url 留档到节点上
-    const references = await deps.resolveReferenceDataUrls(stringList(args.referenceImages));
+    const explicitReferenceImages = stringList(args.referenceImages);
+    const requestedNodeIds = stringList(args.referenceNodeIds);
+    const canvasNodes = (Array.isArray(canvasDoc?.nodes) ? canvasDoc!.nodes : []) as Array<Record<string, any>>;
+    const selectionNodeIds = useSelection && canvasId && selection.canvasId === canvasId
+      ? [...new Set([
+        String(selection.primaryNodeId || '').trim(),
+        ...(Array.isArray(selection.nodeIds) ? selection.nodeIds : []).map((id) => String(id || '').trim()),
+      ].filter(Boolean))]
+      : [];
+    // 显式参考优先；只有完全没传参考图时，才自动沿用当前选中的图片节点。
+    const nodeIdsForReferences = requestedNodeIds.length > 0
+      ? requestedNodeIds
+      : (explicitReferenceImages.length === 0 ? selectionNodeIds : []);
+    if (nodeIdsForReferences.length > 0 && !canvasId) {
+      throw new Error('referenceNodeIds / 选中节点需要同时传 canvasId，才能从画布读取参考图');
+    }
+    const nodeReferences = canvasId
+      ? nodeReferenceInputs(canvasNodes, nodeIdsForReferences, { strict: requestedNodeIds.length > 0 })
+      : [];
+    const nodeResolvedReferences = nodeReferences.length > 0
+      ? await deps.resolveReferenceDataUrls(nodeReferences.map((item) => item.url))
+      : [];
+    const externalReferences = await deps.resolveReferenceDataUrls(explicitReferenceImages);
+    const references: Array<{ dataUrl: string; url: string; label: string }> = [];
+    const seenReferences = new Set<string>();
+    const addReference = (item: { dataUrl: string; url: string }, label: string) => {
+      const key = String(item.url || item.dataUrl || '').trim();
+      if (!key || seenReferences.has(key)) return;
+      seenReferences.add(key);
+      references.push({ dataUrl: item.dataUrl, url: item.url || key, label });
+    };
+    externalReferences.forEach((item) => addReference(item, 'MCP 参考图'));
+    nodeResolvedReferences.forEach((item, index) => {
+      addReference(item, nodeReferences[index]?.label || '画布选中图');
+    });
     const referenceDataUrls = references.map((item) => item.dataUrl);
+    const requestedConnectFrom = Array.isArray(args.connectFrom) ? stringList(args.connectFrom) : null;
+    const existingNodeIds = new Set(canvasNodes.map((node) => String(node?.id || '')).filter(Boolean));
+    let connectFrom = requestedConnectFrom ?? nodeReferences.map((item) => item.id);
+    if (canvasId && connectFrom.length > 0) {
+      const missing = connectFrom.filter((id) => !existingNodeIds.has(id));
+      if (missing.length > 0 && requestedConnectFrom !== null) {
+        throw new Error(`connectFrom 里的节点不在画布 ${canvasId} 上：${missing.join('、')}`);
+      }
+      connectFrom = connectFrom.filter((id) => existingNodeIds.has(id));
+    } else if (!canvasId) {
+      connectFrom = [];
+    }
 
     const requestedUsage = pickString(args.referenceUsage);
     const usage = requestedUsage === 'edit' || requestedUsage === 'style' ? requestedUsage : undefined;
@@ -719,6 +892,130 @@ export async function callMcpTool(
       : undefined;
 
     const n = Math.min(Math.max(Math.floor(Number(args.n)) || 1, 1), 8);
+    const label = pickString(args.label) || 'Codex 生成';
+    const usedModel = modelOverride || profile.model;
+
+    const createdAt = new Date().toISOString();
+    const batchToken = `${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
+    const placeholderNodes: CanvasNodeRecord[] = [];
+    let persisted = false;
+    let delivered = false;
+    let persistError = '';
+    let deliveryError = '';
+    let autoLocated = false;
+    let stateError = '';
+    const anchorNodeId = nodeReferences[0]?.id || connectFrom[0] || '';
+    const anchorNode = anchorNodeId
+      ? canvasNodes.find((node) => String(node?.id || '') === anchorNodeId)
+      : undefined;
+
+    if (canvasId) {
+      const positions = layoutChatResultPositions({
+        anchor: anchorNode ? estimateCanvasBox(anchorNode) : null,
+        count: n,
+        size,
+        existing: canvasNodes.map((node) => estimateCanvasBox(node)),
+      });
+      for (let index = 0; index < n; index += 1) {
+        const nodeId = `mcp_image_${batchToken}_${index}`;
+        placeholderNodes.push({
+          id: nodeId,
+          type: 'flow-image',
+          position: positions[index] || { x: 80 + index * 40, y: 80 + index * 40 },
+          data: {
+            kind: 'image',
+            label: n > 1 ? `${label} ${index + 1}/${n}` : label,
+            cardWidth: 320,
+            prompt,
+            enhancedPrompt: '',
+            status: 'running',
+            size,
+            model: usedModel,
+            source: 'mcp',
+            createdAt,
+            runningDirect: true,
+            ...(references.length > 0
+              ? { references: references.map((item) => ({ url: item.url, label: item.label })) }
+              : {}),
+          },
+        });
+      }
+      try {
+        persisted = await deps.upsertCanvasNodes(canvasId, placeholderNodes);
+      } catch (error) {
+        persistError = error instanceof Error ? error.message : '画布写入失败';
+      }
+      if (!persisted) {
+        throw new Error(`无法写入生成节点${persistError ? `：${persistError}` : '：画布可能已删除'}`);
+      }
+      // 先生成中卡片、再定位，最后才调生图接口。用户能在等待期间看到节点和落点。
+      for (const node of placeholderNodes) {
+        try {
+          await deps.pushNodeState({
+            type: 'node-state',
+            canvasId,
+            nodeId: node.id,
+            phase: 'started',
+            at: new Date().toISOString(),
+            node,
+            source: 'mcp',
+          });
+        } catch (error) {
+          stateError = error instanceof Error ? error.message : '实时状态通知失败';
+          break;
+        }
+      }
+      if (args.locate !== false) {
+        try {
+          await deps.pushLocate({
+            type: 'locate',
+            canvasId,
+            nodeId: placeholderNodes[0].id,
+            at: new Date().toISOString(),
+            onlyIfOffscreen: true,
+          });
+          autoLocated = true;
+        } catch (error) {
+          deliveryError = error instanceof Error ? error.message : '定位通知失败';
+        }
+      }
+    }
+
+    const markNodesFailed = async (records: CanvasNodeRecord[], message: string) => {
+      if (!canvasId || records.length === 0) return;
+      const failedNodes = records.map((node) => ({
+        ...node,
+        data: {
+          ...node.data,
+          status: 'error',
+          error: message,
+          runningDirect: undefined,
+          finishedAt: new Date().toISOString(),
+        },
+      })) as CanvasNodeRecord[];
+      try {
+        await deps.upsertCanvasNodes(canvasId, failedNodes);
+      } catch {
+        /* 占位节点已经落盘；失败态写不进去时仍保留原错误返回给 Agent */
+      }
+      for (const node of failedNodes) {
+        try {
+          await deps.pushNodeState({
+            type: 'node-state',
+            canvasId,
+            nodeId: node.id,
+            phase: 'error',
+            at: new Date().toISOString(),
+            node,
+            error: message,
+            source: 'mcp',
+          });
+        } catch {
+          break;
+        }
+      }
+    };
+    const markGenerationFailed = (message: string) => markNodesFailed(placeholderNodes, message);
 
     let images: Awaited<ReturnType<typeof deps.generateImages>>;
     try {
@@ -731,39 +1028,54 @@ export async function callMcpTool(
         inputFidelity: referenceDataUrls.length > 0 ? inputFidelity : undefined,
         n,
         referenceDataUrls: referenceDataUrls.length > 0 ? referenceDataUrls : undefined,
-          responseModel: apiMode === 'responses' ? profile.model : undefined,
+        responseModel: apiMode === 'responses' ? resolveResponseModel(profile) : undefined,
       });
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
-      throw new Error(`生图接口调用失败：${reason}（请检查生图设置里的 baseUrl / API Key / 网络，或换一个 profileId）`);
+      const message = `生图接口调用失败：${reason}（请检查生图设置里的 baseUrl / API Key / 网络，或换一个 profileId）`;
+      await markGenerationFailed(message);
+      throw new Error(message);
     }
-    if (images.length === 0) throw new Error('生图接口没有返回图片');
+    if (images.length === 0) {
+      const message = '生图接口没有返回图片';
+      await markGenerationFailed(message);
+      throw new Error(message);
+    }
 
-    const label = pickString(args.label) || 'Codex 生成';
-    const usedModel = modelOverride || profile.model;
-
-    let persisted = false;
-    let delivered = false;
-    let persistError = '';
-    let deliveryError = '';
-    let autoLocated = false;
     const nodes: CanvasNodeRecord[] = [];
-
     if (canvasId) {
-      // 排点位：接着画布上已有节点往后铺，别每次糊在同一处
-      const existingNodes = (Array.isArray(canvasDoc?.nodes) ? canvasDoc!.nodes : []) as Array<Record<string, any>>;
-      const existingCount = existingNodes.filter((node) => node?.data?.imageUrl).length;
-      const createdAt = new Date().toISOString();
+      const finishedAt = new Date().toISOString();
+      const actualSizes = images.map((image) => (
+        Number(image.width) > 0 && Number(image.height) > 0
+          ? `${Number(image.width)}x${Number(image.height)}`
+          : size
+      ));
+      const finalDoc = await deps.readCanvasDoc(canvasId).catch(() => undefined);
+      const finalNodes = (Array.isArray(finalDoc?.nodes) ? finalDoc!.nodes : canvasNodes) as Array<Record<string, any>>;
+      const placeholderIds = new Set(placeholderNodes.map((node) => String(node.id || '')));
+      const finalAnchorNode = anchorNodeId
+        ? finalNodes.find((node) => String(node?.id || '') === anchorNodeId) || anchorNode
+        : undefined;
+      const layoutNodes = finalNodes.filter((node) => !placeholderIds.has(String(node?.id || '')));
+      const finalPositions = layoutChatResultPositions({
+        anchor: finalAnchorNode ? estimateCanvasBox(finalAnchorNode) : null,
+        count: images.length,
+        size,
+        sizes: actualSizes,
+        existing: layoutNodes.map((node) => estimateCanvasBox(node)),
+      });
       images.forEach((image, index) => {
-        const slot = existingCount + index;
-        const nodeId = `mcp_image_${Date.now().toString(36)}_${index}_${Math.random().toString(36).slice(2, 6)}`;
+        const placeholder = placeholderNodes[index];
+        const nodeId = placeholder?.id || `mcp_image_${batchToken}_${index}`;
+        const versionId = `ver_${nodeId}`;
+        const actualSize = actualSizes[index] || size;
         nodes.push({
           id: nodeId,
           type: 'flow-image',
-          position: { x: 48 + (slot % 4) * 384, y: 48 + Math.floor(slot / 4) * 432 },
+          position: finalPositions[index] || placeholder?.position || { x: 80 + index * 40, y: 80 + index * 40 },
           data: {
             kind: 'image',
-            label: images.length > 1 ? `${label} ${index + 1}/${images.length}` : label,
+            label: n > 1 ? `${label} ${index + 1}/${n}` : label,
             cardWidth: 320,
             prompt,
             enhancedPrompt: '',
@@ -775,23 +1087,64 @@ export async function callMcpTool(
             status: 'done',
             imageUrl: image.url,
             fileName: image.fileName,
-            size,
+            size: actualSize,
+            ...(Number(image.width) > 0 && Number(image.height) > 0
+              ? { width: Number(image.width), height: Number(image.height) }
+              : {}),
             model: usedModel,
             source: 'mcp',
             createdAt,
+            finishedAt,
+            versions: [{
+              id: versionId,
+              imageUrl: image.url,
+              fileName: image.fileName,
+              prompt,
+              model: usedModel,
+              size: actualSize,
+              ...(Number(image.width) > 0 && Number(image.height) > 0
+                ? { width: Number(image.width), height: Number(image.height) }
+                : {}),
+              createdAt,
+              finishedAt,
+              revisedPrompt: String(image.revisedPrompt || ''),
+              responseId: image.responseId,
+              imageGenerationCallId: image.imageGenerationCallId,
+              responseModel: image.responseModel,
+              responseProfileId: image.responseId ? profile.id : undefined,
+            }],
+            activeVersionId: versionId,
             ...(references.length > 0
-              ? { references: references.map((item) => ({ ...item, label: 'MCP 参考图' })) }
+              ? { references: references.map((item) => ({ url: item.url, label: item.label })) }
               : {}),
           },
         });
       });
       try {
-        persisted = await deps.appendCanvasImageNodes(canvasId, nodes);
+        persisted = await deps.upsertCanvasNodes(canvasId, nodes, { connectFrom });
       } catch (error) {
+        persisted = false;
         persistError = error instanceof Error ? error.message : '画布写入失败';
       }
       if (persisted) {
+        if (placeholderNodes.length > nodes.length) {
+          await markNodesFailed(
+            placeholderNodes.slice(nodes.length),
+            '生图接口返回的图片数量少于请求数量',
+          );
+        }
         try {
+          for (const node of nodes) {
+            await deps.pushNodeState({
+              type: 'node-state',
+              canvasId,
+              nodeId: node.id,
+              phase: 'done',
+              at: new Date().toISOString(),
+              node,
+              source: 'mcp',
+            });
+          }
           for (const [index, node] of nodes.entries()) {
             await deps.pushImage({
               type: 'image',
@@ -805,14 +1158,17 @@ export async function callMcpTool(
               responseModel: images[index].responseModel,
               responseProfileId: images[index].responseId ? profile.id : undefined,
               model: usedModel,
-              size,
+              size: actualSizes[index] || size,
+              ...(Number(images[index].width) > 0 && Number(images[index].height) > 0
+                ? { width: Number(images[index].width), height: Number(images[index].height) }
+                : {}),
               fileName: images[index].fileName,
               url: images[index].url,
               jobId: `job_${Date.now().toString(36)}_${index}`,
             });
           }
-          // 图先落画布并确认广播，再发定位。无确认或转发失败时不得虚报送达。
-          if (args.locate !== false && nodes.length > 0) {
+          // 生成中节点已经定位过；这里只兜底一次，覆盖定位事件发送失败或页面刚打开的情况。
+          if (args.locate !== false && nodes.length > 0 && !autoLocated) {
             await deps.pushLocate({
               type: 'locate',
               canvasId,
@@ -826,6 +1182,8 @@ export async function callMcpTool(
         } catch (error) {
           deliveryError = error instanceof Error ? error.message : '实时通知失败';
         }
+      } else {
+        await markGenerationFailed(`生成结果写入画布失败${persistError ? `：${persistError}` : ''}`);
       }
     }
 
@@ -837,11 +1195,15 @@ export async function callMcpTool(
       autoLocate: autoLocated,
       ...(persistError ? { persistError } : {}),
       ...(deliveryError ? { deliveryError } : {}),
+      ...(stateError ? { stateError } : {}),
       usedPrompt: prompt,
       apiMode,
       size,
       model: usedModel,
       referenceCount: referenceDataUrls.length,
+      usedSelection: nodeReferences.length > 0 && nodeIdsForReferences === selectionNodeIds,
+      referenceNodeIds: nodeReferences.map((item) => item.id),
+      connectFrom,
       images: images.map((image, index) => ({
         nodeId: nodes[index]?.id || null,
         fileName: image.fileName,
@@ -857,6 +1219,9 @@ export async function callMcpTool(
           ? (persisted ? (delivered ? '已写入画布文档并确认实时通知：浏览器在线时可见，不在线时下次打开/刷新可见' : `已写入画布文档，但实时通知失败：${deliveryError}；打开/刷新画布可恢复`) : `未能写入画布文档${persistError ? `：${persistError}` : ''}`)
           : '未指定 canvasId：只返回了图片（文件已在 ~/.huiban/media），不会出现在画布上',
         referenceDataUrls.length > 0 ? `已带 ${referenceDataUrls.length} 张参考图（inputFidelity=${String(inputFidelity || '默认')}）` : '',
+        nodeReferences.length > 0
+          ? `参考节点：${nodeReferences.map((item) => item.id).join('、')}${connectFrom.length > 0 ? `；结果已连回 ${connectFrom.join('、')}` : ''}`
+          : '',
         persisted && args.locate === false
           ? '已按 locate:false 跳过定位：请立刻调 huiban_locate{canvasId, nodeId}（nodeId 见下面 images 列表）把结果呈现给用户，否则用户看不到这次生成了什么'
           : '',
@@ -892,6 +1257,7 @@ export const defaultMcpDeps: McpDeps = {
   generateImages,
   pushImage,
   pushLocate,
+  pushNodeState,
   countOpenTabs: async () => {
     if (!isBroadcastForwarded()) return countOpenTabs();
     const response = await fetch(`${broadcastForwardBase()}/api/agent/status`);
@@ -906,10 +1272,19 @@ export const defaultMcpDeps: McpDeps = {
   appendCanvasImageNodes: (canvasId, nodes) => isBroadcastForwarded()
     ? internalCanvasWrite({ op: 'appendImages', canvasId, nodes })
     : appendCanvasImageNodes(canvasId, nodes),
+  upsertCanvasNodes: (canvasId, nodes, options) => isBroadcastForwarded()
+    ? internalCanvasWrite({
+      op: 'upsertImages',
+      canvasId,
+      nodes,
+      ...(options?.connectFrom ? { connectFrom: options.connectFrom } : {}),
+    })
+    : upsertCanvasNodes(canvasId, nodes, options),
   createCanvas: (canvasId, name) => isBroadcastForwarded()
     ? internalCanvasWrite({ op: 'createCanvas', canvasId, name })
     : createCanvasInRegistry(canvasId, name),
   resolveReferenceDataUrls,
+  readAgentSelection,
   listPromptSkills: listEnabledPromptSkills,
   patchVideoNode: (canvasId, nodeId, patch) => isBroadcastForwarded()
     ? internalCanvasWrite({ op: 'patchVideoNode', canvasId, nodeId, patch })

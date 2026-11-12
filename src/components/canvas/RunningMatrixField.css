@@ -6,7 +6,7 @@
   position: relative;
   overflow: hidden;
   border-radius: var(--radius-md);
-  background: color-mix(in srgb, var(--color-bg-base) 88%, var(--color-ui-panel));
+  background: var(--running-card-bg);
 }
 
 .running-matrix canvas {

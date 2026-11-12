@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { askUserToolDef, callAgentModel, extractDsmlToolCalls, generateImageToolDef, normalizeAskUserQuestions } from '../bridge/agent';
+import { askUserToolDef, callAgentModel, extractDsmlToolCalls, generateImageToolDef, jsonProtocolSpec, normalizeAskUserQuestions } from '../bridge/agent';
 import type { ModelProfile } from '../bridge/settings';
 
 const profile: ModelProfile = {
@@ -20,6 +20,13 @@ function jsonResponse(body: unknown, status = 200) {
 }
 
 describe('澄清问题协议', () => {
+  it('JSON 协议同样优先直接生图，不为可补足的细节追问', () => {
+    const spec = jsonProtocolSpec();
+    expect(spec).toContain('直接输出 generate_image 动作，不附带需求复述、方案或确认提问');
+    expect(spec).toContain('可用合理默认值补足的普通歧义不追问');
+    expect(spec).toContain('无法合理确定的关键信息时才使用 ask_user');
+  });
+
   it('开放输入接受空 options、保留 optional，并不误判为多选', () => {
     expect(normalizeAskUserQuestions([
       { id: 'copy', title: '画面上的精确文案？', type: 'text', optional: true },
@@ -262,12 +269,24 @@ describe('Chat 流与工具完整性', () => {
     expect(fetch).toHaveBeenCalledTimes(2);
   });
 
+  it('Chat 连续两次瞬时失败后第三次成功，避免代理瞬断直接打断对话', async () => {
+    const failed = Object.assign(new TypeError('fetch failed'), { cause: { code: 'ECONNRESET' } });
+    const fetch = vi.fn()
+      .mockRejectedValueOnce(failed)
+      .mockRejectedValueOnce(failed)
+      .mockResolvedValueOnce(new Response(event({ delta: { content: '恢复成功' }, finish_reason: 'stop' }) + 'data: [DONE]\n\n'));
+    vi.stubGlobal('fetch', fetch);
+    const result = await callAgentModel(chat, params);
+    expect(result.text).toBe('恢复成功');
+    expect(fetch).toHaveBeenCalledTimes(3);
+  });
+
   it('网络持续失败时给出可执行的错误，不把 fetch failed 直接丢给用户', async () => {
     const failed = Object.assign(new TypeError('fetch failed'), { cause: { code: 'ETIMEDOUT' } });
     const fetch = vi.fn().mockRejectedValue(failed);
     vi.stubGlobal('fetch', fetch);
     await expect(callAgentModel(chat, params)).rejects.toThrow('语言模型请求失败：无法连接上游或代理（ETIMEDOUT）');
-    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(fetch).toHaveBeenCalledTimes(3);
   });
 
   it('Chat 明确拒绝 temperature 时仅移除该字段重试一次', async () => {

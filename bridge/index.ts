@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import { DATA_DIR, MEDIA_DIR, PORT } from './paths.js';
-import { listenHttpServer } from './http.js';
+import { interruptStaleGenerationNodes, listenHttpServer } from './http.js';
 import { setBroadcastForwardBase } from './hub.js';
 import { createMcpServer } from './mcp.js';
 import { reconcileLostRuns } from './runs.js';
@@ -60,7 +60,10 @@ async function main(): Promise<void> {
 
   // bridge 重启后内存里的 run 全丢了：把上次未结束的消息标记成「运行状态未知」，
   // 不伪装成完成（方案 §17）
-  if (ownsPort) await reconcileLostRuns();
+  if (ownsPort) {
+    await interruptStaleGenerationNodes();
+    await reconcileLostRuns();
+  }
 
   // 视频是长任务：重启后接着轮询上次没出结果的那些。
   // 只有绑住端口的那个进程跑——MCP stdio 进程起来时端口常被占用，它也跑就会重复查询。

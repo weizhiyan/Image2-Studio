@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { mergeCanvasGraphChanges, mergeCanvasSnapshot, protectVideoTerminalNodes } from '../bridge/http';
+import { mergeCanvasGraphChanges, mergeCanvasSnapshot, protectImageTerminalNodes, protectVideoTerminalNodes } from '../bridge/http';
 import { canvasGraphChanges, hasCanvasGraphChanges } from '../src/lib/bridge';
 import type { CanvasDoc } from '../src/types';
 
@@ -21,6 +21,43 @@ const canvasDoc = (overrides: Record<string, unknown>): CanvasDoc => ({
   updatedAt: '2026-10-22T10:00:00.000Z',
   ...overrides,
 } as unknown as CanvasDoc);
+
+describe('图片任务终态保护', () => {
+  const startedAt = '2026-11-04T01:00:00.000Z';
+  const finishedAt = '2026-11-04T01:02:00.000Z';
+  const running = {
+    id: 'image', position: { x: 40, y: 50 },
+    data: { kind: 'composer', source: 'browser', status: 'running', createdAt: startedAt, stage: 'generate', runningDirect: true },
+  };
+
+  it.each(['error', 'done'])('旧快照不能覆盖同一轮的 %s 终态，位置编辑仍保留', (status) => {
+    const terminal = { ...running, data: {
+      ...running.data, status, finishedAt, error: status === 'error' ? 'Bridge 已重启' : '',
+      versions: [{ id: 'v1', imageUrl: '/api/files/previous.png' }],
+    } };
+    const incoming = { ...running, position: { x: 200, y: 300 } };
+    const snapshot = mergeCanvasSnapshot([terminal], [incoming], [], finishedAt);
+    const delta = mergeCanvasGraphChanges({ name: '画布', nodes: [terminal], edges: [] }, {
+      nodeUpserts: [incoming], nodeDeletes: [], edgeUpserts: [], edgeDeletes: [],
+    }, '画布', startedAt, finishedAt);
+    for (const result of [snapshot, delta]) {
+      expect(result.nodes[0]).toMatchObject({
+        position: { x: 200, y: 300 },
+        data: { status, finishedAt, versions: terminal.data.versions },
+      });
+    }
+  });
+
+  it('允许新的生成轮次，并清除旧的阶段和计时标记', () => {
+    const terminal = { ...running, data: { ...running.data, status: 'error', finishedAt, stage: undefined, runningDirect: undefined } };
+    expect(protectImageTerminalNodes([terminal], [running])[0]).toMatchObject({
+      data: { status: 'error', stage: undefined, runningDirect: undefined },
+    });
+    const retry = { ...running, data: { ...running.data, createdAt: '2026-11-04T01:03:00.000Z' } };
+    expect(protectImageTerminalNodes([terminal], [retry])[0]).toEqual(retry);
+    expect(mergeCanvasSnapshot([terminal], [], [], finishedAt).nodes).toEqual([]);
+  });
+});
 
 describe('画布变更集合并', () => {
   it('合并不同标签页对各自节点的修改', () => {

@@ -681,6 +681,10 @@
   pointer-events: none;
 }
 
+.image-node-composer-running.is-enhanced {
+  background: var(--running-card-bg);
+}
+
 .image-node-composer-ref-text {
   width: 56px;
   height: 56px;
@@ -976,7 +980,7 @@
   min-height: 24px;
   display: inline-flex;
   align-items: center;
-  border-radius: var(--radius-2xs);
+  border-radius: var(--radius-xs);
   background: color-mix(in srgb, var(--color-bg-base) 64%, transparent);
   color: var(--color-text-secondary);
   padding: 0 8px;
@@ -1015,6 +1019,8 @@
   bottom: var(--spacing-2);
   left: auto;
   background: var(--image-node-overlay-bg);
+  backdrop-filter: var(--image-node-overlay-blur);
+  -webkit-backdrop-filter: var(--image-node-overlay-blur);
   box-shadow: inset 0 0 0 1px var(--image-node-overlay-border);
   color: var(--image-node-overlay-fg);
   opacity: 0;
@@ -1048,8 +1054,10 @@
   height: 24px;
   padding: 0;
   border: 1px solid var(--image-node-overlay-border);
-  border-radius: var(--radius-2xs);
+  border-radius: var(--radius-xs);
   background: var(--image-node-overlay-bg);
+  backdrop-filter: var(--image-node-overlay-blur);
+  -webkit-backdrop-filter: var(--image-node-overlay-blur);
   color: var(--image-node-overlay-fg);
   cursor: pointer;
   transition: background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out);

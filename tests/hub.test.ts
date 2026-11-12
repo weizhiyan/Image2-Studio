@@ -1,6 +1,6 @@
 /** 推送总线：定位请求必须广播到所有标签页（定位常是跨画布操作），并按画布过滤推图。 */
 import { describe, expect, it, vi } from 'vitest';
-import { ackPendingLocate, addSseClient, countOpenTabs, peekPendingLocate, pushCanvasUpdated, pushImage, pushLocate, pushVideo, setBroadcastForwardBase } from '../bridge/hub';
+import { ackPendingLocate, addSseClient, countOpenTabs, peekPendingLocate, pushCanvasUpdated, pushImage, pushLocate, pushNodeState, pushVideo, setBroadcastForwardBase } from '../bridge/hub';
 
 function fakeRes() {
   const written: string[] = [];
@@ -69,6 +69,7 @@ describe('SSE hub', () => {
 
   it.each([
     ['image', () => pushImage({ type: 'image', canvasId: 'c1', nodeId: 'n1', prompt: 'p', fileName: 'f', url: '/api/files/f', jobId: 'j' })],
+    ['node-state', () => pushNodeState({ type: 'node-state', canvasId: 'c1', nodeId: 'n1', phase: 'started', at: new Date().toISOString() })],
     ['locate', () => pushLocate({ type: 'locate', canvasId: 'c1', nodeId: 'n1', at: new Date().toISOString() })],
     ['video', () => pushVideo({ type: 'video', phase: 'done', canvasId: 'c1', nodeId: 'n1', taskId: 't1' })],
     ['canvas-updated', () => pushCanvasUpdated({ type: 'canvas-updated', canvasId: 'c1', updatedAt: new Date().toISOString() })],
@@ -101,6 +102,27 @@ describe('SSE hub', () => {
     const disposeOther = addSseClient(other.res as never, 'canvas_2');
     pushImage({ type: 'image', canvasId: 'canvas_1', nodeId: 'n1', prompt: 'p', fileName: 'f', url: '/api/files/f', jobId: 'j' });
     expect(mine.written.join('')).toContain('event: image');
+    expect(other.written).toHaveLength(0);
+    disposeMine();
+    disposeOther();
+  });
+
+  it('node-state 按画布过滤，生成中占位可带完整节点', () => {
+    const mine = fakeRes();
+    const other = fakeRes();
+    const disposeMine = addSseClient(mine.res as never, 'canvas_1');
+    const disposeOther = addSseClient(other.res as never, 'canvas_2');
+    pushNodeState({
+      type: 'node-state',
+      canvasId: 'canvas_1',
+      nodeId: 'n1',
+      phase: 'started',
+      at: new Date().toISOString(),
+      source: 'chat',
+      node: { id: 'n1', type: 'flow-image', position: { x: 1, y: 2 }, data: { status: 'running' } },
+    });
+    expect(mine.written.join('')).toContain('event: node-state');
+    expect(mine.written.join('')).toContain('"status":"running"');
     expect(other.written).toHaveLength(0);
     disposeMine();
     disposeOther();

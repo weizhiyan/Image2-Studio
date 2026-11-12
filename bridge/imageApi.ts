@@ -1,9 +1,10 @@
 import type { ModelProfile } from './settings.js';
-import { saveBuffer, type SavedFile } from './files.js';
+import { imageSizeOf, saveBuffer, type SavedFile } from './files.js';
 import { preprocessDirectPrompt, type ReferenceUsage } from './textApi.js';
+import { resolveResponseModel } from './imageRequestContext.js';
 
 export interface GenerateParams {
-  /** Responses 模式的主模型，由当前启用的语言模型配置提供。 */
+  /** 同一生图供应商的 Responses 外层模型，与图像工具模型独立。 */
   responseModel?: string;
   signal?: AbortSignal;
   prompt: string;
@@ -35,13 +36,26 @@ export interface GenerateParams {
   previousResponseId?: string;
   /** Saved for lineage; previous_response_id carries the full editable context. */
   previousImageGenerationCallId?: string;
+  /** Caller verified that the only supplied image is the unchanged base in this chain. */
+  reusePreviousImage?: boolean;
 }
 
 export interface GeneratedImage extends SavedFile {
+  /** 最终位图的真实像素尺寸；与请求的 size 可能不同。 */
+  width?: number;
+  height?: number;
   revisedPrompt?: string;
   responseId?: string;
   imageGenerationCallId?: string;
   responseModel?: string;
+}
+
+async function saveGeneratedImage(buffer: Buffer, extension: string): Promise<GeneratedImage> {
+  const size = imageSizeOf(buffer);
+  return {
+    ...(await saveBuffer(buffer, extension)),
+    ...(size ? { width: size.width, height: size.height } : {}),
+  };
 }
 
 export function normalizeImageSize(raw: string): string {
@@ -136,8 +150,7 @@ async function generateWithImagesApi(profile: ModelProfile, params: GeneratePara
   const headers = providerAuthHeaders(profile.apiKey);
 
   const n = Math.min(Math.max(Math.floor(Number(params.n)) || 1, 1), 8);
-  const referenceUrls = (params.referenceDataUrls || []).filter((item) => String(item || '').trim());
-  if (referenceUrls.length === 0 && params.referenceDataUrl) referenceUrls.push(params.referenceDataUrl);
+  const referenceUrls = referenceImages(params);
 
   // ✅ 直连模式：如果没有经过语言模型优化（imagesPrompt为空），使用轻量级优化
   if (!params.imagesPrompt && referenceUrls.length > 0) {
@@ -204,13 +217,13 @@ async function generateWithImagesApi(profile: ModelProfile, params: GeneratePara
   for (const item of items) {
     if (item.b64_json) {
       const buffer = Buffer.from(item.b64_json, 'base64');
-      saved.push({ ...(await saveBuffer(buffer, 'png')), revisedPrompt: item.revised_prompt });
+      saved.push({ ...(await saveGeneratedImage(buffer, 'png')), revisedPrompt: item.revised_prompt });
     } else if (item.url) {
       const fetched = await fetch(item.url);
       if (!fetched.ok) throw new Error(`下载生成图失败：${fetched.status}`);
       const buffer = Buffer.from(await fetched.arrayBuffer());
       const extension = item.url.split('?')[0].split('.').pop() || 'png';
-      saved.push({ ...(await saveBuffer(buffer, extension)), revisedPrompt: item.revised_prompt });
+      saved.push({ ...(await saveGeneratedImage(buffer, extension)), revisedPrompt: item.revised_prompt });
     }
   }
   if (saved.length === 0) throw new Error('生图接口返回的条目里没有图片数据');
@@ -253,11 +266,10 @@ function responseCompatFallback(error: unknown, hasPreviousResponse: boolean): b
   }
 }
 
-function responseModelForProfile(profile: ModelProfile, requested?: string): string {
-  const candidate = String(requested || profile.responsesModel || '').trim();
-  // 旧版把语言模型默认名（如 GPT）写进生图配置；它不属于当前生图中转站的模型列表。
-  if (candidate && candidate !== 'GPT' && (profile.models.length === 0 || profile.models.includes(candidate))) return candidate;
-  return profile.model.trim() || candidate || 'gpt-5.5';
+function referenceImages(params: GenerateParams): string[] {
+  const references = (params.referenceDataUrls || []).filter((item) => String(item || '').trim());
+  if (references.length === 0 && params.referenceDataUrl) references.push(params.referenceDataUrl);
+  return references;
 }
 
 function responsesInput(prompt: string, references: string[], usePreviousResponse: boolean) {
@@ -271,11 +283,10 @@ function responsesInput(prompt: string, references: string[], usePreviousRespons
 async function callResponses(profile: ModelProfile, params: GenerateParams, previousResponseId?: string): Promise<GeneratedImage[]> {
   const base = profile.baseUrl.replace(/\/+$/, '');
   const imageModel = params.model?.trim() || profile.model;
-  const responseModel = responseModelForProfile(profile, params.responseModel);
+  const responseModel = resolveResponseModel(profile, params.responseModel);
   const size = normalizeImageSize(params.size?.trim() || profile.defaultSize);
   const n = Math.min(Math.max(Math.floor(Number(params.n)) || 1, 1), 8);
-  const references = (params.referenceDataUrls || []).filter((item) => String(item || '').trim());
-  if (references.length === 0 && params.referenceDataUrl) references.push(params.referenceDataUrl);
+  const references = referenceImages(params);
   const callOnce = async (): Promise<GeneratedImage[]> => {
     const body = {
       model: responseModel,
@@ -324,7 +335,7 @@ async function callResponses(profile: ModelProfile, params: GenerateParams, prev
       throw new Error(detail);
     }
     return Promise.all(calls.map(async (call) => ({
-      ...(await saveBuffer(Buffer.from(String(call.result), 'base64'), 'png')),
+      ...(await saveGeneratedImage(Buffer.from(String(call.result), 'base64'), 'png')),
       revisedPrompt: call.revised_prompt,
       responseId: data.id,
       imageGenerationCallId: call.id,
@@ -353,10 +364,17 @@ export async function generateImages(profile: ModelProfile, params: GeneratePara
   try {
     if (apiMode !== 'responses') return await generateWithImagesApi(profile, boundedParams);
     if (!profile.apiKey) throw new Error(`尚未配置 API Key：请在绘板「生图设置」的「${profile.name}」里填写`);
+    const references = referenceImages(boundedParams);
+    // A previous ID is not permission to discard this turn's images. Only a caller-
+    // verified single base can be omitted; keep text-only continuation compatible.
+    const reuseBase = boundedParams.reusePreviousImage === true && references.length <= 1;
+    const previousResponseId = references.length === 0 || reuseBase
+      ? boundedParams.previousResponseId
+      : undefined;
     try {
-      return await callResponses(profile, boundedParams, boundedParams.previousResponseId);
+      return await callResponses(profile, boundedParams, previousResponseId);
     } catch (error) {
-      if (!responseCompatFallback(error, Boolean(boundedParams.previousResponseId))) throw error;
+      if (!responseCompatFallback(error, Boolean(previousResponseId))) throw error;
       return await generateWithImagesApi(profile, boundedParams);
     }
   } catch (error) {

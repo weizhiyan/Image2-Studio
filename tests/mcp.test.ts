@@ -43,8 +43,11 @@ function makeDeps(overrides: Partial<McpDeps> = {}): McpDeps {
     generateImages,
     pushImage: vi.fn(),
     pushLocate: vi.fn(),
+    pushNodeState: vi.fn(),
     countOpenTabs: vi.fn(() => 1),
     appendCanvasImageNodes: vi.fn(async () => true) as unknown as McpDeps['appendCanvasImageNodes'],
+    upsertCanvasNodes: vi.fn(async () => true) as unknown as McpDeps['upsertCanvasNodes'],
+    readAgentSelection: vi.fn(async () => ({})) as unknown as McpDeps['readAgentSelection'],
     createCanvas: vi.fn(async (canvasId: string, name: string) => ({ id: canvasId, name })) as unknown as McpDeps['createCanvas'],
     resolveReferenceDataUrls: vi.fn(async (inputs: string[]) => inputs.map((item) => ({ dataUrl: `data:${item}`, url: item }))),
     enhancePrompt: vi.fn(async () => ({ prompt: 'stub-optimized', usage: 'style', referenceRoles: [] })) as unknown as McpDeps['enhancePrompt'],
@@ -57,10 +60,27 @@ function textOf(result: { content: Array<{ type: string; text: string }> }): Rec
 }
 
 describe('MCP 工具面', () => {
-  it('十二个工具齐备，generate 带参考图与比例参数', () => {
+  it('MCP Responses 使用同一图像配置的独立主模型而不是图像模型', async () => {
+    const deps = makeDeps();
+    const settings = await deps.readSettings();
+    settings.direct = false;
+    Object.assign(settings.profiles[0], {
+      model: 'image-model', models: ['image-model'], enabledModels: ['image-model'],
+      imageApiMode: 'responses', responsesModel: 'same-provider-reasoner',
+    });
+    deps.readSettings = vi.fn(async () => settings);
+    const result = await callMcpTool('huiban_generate', { prompt: '一只猫', canvasId: 'c1' }, deps);
+    expect(result).not.toMatchObject({ isError: true });
+    const [actualProfile, params] = vi.mocked(deps.generateImages).mock.calls[0];
+    expect(actualProfile.id).toBe('p1');
+    expect(params.responseModel).toBe('same-provider-reasoner');
+    expect(params.apiMode).toBe('responses');
+  });
+
+  it('十三个工具齐备，generate 带参考图与比例参数', () => {
     const tools = listMcpTools();
     expect(tools.map((tool) => tool.name)).toEqual([
-      'huiban_generate', 'huiban_canvases', 'huiban_canvas_create', 'huiban_nodes', 'huiban_locate', 'huiban_models',
+      'huiban_generate', 'huiban_canvases', 'huiban_canvas_create', 'huiban_nodes', 'huiban_selection', 'huiban_locate', 'huiban_models',
       'huiban_config', 'huiban_prompt_guide', 'huiban_video_prompt_guide', 'huiban_optimize',
       'huiban_video_generate', 'huiban_video_task',
     ]);
@@ -71,6 +91,8 @@ describe('MCP 工具面', () => {
     const generate = tools.find((tool) => tool.name === 'huiban_generate') as any;
     expect(generate.inputSchema.required).toEqual(['prompt']);
     expect(generate.inputSchema.properties.referenceImages).toBeTruthy();
+    expect(generate.inputSchema.properties.referenceNodeIds).toBeTruthy();
+    expect(generate.inputSchema.properties.useSelection).toBeTruthy();
     expect(generate.inputSchema.properties.ratio.enum).toContain('16:9');
     expect(generate.inputSchema.properties.n).toBeTruthy();
   });
@@ -225,6 +247,19 @@ describe('MCP 工具面', () => {
     expect(payload).toEqual([{ id: 'c1', name: '默认画布', nodeCount: 2, updatedAt: '2026-09-27T00:00:00Z' }]);
   });
 
+  it('huiban_canvases 不把没有节点的草稿列入历史', async () => {
+    const deps = makeDeps({
+      readCanvasRegistry: vi.fn(async () => ({ empty: '空草稿', filled: '有内容' })) as unknown as McpDeps['readCanvasRegistry'],
+      readCanvasDoc: vi.fn(async (id: string) => (
+        id === 'empty'
+          ? { name: '空草稿', nodes: [], edges: [] }
+          : { name: '有内容', nodes: [{ id: 'n1' }], edges: [], updatedAt: '2026-09-27T00:00:00Z' }
+      )) as unknown as McpDeps['readCanvasDoc'],
+    });
+    const payload = textOf(await callMcpTool('huiban_canvases', {}, deps));
+    expect(payload).toEqual([{ id: 'filled', name: '有内容', nodeCount: 1, updatedAt: '2026-09-27T00:00:00Z' }]);
+  });
+
   it('huiban_nodes 列图片节点并支持 kind 过滤与 limit', async () => {
     const deps = makeDeps({
       readCanvasDoc: vi.fn(async () => ({
@@ -247,6 +282,51 @@ describe('MCP 工具面', () => {
   it('huiban_nodes 对不存在的画布报错并指路', async () => {
     const deps = makeDeps({ readCanvasDoc: vi.fn(async () => undefined) as unknown as McpDeps['readCanvasDoc'] });
     await expect(callMcpTool('huiban_nodes', { canvasId: 'nope' }, deps)).rejects.toThrow(/huiban_canvases/);
+  });
+
+  it('huiban_selection 返回当前选中节点和主图，huiban_nodes 同步标出 selected', async () => {
+    const deps = makeDeps({
+      readAgentSelection: vi.fn(async () => ({
+        canvasId: 'c1',
+        nodeIds: ['ref'],
+        primaryNodeId: 'ref',
+        updatedAt: '2026-10-29T12:00:00.000Z',
+      })) as unknown as McpDeps['readAgentSelection'],
+      readCanvasDoc: vi.fn(async () => ({
+        name: '默认画布',
+        edges: [],
+        nodes: [{
+          id: 'ref',
+          data: {
+            kind: 'image',
+            label: '参考图',
+            imageUrl: '/api/files/old.png',
+            activeVersionId: 'v2',
+            versions: [
+              { id: 'v1', imageUrl: '/api/files/old.png' },
+              { id: 'v2', imageUrl: '/api/files/new.png' },
+            ],
+          },
+        }],
+      })) as unknown as McpDeps['readCanvasDoc'],
+    });
+    const selection = textOf(await callMcpTool('huiban_selection', {}, deps));
+    expect(selection).toMatchObject({
+      selected: true,
+      canvasId: 'c1',
+      nodeIds: ['ref'],
+      primaryNodeId: 'ref',
+      nodes: [{ id: 'ref', kind: 'image', imageUrl: '/api/files/new.png', activeVersionId: 'v2' }],
+    });
+    const nodes = textOf(await callMcpTool('huiban_nodes', { canvasId: 'c1' }, deps));
+    expect(nodes.selection).toMatchObject({ nodeIds: ['ref'], primaryNodeId: 'ref' });
+    expect(nodes.nodes[0].selected).toBe(true);
+  });
+
+  it('huiban_selection 没有选中时返回可执行的提示', async () => {
+    const payload = textOf(await callMcpTool('huiban_selection', {}, makeDeps()));
+    expect(payload).toMatchObject({ selected: false, canvasId: null, nodeIds: [] });
+    expect(payload.hint).toContain('没有选中');
   });
 
   it('huiban_locate 推送定位请求并回报节点信息', async () => {
@@ -336,8 +416,9 @@ describe('huiban_generate', () => {
     expect(payload.deliveredToCanvas).toBe(false);
     expect(payload.persistedToDoc).toBe(false);
     expect(payload.images[0].localPath).toBe('/tmp/media/img_test_1.png');
-    expect(deps.appendCanvasImageNodes).not.toHaveBeenCalled();
+    expect(deps.upsertCanvasNodes).not.toHaveBeenCalled();
     expect(deps.pushImage).not.toHaveBeenCalled();
+    expect(deps.pushNodeState).not.toHaveBeenCalled();
   });
 
   it('传 canvasId 时写文档 + SSE 双通道，节点带 mcp 来源', async () => {
@@ -345,9 +426,12 @@ describe('huiban_generate', () => {
     const payload = textOf(await callMcpTool('huiban_generate', { prompt: '一只猫', canvasId: 'c1' }, deps));
     expect(payload.persistedToDoc).toBe(true);
     expect(payload.deliveredToCanvas).toBe(true);
-    const append = deps.appendCanvasImageNodes as unknown as ReturnType<typeof vi.fn>;
-    expect(append).toHaveBeenCalledTimes(1);
-    const [canvasId, nodes] = append.mock.calls[0];
+    const upsert = deps.upsertCanvasNodes as unknown as ReturnType<typeof vi.fn>;
+    expect(upsert).toHaveBeenCalledTimes(2);
+    const placeholderNodes = upsert.mock.calls[0][1];
+    expect(placeholderNodes[0].data.status).toBe('running');
+    expect(deps.pushNodeState).toHaveBeenCalledWith(expect.objectContaining({ phase: 'started', source: 'mcp' }));
+    const [canvasId, nodes] = upsert.mock.calls[1];
     expect(canvasId).toBe('c1');
     expect(nodes).toHaveLength(1);
     expect(nodes[0].id).toBe(payload.images[0].nodeId);
@@ -359,6 +443,73 @@ describe('huiban_generate', () => {
     const push = deps.pushImage as unknown as ReturnType<typeof vi.fn>;
     expect(push).toHaveBeenCalledTimes(1);
     expect(push.mock.calls[0][0]).toMatchObject({ type: 'image', canvasId: 'c1', nodeId: nodes[0].id });
+  });
+
+  it('多张结果按真实位图尺寸落位，竖图不会压到下一张横图上', async () => {
+    const deps = makeDeps({
+      readCanvasDoc: vi.fn(async () => ({
+        name: '默认画布',
+        edges: [],
+        nodes: [{
+          id: 'ref',
+          type: 'flow-image',
+          position: { x: 100, y: 100 },
+          data: {
+            kind: 'image',
+            imageUrl: '/api/files/ref.png',
+            size: '1536x1536',
+            width: 1536,
+            height: 1536,
+            versions: [{ id: 'ver-ref', imageUrl: '/api/files/ref.png' }],
+          },
+        }],
+      })) as unknown as McpDeps['readCanvasDoc'],
+      generateImages: vi.fn(async () => [
+        {
+          fileName: 'tall.png',
+          url: '/api/files/tall.png',
+          filePath: '/tmp/media/tall.png',
+          width: 1024,
+          height: 1536,
+        },
+        {
+          fileName: 'wide.png',
+          url: '/api/files/wide.png',
+          filePath: '/tmp/media/wide.png',
+          width: 1536,
+          height: 1024,
+        },
+      ]) as unknown as McpDeps['generateImages'],
+    });
+    await callMcpTool('huiban_generate', {
+      prompt: '生成一竖一横',
+      canvasId: 'c1',
+      referenceNodeIds: ['ref'],
+      referenceUsage: 'edit',
+      n: 2,
+    }, deps);
+    const upsert = deps.upsertCanvasNodes as unknown as ReturnType<typeof vi.fn>;
+    const nodes = upsert.mock.calls[1][1] as Array<{
+      position: { x: number; y: number };
+      data: Record<string, unknown>;
+    }>;
+    expect(nodes.map((node) => node.position)).toEqual([
+      { x: 540, y: 100 },
+      { x: 540, y: 568 },
+    ]);
+    expect(nodes.map((node) => node.data)).toEqual([
+      expect.objectContaining({ width: 1024, height: 1536, size: '1024x1536' }),
+      expect.objectContaining({ width: 1536, height: 1024, size: '1536x1024' }),
+    ]);
+    expect(nodes.map((node) => node.data.versions)).toEqual([
+      [expect.objectContaining({ width: 1024, height: 1536, size: '1024x1536' })],
+      [expect.objectContaining({ width: 1536, height: 1024, size: '1536x1024' })],
+    ]);
+    const push = deps.pushImage as unknown as ReturnType<typeof vi.fn>;
+    expect(push.mock.calls.map(([payload]) => payload)).toEqual([
+      expect.objectContaining({ size: '1024x1536', width: 1024, height: 1536 }),
+      expect.objectContaining({ size: '1536x1024', width: 1536, height: 1024 }),
+    ]);
   });
 
   it('出图后默认自动定位（onlyIfOffscreen，前端自己判断要不要挪镜头）', async () => {
@@ -394,13 +545,37 @@ describe('huiban_generate', () => {
       }))) as unknown as McpDeps['generateImages'],
     });
     const payload = textOf(await callMcpTool('huiban_generate', { prompt: '猫', canvasId: 'c1', n: 3 }, deps));
-    const append = deps.appendCanvasImageNodes as unknown as ReturnType<typeof vi.fn>;
-    const nodes = append.mock.calls[0][1];
+    const upsert = deps.upsertCanvasNodes as unknown as ReturnType<typeof vi.fn>;
+    const nodes = upsert.mock.calls[1][1];
     expect(nodes).toHaveLength(3);
     expect(new Set(nodes.map((node: any) => node.id)).size).toBe(3);
     expect(nodes[1].data.label).toContain('2/3');
     expect(payload.images).toHaveLength(3);
     expect(deps.pushImage).toHaveBeenCalledTimes(3);
+  });
+
+  it('上游少返回图片时，剩余占位节点收成错误态而不是永久生成中', async () => {
+    const deps = makeDeps({
+      generateImages: vi.fn(async () => [{
+        fileName: 'only.png',
+        url: '/api/files/only.png',
+        filePath: '/tmp/media/only.png',
+      }]) as unknown as McpDeps['generateImages'],
+    });
+    const payload = textOf(await callMcpTool('huiban_generate', {
+      prompt: '要三张但只回一张',
+      canvasId: 'c1',
+      n: 3,
+    }, deps));
+    const upsert = deps.upsertCanvasNodes as unknown as ReturnType<typeof vi.fn>;
+    expect(upsert).toHaveBeenCalledTimes(3);
+    expect(upsert.mock.calls[2][1]).toHaveLength(2);
+    expect(upsert.mock.calls[2][1].every((node: any) => node.data.status === 'error')).toBe(true);
+    expect(deps.pushNodeState).toHaveBeenCalledWith(expect.objectContaining({
+      phase: 'error',
+      source: 'mcp',
+    }));
+    expect(payload.images).toHaveLength(1);
   });
 
   it('推图或自动定位失败如实返回 deliveryError，不虚报实时送达', async () => {
@@ -411,14 +586,14 @@ describe('huiban_generate', () => {
       const payload = textOf(await callMcpTool('huiban_generate', { prompt: '猫', canvasId: 'c1' }, deps));
       expect(payload.persistedToDoc).toBe(true);
       expect(payload.deliveredToCanvas).toBe(false);
-      expect(payload.autoLocate).toBe(false);
+      expect(payload.autoLocate).toBe(failedPush === 'pushImage');
       expect(payload.deliveryError).toContain('relay failed');
       expect(payload.persistError).toBeUndefined();
       expect(payload.hints.join('')).toContain('实时通知失败');
     }
   });
 
-  it('生成结果等待推图确认后才发定位和返回', async () => {
+  it('生成中先定位，推图确认前不返回', async () => {
     let confirm!: () => void;
     const deps = makeDeps({
       pushImage: vi.fn(() => new Promise<void>((resolve) => { confirm = resolve; })) as unknown as McpDeps['pushImage'],
@@ -431,7 +606,7 @@ describe('huiban_generate', () => {
     confirm();
     await pending;
     expect(beforeConfirmation).toBe(false);
-    expect(locateBeforeConfirmation).toBe(0);
+    expect(locateBeforeConfirmation).toBe(1);
   });
 
   it('ratio 映射成尺寸，非法比例报错', async () => {
@@ -454,16 +629,74 @@ describe('huiban_generate', () => {
     expect(params.inputFidelity).toBe('high');
   });
 
+  it('默认使用当前选中的画布图片作为参考并连回原节点', async () => {
+    const deps = makeDeps({
+      readAgentSelection: vi.fn(async () => ({ canvasId: 'c1', nodeIds: ['ref'], primaryNodeId: 'ref' })) as unknown as McpDeps['readAgentSelection'],
+      readCanvasDoc: vi.fn(async () => ({
+        name: '默认画布',
+        edges: [],
+        nodes: [{ id: 'ref', data: { kind: 'image', label: '选中图', imageUrl: '/api/files/ref.png' } }],
+      })) as unknown as McpDeps['readCanvasDoc'],
+    });
+    const payload = textOf(await callMcpTool('huiban_generate', { prompt: '基于选中图改一版', canvasId: 'c1' }, deps));
+    expect(payload).toMatchObject({
+      usedSelection: true,
+      referenceNodeIds: ['ref'],
+      referenceCount: 1,
+    });
+    expect(deps.resolveReferenceDataUrls).toHaveBeenCalledWith(['/api/files/ref.png']);
+    const upsert = deps.upsertCanvasNodes as unknown as ReturnType<typeof vi.fn>;
+    expect(upsert.mock.calls[1][2]).toMatchObject({ connectFrom: ['ref'] });
+  });
+
+  it('useSelection:false 时不会偷偷把选中图带进生成', async () => {
+    const deps = makeDeps({
+      readAgentSelection: vi.fn(async () => ({ canvasId: 'c1', nodeIds: ['ref'], primaryNodeId: 'ref' })) as unknown as McpDeps['readAgentSelection'],
+      readCanvasDoc: vi.fn(async () => ({
+        name: '默认画布',
+        edges: [],
+        nodes: [{ id: 'ref', data: { kind: 'image', imageUrl: '/api/files/ref.png' } }],
+      })) as unknown as McpDeps['readCanvasDoc'],
+    });
+    const payload = textOf(await callMcpTool('huiban_generate', {
+      prompt: '只按文字生成',
+      canvasId: 'c1',
+      useSelection: false,
+    }, deps));
+    expect(payload.referenceCount).toBe(0);
+    expect(payload.referenceNodeIds).toEqual([]);
+    expect((deps.generateImages as unknown as ReturnType<typeof vi.fn>).mock.calls[0][1].referenceDataUrls).toBeUndefined();
+  });
+
+  it('生图失败时把占位节点改成错误态并广播', async () => {
+    const deps = makeDeps({
+      generateImages: vi.fn(async () => { throw new Error('upstream boom'); }) as unknown as McpDeps['generateImages'],
+    });
+    await expect(callMcpTool('huiban_generate', { prompt: '猫', canvasId: 'c1' }, deps)).rejects.toThrow(/生图接口调用失败/);
+    const upsert = deps.upsertCanvasNodes as unknown as ReturnType<typeof vi.fn>;
+    expect(upsert).toHaveBeenCalledTimes(2);
+    expect(upsert.mock.calls[1][1][0].data).toMatchObject({
+      status: 'error',
+      error: expect.stringContaining('upstream boom'),
+    });
+    expect(deps.pushNodeState).toHaveBeenCalledWith(expect.objectContaining({
+      phase: 'error',
+      source: 'mcp',
+    }));
+  });
+
   it('空 prompt 与未知画布都被拦住', async () => {
     const deps = makeDeps();
     await expect(callMcpTool('huiban_generate', { prompt: '  ' }, deps)).rejects.toThrow(/prompt/);
     await expect(callMcpTool('huiban_generate', { prompt: '猫', canvasId: 'ghost' }, deps)).rejects.toThrow(/huiban_canvases/);
-    expect(deps.appendCanvasImageNodes).not.toHaveBeenCalled();
+    expect(deps.upsertCanvasNodes).not.toHaveBeenCalled();
   });
 
-  it('文档写入失败不炸整轮：图照返，persistError 进 hints', async () => {
+  it('最终文档写入失败仍返回已生成图片，persistError 进 hints', async () => {
     const deps = makeDeps({
-      appendCanvasImageNodes: (vi.fn(async () => { throw new Error('磁盘满了'); }) as unknown as McpDeps['appendCanvasImageNodes']),
+      upsertCanvasNodes: (vi.fn()
+        .mockResolvedValueOnce(true)
+        .mockRejectedValueOnce(new Error('磁盘满了')) as unknown as McpDeps['upsertCanvasNodes']),
     });
     const payload = textOf(await callMcpTool('huiban_generate', { prompt: '猫', canvasId: 'c1' }, deps));
     expect(payload.ok).toBe(true);

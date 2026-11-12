@@ -57,6 +57,9 @@ export interface PushedImage {
   revisedPrompt?: string;
   model?: string;
   size?: string;
+  /** 最终位图的真实像素宽高；与请求 size 可能不同。 */
+  width?: number;
+  height?: number;
   responseId?: string;
   imageGenerationCallId?: string;
   responseModel?: string;
@@ -81,6 +84,40 @@ export function pushImage(payload: PushedImage | Omit<PushedImage, 'canvasId'>):
     }
   }
   return forwardBroadcast('image', payload);
+}
+
+export type PushedNodeStatePhase = 'started' | 'done' | 'error' | 'stopped';
+
+export interface PushedNodeState {
+  type: 'node-state';
+  canvasId: string;
+  nodeId: string;
+  phase: PushedNodeStatePhase;
+  at: string;
+  /** started 时带完整节点，前端无需再等一次文档拉取就能先显示生成中卡片。 */
+  node?: {
+    id: string;
+    type: string;
+    position: { x: number; y: number };
+    data: Record<string, unknown>;
+  };
+  error?: string;
+  source?: 'mcp' | 'chat';
+}
+
+/** 生成生命周期状态：开始先占位，失败/停止负责收尾；完成态仍由 image 事件承载图片。 */
+export function pushNodeState(payload: PushedNodeState): Promise<void> {
+  const event = 'node-state';
+  const data = JSON.stringify(payload);
+  for (const client of clients) {
+    if (client.canvasId !== payload.canvasId) continue;
+    try {
+      client.res.write(`event: ${event}\ndata: ${data}\n\n`);
+    } catch {
+      clients.delete(client);
+    }
+  }
+  return forwardBroadcast('node-state', payload);
 }
 
 export interface LocateRequest {

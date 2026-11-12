@@ -44,4 +44,10 @@ describe('画布下拉列表', () => {
       /\.canvas-delete-confirm\s*\{[^}]*background:\s*var\(--surface-modal-bg\)/s,
     );
   });
+
+  it('空草稿只作为当前标题，不进入画布切换历史', () => {
+    expect(TOP_BAR_SOURCE).toContain('const menuCanvases = canvases.filter((doc) => doc.nodes.length > 0 || doc.edges.length > 0);');
+    expect(TOP_BAR_SOURCE).toContain('{menuCanvases.map((doc) => {');
+    expect(TOP_BAR_SOURCE).toContain('{menuCanvases.length > 1 ?');
+  });
 });

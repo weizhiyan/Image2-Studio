@@ -43,6 +43,25 @@ describe('normalizeImageSize', () => {
     expect(width * height).toBeGreaterThanOrEqual(655_360);
   });
 
+  it('保存生成图时记录真实位图尺寸，而不是请求尺寸', async () => {
+    const png = Buffer.alloc(24);
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(png);
+    png.write('IHDR', 12, 'ascii');
+    png.writeUInt32BE(1024, 16);
+    png.writeUInt32BE(1536, 20);
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ data: [{ b64_json: png.toString('base64') }] }),
+    })));
+    const [image] = await generateImages(
+      { ...profile, imageApiMode: 'images' },
+      { prompt: '一只猫', size: '1536x1536', apiMode: 'images' },
+    );
+    expect(image).toMatchObject({ width: 1024, height: 1536 });
+    await fs.unlink(image.filePath);
+  });
+
   it('Responses 生成发送独立主模型、图像工具模型与质量，并回收上下文 id', async () => {
     const calls: Array<{ url: string; body: Record<string, unknown> }> = [];
     vi.stubGlobal('fetch', vi.fn(async (url: string, init: RequestInit) => {
@@ -70,6 +89,45 @@ describe('normalizeImageSize', () => {
     expect(image.imageGenerationCallId).toBe('ig_123');
     expect(image.responseModel).toBe('gpt-5.5');
     await fs.unlink(image.filePath);
+  });
+
+  it('图像模型列表不否定同一供应商独立配置的 Responses 主模型', async () => {
+    let body: any;
+    vi.stubGlobal('fetch', vi.fn(async (_url: string, init: RequestInit) => {
+      body = JSON.parse(String(init.body));
+      return { ok: true, status: 200, json: async () => ({
+        id: 'resp_model', output: [{ type: 'image_generation_call', result: 'aGVsbG8=' }],
+      }) };
+    }));
+    const [image] = await generateImages({ ...profile, models: [profile.model] }, { prompt: '一只猫' });
+    try {
+      expect(body.model).toBe('gpt-5.5');
+      expect(body.tools[0].model).toBe('gpt-image-2.5-sunburst');
+      expect(image.responseModel).toBe('gpt-5.5');
+    } finally { await fs.unlink(image.filePath); }
+  });
+
+  it.each([
+    { references: ['data:image/png;base64,QUJD'], reusePreviousImage: undefined },
+    { references: ['data:image/png;base64,QUJD', 'data:image/png;base64,REVG'], reusePreviousImage: undefined },
+    { references: ['data:image/png;base64,QUJD', 'data:image/png;base64,REVG'], reusePreviousImage: true },
+  ])('续接遇到未确认的参考集合时完整上传并断链：$references', async ({ references, reusePreviousImage }) => {
+    let body: any;
+    vi.stubGlobal('fetch', vi.fn(async (_url: string, init: RequestInit) => {
+      body = JSON.parse(String(init.body));
+      return { ok: true, status: 200, json: async () => ({
+        id: 'resp_refs', output: [{ type: 'image_generation_call', result: 'aGVsbG8=' }],
+      }) };
+    }));
+    const [image] = await generateImages(profile, {
+      prompt: '保留基准构图，使用新参考图的颜色', previousResponseId: 'resp_old',
+      referenceDataUrls: references, reusePreviousImage,
+    });
+    try {
+      expect(body.previous_response_id).toBeUndefined();
+      expect(body.input[0].content.filter((part: any) => part.type === 'input_image')
+        .map((part: any) => part.image_url)).toEqual(references);
+    } finally { await fs.unlink(image.filePath); }
   });
 
   it('Responses 路由不支持时回退 Image API，而不是重复重试同一路', async () => {
@@ -125,6 +183,7 @@ describe('normalizeImageSize', () => {
     const [image] = await generateImages(profile, {
       prompt: '把天空改成黄昏',
       previousResponseId: 'resp_prev',
+      reusePreviousImage: true,
       referenceDataUrls: ['data:image/png;base64,QUJD'],
     });
     expect(body?.previous_response_id).toBe('resp_prev');

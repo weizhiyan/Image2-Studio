@@ -103,6 +103,9 @@ Agent 出图模型（`imageProfileId` + `imageModel`）按线程保存、可随�
 节点尺寸也分流：`data.width/height` 是位图像素（只用来算比例），`data.cardWidth` 才是卡片宽度。
 注入 CSS 的 `--image-aspect-ratio` 是**宽/高**（与 CSS `aspect-ratio` 同向），而 `aspect.ts` 的 `parseSizeRatio`/
 `ratioToNumber` 返回的是**高/宽**——换算在 `nodeAspectRatio()` 里取倒数，别在别处再翻一次（写反过一次，卡片会被拉成竖条）。
+水合时**不**把 running 节点判失败：浏览器手动生图由 bridge 继续执行并在响应前落盘，刷新后从
+画布文档恢复；`source==='mcp' / 'chat' / 'browser'` 的在途任务都留给 bridge 重启时的
+`interruptStaleGenerationNodes` 统一收尾。只有 bridge 真的重启，才允许把 running 改成错误态。
 
 ## 输入态与引用（改节点交互前先读）
 
@@ -138,6 +141,17 @@ Agent 出图模型（`imageProfileId` + `imageModel`）按线程保存、可随�
 空占位早就被浏览器回推 bridge 了，那条判断会让清理永远失效（踩过）。当前活动画布正是空占位时，
 先切到最近更新的有内容画布，别让用户对着空白页。
 
+**空草稿不算历史画布**：新建后还没添加节点的画布可以继续作为当前草稿使用，但不进入
+`GET /api/canvases`、`huiban_canvases` 或顶栏切换列表；`createCanvas` 会替换上一张空草稿，
+切到有内容画布时 `setActive` 会丢弃空草稿。不要用「名字叫默认画布」来判断新画布，用户新建的
+空画布同样适用这条规则。
+
+**Agent 选中态**：画布把当前选中的图片节点防抖写入 `PUT /api/agent/selection`
+（`{ canvasId, nodeIds, primaryNodeId }`，30 分钟 TTL），MCP stdio 用
+`GET /api/agent/selection` / `huiban_selection` 读同一份状态。用户显式传 `referenceImages` 或
+`referenceNodeIds` 时优先用显式参考；否则 `huiban_generate` 默认把选中图片作为参考，并把结果
+`connectFrom` 回选中节点。点空白处要立即清空，切画布也要先清空，避免 Agent 拿到上一张画布的旧选择。
+
 ## 顶栏与连线（绘板交互约定）
 
 - **连线触发范围**：拖手柄松手时只要落在某个节点上就建边，**不要求对准圆形手柄**。
@@ -156,6 +170,7 @@ Agent 出图模型（`imageProfileId` + `imageModel`）按线程保存、可随�
 
 - 画布选择器使用本项目的 `top-nav-workflow-*` / `workflow-menu-*` 结构（CSS 在 `canvas-page.css` 尾部）：
   点名字重命名，箭头展开下拉做新建 / 切换 / 删除。**没有**删除、上传参考图、自动定位按钮——自动定位始终开启。
+  下拉列表过滤 0 节点 0 连线的空草稿，但当前草稿仍可显示在顶栏标题上。
 - 连线由本项目的 `components/canvas/FlowEdge.tsx`（渐变 beam + SMIL 流光）和 `CanvasPage.tsx` 里的
   `CanvasEdge` 包装（`EDGE_INSET = 24`，用 `useInternalNode` 的实测宽度算节点边框，比偏移
   `props.sourceX` 稳——ReactFlow 对"伸出节点 40px 的 + 按钮 handle"测的位置有陈旧误差）。
@@ -175,6 +190,9 @@ Agent 出图模型（`imageProfileId` + `imageModel`）按线程保存、可随�
 composer 手动拖过高度时用 `clamp(nodeHeight, MIN/MAX_COMPOSER_NODE_HEIGHT)`，其余才按 `width / aspect` 推导。
 少了这个分支，`startResize` 把高度写进 `data.nodeHeight` 却拿不到盒子，视觉上就是"只能等比拖"（踩过）。
 宽高上下限与 `CanvasPage` 共用 `aspect.ts` 那一份常量，别在两处各写一遍。
+生图接口的 `size` 只是请求值，中转站可能按内容改成长边 1536 或别的比例；bridge 必须用
+`imageSizeOf` 从文件头读真实宽高，节点/版本/SSE 都写真实值。历史节点缺 `width/height` 时，
+`FlowImageNode` 在图片 `onLoad` 后用 `NODE_EVENTS.imageSize` 回填，不能再拿请求尺寸裁切展示。
 
 ## 画布写入的三条保险（改 bridge 或前端写路径前必读）
 
@@ -194,32 +212,43 @@ composer 手动拖过高度时用 `clamp(nodeHeight, MIN/MAX_COMPOSER_NODE_HEIGH
 ## 生图链路
 
 - 浏览器生成：composer 节点 Enter → 该节点**就地**转运行态 → `POST /api/generate`（bridge 代理中转站，绕开 CORS）
-  → 结果（fetch 响应，或 bridge SSE 广播回该画布）落回**同一节点**并变成 `image` → 有“自动定位”时 `setCenter` 聚焦（420ms）。
+  → bridge 在返回响应前经 `patchCanvasNodeData` 把结果写回**同一节点**（写锁 + 备份 + 墓碑保护）
+  → 响应与 SSE 广播更新界面。浏览器刷新/关闭不会取消 bridge 里的在途请求，重新打开后从文档恢复；
+  只有 bridge 重启才由 `interruptStaleGenerationNodes` 收尾为错误态。
+- **生成中禁止删除**：`onBeforeDelete` 先展开编组检查所有成员，任一节点 `status==='running'`
+  或 `videoStatus==='running'` 就直接返回 `false` 并提示等待完成；键盘删除、React Flow 删除和
+  节点工具栏删除都走这条守卫。删除墓碑只兜底迟到的外部写入，不能拿来替代交互层的删除锁。
 - 选中 composer 时节点上方浮出 `NodeGenerationToolbar`（模型 / 比例），写进 `data.model` / `data.ratio`；
   `runComposer` 的画幅优先级：提示词显式写法 > 工具栏预设 > 设置里的默认尺寸。
-- Codex 生成：MCP `huiban_generate {prompt, canvasId}` → bridge 生成 → 双通道落画布：
-  ① appendCanvasImageNodes 写 canvas-docs.json（走同一条 withCanvasWriteLock 链 + 滚动备份），
-  ② pushImage 推 SSE 给订阅该画布的标签页。浏览器没开时 ① 保证图不丢，刷新/切画布随水合出来；
+- Codex 生成：MCP `huiban_generate {prompt, canvasId}` → bridge 先生成 `running` 占位节点 →
+  `pushNodeState(started)` 立即让浏览器出现生成中卡片并 `pushLocate` 定位 → 调上游 →
+  同一批 nodeId 回填 `done` 节点和 versions（走 `upsertCanvasNodes`，同一写锁链 + 滚动备份）→
+  `pushNodeState(done)` + `pushImage` 推给订阅该画布的标签页。浏览器没开时写入文档保证图不丢，
+  刷新/切画布随水合出来；失败、停止或上游无图时同一占位节点回填 `error`/`stopped`，不能让它永远转圈。
+  `node-state` 是生命周期事件，`image` 仍是图片内容事件，两者都按 canvasId 过滤。
   PUT 整文档时 keepExternalNodesOnSnapshot 会把「MCP 刚写、本地旧快照还没有」的节点捞回来
-  （判据 source==='mcp' 且 createdAt 晚于请求 updatedAt；用户真删后 updatedAt 更新，不复活）。
+  （判据 source==='mcp' / 'chat' 且 createdAt 晚于请求 updatedAt；用户真删后 updatedAt 更新，不复活）。
   **MCP stdio 与 HTTP 进程分离时**：MCP 进程拿不到端口，hub 的 clients 是空的。拿不到端口的进程
-  通过 `setBroadcastForwardBase` 把 image / locate / video / canvas-updated 转发到
+  通过 `setBroadcastForwardBase` 把 image / node-state / locate / video / canvas-updated 转发到
   `POST /api/internal/broadcast`，由持有端口的进程广播（该路由只接受本机请求）。别在 MCP 侧直接
   调 hub 就以为浏览器能收到；`countOpenTabs` 也要经 `/api/agent/status` 读真实值。
-  共享文档的写入同样不能由 MCP 进程直接读改写：`appendCanvasImageNodes` / `createCanvasInRegistry` /
+  共享文档的写入同样不能由 MCP 进程直接读改写：`upsertCanvasNodes` / `appendCanvasImageNodes` / `createCanvasInRegistry` /
   `patchCanvasVideoNode` 经 typed `POST /api/internal/write` 交给持有端口的主进程执行，复用同一写锁、
   墓碑合并和滚动备份；请求只接受 loopback、拒绝跨站 Origin、严格校验操作/ID/JSON 形状，不接受任意路径。
   网络失败明确报错，不回退写共享 JSON。
 - **定位补发**：pushLocate 会保留最近一条（10 分钟 TTL），`GET /api/agent/locate` 供画布页挂载时
   补处理，处理完 `POST /api/agent/locate/ack` 确认（带 at，避免误清新定位）。生成时用户停在
-  「工作台」或页面没开也应在下次进入画布页时自动切到目标画布并聚焦。
+  「工作台」或页面没开也应在下次进入画布页时自动切到目标画布并聚焦。MCP / 对话生成会在占位节点
+  落盘后立即发一次 `onlyIfOffscreen` 定位；完成态只在首次定位失败或页面刚打开时兜底，不重复抢镜头。
 - MCP 工具面（`bridge/mcp.ts`，业务逻辑与协议壳分离，单测见 tests/mcp.test.ts）：
-  huiban_generate / huiban_canvases / huiban_canvas_create / huiban_nodes / huiban_models / huiban_config /
+  huiban_generate / huiban_canvases / huiban_canvas_create / huiban_nodes / huiban_selection / huiban_models / huiban_config /
   huiban_prompt_guide / huiban_optimize（后两个把提示词优化链路暴露给 agent：guide 返回
   `buildSystemSpec` 同款规范零拷贝，optimize 包 `enhancePromptDetailed`，入参默认与 /api/enhance 对齐；
   为取规范，textApi.ts 导出 LEVEL_SPECS / buildSystemSpec 两个常量，链路逻辑本身不许改）。
   huiban_generate 支持 ratio、n（1~8）、referenceImages（/api/files、http(s)、dataURL 三种入口）、
-  referenceUsage/inputFidelity、model、profileId、label。参考图入口归一化在 resolveReferenceDataUrls。
+  referenceUsage/inputFidelity、model、profileId、label；还支持 `referenceNodeIds`（从画布节点取当前主图）、
+  `connectFrom` 和 `useSelection`（默认使用浏览器选中的图片，显式参考图优先）。
+  参考图入口归一化在 resolveReferenceDataUrls。
   huiban_generate 的调用顺序是先校验（prompt / Key / canvasId）再调上游——坏 canvasId 不会先烧一张图；
   上游失败会被包成「生图接口调用失败：<原因>（检查 baseUrl / Key / 网络）」返回。工具级异常一律
   转 isError:true 的结果而非断连接，agent 可据此自纠。
@@ -252,16 +281,18 @@ composer 手动拖过高度时用 `clamp(nodeHeight, MIN/MAX_COMPOSER_NODE_HEIGH
   最后一轮禁用工具，避免生图后没机会总结。用户显式引用的同画布图片会作为边的起点连到每张新结果；
   没有显式引用、只是继续编辑上一版时，上一版结果节点同样连到新结果（`chatResultConnectFrom`：
   显式引用优先，`style` 新需求不连）；跨画布引用不连线。边由
-  `appendCanvasImageNodes(..., { connectFrom })` 幂等写入，重复事件不重复连。
+  `upsertCanvasNodes(..., { connectFrom })` 幂等写入，重复事件不重复连；生成中的占位节点
+  也走同一 upsert，保证完成/失败回填的是同一个 nodeId。
   结果摆放见 `layoutChatResultPositions`：放在参考图（或上一版结果）**右侧一列**，多张向下排并
-  避开已有节点；只有完全没有参考锚点时才退回“最右节点右侧错开”的旧布局。节点盒子用
+  避开已有节点；完全没有参考锚点时按“最右边缘”另起一列，不再斜向错开叠放。完成落位必须用
+  每张位图的真实宽高重排，并排除本轮占位节点后读取最新画布避让。节点盒子用
   `estimateCanvasBox` 按前端同口径估算（横幅 400 / 方图 320 / 竖幅 280，高 = 宽 / 比例）。
 - **思考过程**：只展示上游显式返回的 reasoning（chat 的 `reasoning_content` / `reasoning_details`，
   responses 的 reasoning summary），经 `thinking` 事件流式写入消息 `reasoning`，在助手消息里折叠展示；
   不伪造隐藏推理，上游不返回时没有该区块。
 - **上游网络失败**：`fetchAgent` 对请求建立阶段的瞬时错误（ECONNRESET / ETIMEDOUT / ENOTFOUND 等）
-  重试一次；仍失败时给出“检查 Base URL、系统代理和网络”的可执行错误，不把 `fetch failed` 原样抛给用户，
-  也不再换 JSON 协议重复打一遍。
+  最多尝试 3 次（300ms / 900ms 短退避）；仍失败时给出“检查 Base URL、系统代理和网络”的可执行错误，
+  不把 `fetch failed` 原样抛给用户，也不再换 JSON 协议重复打一遍。
 - **角色**：角色带 `temperature`（0–1，缺省 0.6），发送时固化为消息快照；澄清续答、重试都继承原 run 的
   角色、模型和引用。消息悬停同时显示角色头像和名称，不随当前选择变化。
 - **记忆**：设置里有“对话记忆”tab（窗口/预算/摘要参数）。记忆全自动运行：近期原文窗口默认 12 条 / 4500 tokens，

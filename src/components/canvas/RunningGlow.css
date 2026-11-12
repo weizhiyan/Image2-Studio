@@ -13,6 +13,8 @@
 :root {
   /* 自定义时长 token：旋转一圈 1.9s（取色台定稿值，比原来的 3s 更利落） */
   --image-node-running-flow-duration: var(--motion-loop-fluid);
+  /* 描边探出卡片的宽度：外圈圆角必须同步加宽，内圈才能和卡片 24px 圆角严丝合缝。 */
+  --image-node-running-border-width: 2px;
   /* conic 渐变旋转角：由下面的 @property 注册为 <angle> 才能被动画插值。
      未注册（老浏览器）时这条声明兜底保证 var() 有定义——角度动画退化成两端同色的
      离散翻转（视觉上等于静态渐变描边）。 */
@@ -30,6 +32,7 @@
   position: absolute;
   inset: 0;
   border-radius: var(--radius-lg);
+  corner-shape: var(--corner-smooth);
   pointer-events: none;
 }
 
@@ -38,10 +41,12 @@
 .image-node-running-border::before {
   content: '';
   position: absolute;
-  inset: -2px;
+  inset: calc(-1 * var(--image-node-running-border-width));
   box-sizing: border-box;
-  padding: 2px;
-  border-radius: inherit;
+  padding: var(--image-node-running-border-width);
+  /* 外圈多出 2px，圆角也补 2px；mask 挖掉内圈后正好回到卡片的 24px 超椭圆。 */
+  border-radius: calc(var(--radius-lg) + var(--image-node-running-border-width));
+  corner-shape: var(--corner-smooth);
   /* 默认态 = 直连：白系渐变旋转（纸色 ↔ 正文白） */
   background: conic-gradient(
     from var(--image-node-running-angle),

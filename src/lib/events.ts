@@ -31,6 +31,8 @@ export const NODE_EVENTS = {
   prompt: 'hb:image-node-prompt',
   run: 'hb:image-node-run',
   focus: 'hb:image-node-focus',
+  /** 图片加载完成：把真实像素宽高回填到节点，修正历史请求尺寸与实际位图不一致。 */
+  imageSize: 'hb:image-node-size',
   referenceRemove: 'hb:image-node-reference-remove',
   preview: 'hb:image-node-preview',
   upload: 'hb:image-node-upload',
@@ -76,6 +78,12 @@ export interface CanvasGroupActionDetail { nodeId: string }
 export interface NodePromptDetail { nodeId: string; prompt: string }
 export interface NodeRunDetail { nodeId: string; prompt: string }
 export interface NodeFocusDetail { nodeId: string }
+export interface NodeImageSizeDetail {
+  nodeId: string;
+  url: string;
+  width: number;
+  height: number;
+}
 export interface NodeReferenceRemoveDetail { nodeId: string; url: string; referenceId?: string }
 /** 开灯箱：默认看节点当前主图；传 version 则看版本宫格里指定那一版。 */
 export interface NodePreviewDetail { nodeId: string; version?: CanvasNodeVersion }

@@ -52,6 +52,7 @@ import {
 } from '@/stores/canvasStore';
 import { activeProfileOf, useSettingsStore, videoProfileOf } from '@/stores/settingsStore';
 import { imageModelOptionsOf } from '@/lib/imageModelOptions';
+import { resolveImageContinuation } from '../../bridge/imageRequestContext';
 import { pickTextProfile, resolveDirect, shouldEnhancePrompt } from '@/lib/enhance';
 import { createId } from '@/lib/id';
 import { tidyLayout, type TidyAvoidRect } from '@/lib/tidyLayout';
@@ -120,10 +121,10 @@ import {
 } from '@/lib/aspect';
 import { activeVersionOf, normalizeVersions, versionIndexOf, versionLabel } from '@/lib/versions';
 import { recoverChatRun, retrySourceForMessage } from '@/lib/chatRunEvents';
-import { answerChatRun, ChatConflictError, getChatRun, ackPendingLocate, createAsset, deleteCanvasDoc, deleteImageIfUnused, dismissVideoTask, dismissVideoTasksByNode, enhancePromptApi, enhanceVideoPromptApi, fetchImageAsReference, fetchVideoModelSchema, generate, getCanvases, getChatThreads, getHistory, getPendingLocate, putCanvasDoc, recoverVideoDownload, saveImageDataUrl, startChatRun, stopChatRun, subscribeCanvasLocate, subscribeCanvasUpdated, subscribePushedImages, subscribePushedVideos, getVideoTaskByNode, submitVideoTask, type ChatRunEvent, type PushedLocateEvent } from '@/lib/bridge';
+import { answerChatRun, ChatConflictError, getChatRun, ackPendingLocate, createAsset, deleteCanvasDoc, deleteImageIfUnused, dismissVideoTask, dismissVideoTasksByNode, enhancePromptApi, enhanceVideoPromptApi, fetchImageAsReference, fetchVideoModelSchema, generate, getCanvases, getChatThreads, getHistory, getPendingLocate, putAgentSelection, putCanvasDoc, ensureCanvasDoc, recoverVideoDownload, saveImageDataUrl, startChatRun, stopChatRun, subscribeCanvasLocate, subscribeCanvasUpdated, subscribeNodeState, subscribePushedImages, subscribePushedVideos, getVideoTaskByNode, submitVideoTask, type ChatRunEvent, type PushedLocateEvent } from '@/lib/bridge';
 import { initialOutpaintFrame, OUTPAINT_DEFAULT_ZOOM } from '@/lib/outpaint';
 import { buildVideoPrompt } from '@/lib/videoPrompt';
-import { CANVAS_GROUP_EVENTS, emitEvent, onEvent, NODE_ANIMATION_EVENTS, NODE_EVENTS, type CanvasGroupActionDetail, type CanvasGroupColorDetail, type CanvasGroupRenameDetail, type NodeAnimationDoneDetail, type NodeConnectDetail, type NodeFocusDetail, type NodePreviewDetail, type NodePromptDetail, type NodeReditCancelDetail, type NodeReditDetail, type NodeReferenceRemoveDetail, type NodeRunDetail, type NodeTextContentDetail, type NodeTextOptimizeDetail, type NodeTextOptimizeResultDetail, type NodeUploadDetail, type NodeVersionsExpandDetail, type NodeVersionSetMainDetail, type NodeVersionsFitDetail, type NodeReferenceReorderDetail, type NodeVideoOptimizeDetail, type NodeVideoRecoverDetail, type NodeVideoRunDetail, type NodeVideoCancelDetail, type NodeVideoReditDetail } from '@/lib/events';
+import { CANVAS_GROUP_EVENTS, emitEvent, onEvent, NODE_ANIMATION_EVENTS, NODE_EVENTS, type CanvasGroupActionDetail, type CanvasGroupColorDetail, type CanvasGroupRenameDetail, type NodeAnimationDoneDetail, type NodeConnectDetail, type NodeFocusDetail, type NodeImageSizeDetail, type NodePreviewDetail, type NodePromptDetail, type NodeReditCancelDetail, type NodeReditDetail, type NodeReferenceRemoveDetail, type NodeRunDetail, type NodeTextContentDetail, type NodeTextOptimizeDetail, type NodeTextOptimizeResultDetail, type NodeUploadDetail, type NodeVersionsExpandDetail, type NodeVersionSetMainDetail, type NodeVersionsFitDetail, type NodeReferenceReorderDetail, type NodeVideoOptimizeDetail, type NodeVideoRecoverDetail, type NodeVideoRunDetail, type NodeVideoCancelDetail, type NodeVideoReditDetail } from '@/lib/events';
 import NodeGenerationToolbar from '@/components/canvas/NodeGenerationToolbar';
 import NodeVideoToolbar, { type VideoModelOption } from '@/components/canvas/NodeVideoToolbar';
 import NodeSelectionToolbar from '@/components/canvas/NodeSelectionToolbar';
@@ -609,6 +610,7 @@ function CanvasWorkspace() {
   const [selectedId, setSelectedIdState] = useState('');
   const selectedIdRef = useRef('');
   const selectionIntentRef = useRef<{ nodeId: string; expiresAt: number } | null>(null);
+  const agentSelectionTimerRef = useRef(0);
   const [previewItem, setPreviewItem] = useState<ImagePreviewItem | null>(null);
   const [annotateNodeId, setAnnotateNodeId] = useState('');
   const [outpaintNodeId, setOutpaintNodeId] = useState('');
@@ -796,20 +798,45 @@ function CanvasWorkspace() {
     setSelectedIdState(resolved);
   }, []);
 
+  const scheduleAgentSelection = useCallback((canvasId: string, nodeIds: string[], primaryNodeId = '') => {
+    window.clearTimeout(agentSelectionTimerRef.current);
+    const unique = [...new Set(nodeIds.map((id) => String(id || '').trim()).filter(Boolean))];
+    const primary = primaryNodeId && unique.includes(primaryNodeId) ? primaryNodeId : '';
+    agentSelectionTimerRef.current = window.setTimeout(() => {
+      void putAgentSelection({ canvasId, nodeIds: unique, primaryNodeId: primary }).catch(() => undefined);
+    }, 120);
+  }, []);
+
+  /** 当前选中的图片节点 → 对话引用。面板关闭时选中也能在发送时被 Agent 看到。 */
+  const selectedImageRefsFor = useCallback((canvasId: string): ChatImageRef[] => {
+    return nodesRef.current
+      .filter((node) => node.selected || node.id === selectedIdRef.current)
+      .filter((node) => node.data.kind === 'image' || node.data.kind === 'reference')
+      .flatMap((node): ChatImageRef[] => {
+        const version = activeVersionOf(node.data);
+        const url = String(version?.imageUrl || node.data.imageUrl || node.data.referenceDataUrl || '').trim();
+        if (!url) return [];
+        return [{
+          canvasId,
+          nodeId: node.id,
+          ...(String(version?.id || node.data.activeVersionId || '').trim()
+            ? { versionId: String(version?.id || node.data.activeVersionId) }
+            : {}),
+          url,
+          title: String(node.data.label || node.data.prompt || '画布选中图'),
+        }];
+      });
+  }, []);
+
   const hydrateActiveCanvas = useCallback((options: {
-    interruptRunning?: boolean;
     preserveSelection?: boolean;
     preservePositions?: Map<string, { x: number; y: number }>;
   } = {}) => {
     const doc = useCanvasStore.getState().activeCanvas();
     const preserveId = options.preserveSelection ? selectedIdRef.current : '';
-    // 刷新会中断在途请求：遗留的 running 节点不可能再等到结果，标记为中断而不是永久转圈
-    const sourceNodes = (doc?.nodes || []).map((node) => {
-      if (options.interruptRunning && node.data.status === 'running') {
-        return { ...node, data: { ...node.data, status: 'error' as const, error: '生成已中断，请重新发送' } };
-      }
-      return node;
-    });
+    // running 不在这里判失败：浏览器手动生成由 bridge 继续执行并落盘，
+    // 刷新后从画布文档恢复；bridge 重启遗留的任务由 interruptStaleGenerationNodes 收尾。
+    const sourceNodes = doc?.nodes || [];
     // 规范化只处理可持久化内容；当前选中节点属于本地 React Flow 运行态，
     // 不能写回 store，否则一次远端刷新会把选中态变成新的文档版本并再次广播。
     const normalized = normalizeCanvasGraph(sourceNodes as FlowNode[], doc?.edges || []);
@@ -837,16 +864,24 @@ function CanvasWorkspace() {
   }, [setNodes, setEdges, setSelectedId]);
 
   useEffect(() => {
-    hydrateActiveCanvas({ interruptRunning: true });
+    hydrateActiveCanvas();
     // 注意：这里不再调 registerCanvas。每切一次画布就发一次只带 { name } 的 PUT，
     // 对还没建档的画布等于写一张空文档，会把它冲掉；注册由 create / rename 和
     // putCanvasDoc（整文档上桥）负责，仨者都会同步 registry。
     // activeId 变化即换画布；节点编辑不触发 hydrate
   }, [activeId, hydrateActiveCanvas]);
 
+  useEffect(() => {
+    if (!activeId) return undefined;
+    // 换画布先清空共享选中态；随后 React Flow 的 onSelectionChange 会写入新选择。
+    scheduleAgentSelection(activeId, []);
+    return () => window.clearTimeout(agentSelectionTimerRef.current);
+  }, [activeId, scheduleAgentSelection]);
+
   useEffect(() => () => {
     window.clearTimeout(persistTimerRef.current);
     window.clearTimeout(interactionReleaseTimerRef.current);
+    window.clearTimeout(agentSelectionTimerRef.current);
   }, []);
 
   const persistSoon = useCallback(() => {
@@ -901,7 +936,7 @@ function CanvasWorkspace() {
   }, [rf]);
 
   /**
-   * 生成完成后的定位：**只服务 MCP 路径**（agent 通过 huiban_generate / huiban_locate 触发）。
+   * Agent 生成 / 定位：MCP 的 huiban_generate / huiban_locate 与 AI 对话生成都会触发。
    * 浏览器里手动发送不调用它——那张卡片用户自己盯着，不该被平移。
    * 规则：结果节点整块落在视口里就不挪镜头（留 8px 余量），被滚出屏幕 / 裁掉一半才归位；
    * agent 显式调 huiban_locate 时 onlyIfOffscreen 为 false，一律归位。
@@ -1888,6 +1923,22 @@ function CanvasWorkspace() {
       showToast('暂时没有可用画布，请稍后再试');
       return;
     }
+    // 空草稿还没有 bridge 文档；对话结果要写进去，先显式建一张空文档（不会进历史列表）。
+    const targetDoc = useCanvasStore.getState().canvases.find((doc) => doc.id === targetCanvasId);
+    if (targetDoc) {
+      try {
+        if (targetDoc.nodes.length === 0 && targetDoc.edges.length === 0) {
+          await ensureCanvasDoc(targetDoc);
+        } else {
+          await putCanvasDoc(targetDoc);
+        }
+      } catch (error) {
+        chatRunStartingRef.current = false;
+        setChatRunStarting(false);
+        showToast(error instanceof Error ? error.message : '画布尚未准备好，请稍后重试');
+        return;
+      }
+    }
     const store = useChatStore.getState();
     // 线程是全局实体；没有活跃线程时才创建，当前画布只决定本次结果落点。
     const current = store.threads.find((item) => item.id === store.activeThreadId);
@@ -1895,11 +1946,16 @@ function CanvasWorkspace() {
       ? current.id
       : store.createThread(targetCanvasId);
     if (!threadId) { chatRunStartingRef.current = false; setChatRunStarting(false); return; }
+    // 用户在画布上选中的图片即使没手动加进草稿，也作为本轮参考一起发送。
+    const selectedRefs = selectedImageRefsFor(targetCanvasId);
+    const refsWithSelection = [...refs, ...selectedRefs].filter((ref, index, all) => (
+      all.findIndex((candidate) => draftKeyOf(candidate) === draftKeyOf(ref)) === index
+    ));
     // 「继续编辑」钉的基准图排在本轮引用第一位（图 1），同时作为续接源
     const base = replay.base !== undefined ? replay.base : store.draftBase;
     const effectiveRefs: ChatImageRef[] = base
-      ? [base, ...refs.filter((ref) => draftKeyOf(ref) !== draftKeyOf(base))]
-      : refs;
+      ? [base, ...refsWithSelection.filter((ref) => draftKeyOf(ref) !== draftKeyOf(base))]
+      : refsWithSelection;
     // 用户消息（引用快照：发送后草稿就清了）
     const settingsSnapshot = useSettingsStore.getState().settings;
     const activeImageProfile = activeProfileOf(settingsSnapshot);
@@ -2018,7 +2074,7 @@ function CanvasWorkspace() {
       chatRunStartingRef.current = false;
       setChatRunStarting(false);
     }
-  }, [activeId, lastMediaVersionOf, loadSettings, showToast]);
+  }, [activeId, lastMediaVersionOf, loadSettings, selectedImageRefsFor, showToast]);
 
   /** The server responds only after the terminal persistence fence. Keep the lock meanwhile. */
   const stopChatRunFlow = useCallback(() => {
@@ -2285,7 +2341,7 @@ function CanvasWorkspace() {
     // 发送前再从 bridge 取一次配置：旧标签页可能还留着恢复前的默认模型或失效 Key。
     await loadSettings();
     const settings = useSettingsStore.getState().settings;
-    const profile = activeProfileOf(settings);
+    const profile = activeProfileOf(settings, String(composer.data.profileId || ''));
     if (!profile) {
       setSettingsOpen(true);
       return fail('没有可用的生图配置，请先在「生图设置」里添加并启用模型');
@@ -2385,6 +2441,8 @@ function CanvasWorkspace() {
     // 与灵枢一致：composer 就地转成运行态——动画、尺寸、计时都长在同一张卡片上
     patchNode(nodeId, {
       status: 'running',
+      // 手动生图也由 bridge 落盘；刷新后靠这个来源区分浏览器任务和 MCP / 对话任务。
+      source: 'browser',
       // 本次 API 模式固化进运行态：白 = Image API，紫 = Responses 智能生成。
       runningDirect: direct,
       stage: enhancePrompt ? 'enhance' : 'generate',
@@ -2448,27 +2506,29 @@ function CanvasWorkspace() {
       patchNode(nodeId, { stage: 'generate', enhancedPrompt, enhanceFailed, error: enhanceNote });
     }
 
-    // Responses 多轮上下文只复用同一路配置生成的版本，避免把另一路中转站的 response id 误发出去。
-    const selectedProfileId = String(composer.data.profileId || profile.id);
-    const generationProfile = settings?.profiles.find((item) => item.id === selectedProfileId) || profile;
-    // 对话上下文链：上一轮生成结果（可能在别的节点上，由对话消息指过来）的 responseId。
-    // 与 redit 同口径：只续同一路配置、同一 Responses 主模型的版本，否则断链并在消息上讲清原因。
+    // 对话上下文链：上一轮结果或二次编辑基准。与 bridge 共用 outer/tool 校验，
+    // 新参考、标注/扩图替换或不同基准都必须重新上传，不借旧 response 丢掉素材。
     const chatPrevious = options.previousVersionId
       ? findVersionOnCanvas(nodesRef.current, options.previousVersionId)
       : undefined;
     const chainBase = chatPrevious || baseVersion;
-    const previousResponseId = !options.referenceDataUrlOverride && chainBase?.responseId
-      && apiMode === 'responses'
-      && chainBase.responseProfileId === generationProfile.id
-      && chainBase.responseModel === generationProfile.responsesModel
-      ? chainBase.responseId
-      : undefined;
+    const continuation = resolveImageContinuation({
+      base: chainBase,
+      profile,
+      apiMode,
+      model: String(composer.data.model || profile.model),
+      isEdit: referenceUsage === 'edit',
+      hasNewReferences: Boolean(options.referenceDataUrlOverride)
+        || externalImageCount > 0
+        || (hasEditingBase && chainBase?.id !== baseVersion?.id),
+    });
+    const { previousResponseId, previousImageGenerationCallId, reusePreviousImage } = continuation;
     // 对话消息里的上下文徽标：链上了写 baseVersionId + responseId，断了写原因
     let chainContext: ChatMessageContext | undefined;
     if (chatPrevious) {
       chainContext = previousResponseId
         ? { baseVersionId: chatPrevious.id, responseId: previousResponseId, referenceCount: referenceDataUrls.length }
-        : { baseVersionId: chatPrevious.id, referenceCount: referenceDataUrls.length, resetReason: '模型配置或接口模式变了，上下文从这里重新开始' };
+        : { baseVersionId: chatPrevious.id, referenceCount: referenceDataUrls.length, resetReason: continuation.resetReason };
     } else if (options.previousVersionId) {
       chainContext = { referenceCount: referenceDataUrls.length, resetReason: '上一轮的结果已不在画布上，上下文从这里重新开始' };
     }
@@ -2485,9 +2545,10 @@ function CanvasWorkspace() {
       n: imageCount,
       canvasId: activeId,
       nodeId,
-      profileId: String(composer.data.profileId || profile.id),
+      profileId: profile.id,
       previousResponseId,
-      previousImageGenerationCallId: chainBase?.imageGenerationCallId,
+      previousImageGenerationCallId,
+      reusePreviousImage,
       referenceUsage,
     });
 
@@ -2506,15 +2567,18 @@ function CanvasWorkspace() {
     const createdVersions: CanvasNodeVersion[] = [];
     for (const image of generated) {
       const natural = await imageNaturalSize(image.url);
+      const actualWidth = Number(image.width) > 0 ? Number(image.width) : natural.width;
+      const actualHeight = Number(image.height) > 0 ? Number(image.height) : natural.height;
       createdVersions.push({
-        id: createId('ver'),
+        // bridge 已在响应前把同一版本 id 写进画布文档；刷新恢复时两边不会各造一版。
+        id: String(image.versionId || '').trim() || createId('ver'),
         imageUrl: image.url,
         fileName: image.fileName,
         prompt: effectivePrompt,
         model,
-        size,
-        width: natural.width || undefined,
-        height: natural.height || undefined,
+        size: actualWidth > 0 && actualHeight > 0 ? `${actualWidth}x${actualHeight}` : size,
+        width: actualWidth || undefined,
+        height: actualHeight || undefined,
         createdAt,
         finishedAt,
         enhancedPrompt,
@@ -2524,24 +2588,29 @@ function CanvasWorkspace() {
         responseId: image.responseId,
         imageGenerationCallId: image.imageGenerationCallId,
         responseModel: image.responseModel,
-        responseProfileId: image.responseId ? generationProfile.id : undefined,
+        responseProfileId: image.responseId ? profile.id : undefined,
       });
     }
     const version = createdVersions[0];
+    const generatedVersionIds = new Set(createdVersions.map((item) => item.id));
     // 出图落在同一节点：卡片形状跟着真实位图比例走
     patchNode(nodeId, {
       kind: 'image',
       status: 'done',
+      source: 'browser',
       // 出图即清错：上一轮的整理失败提示不能粘在成功卡片上
       error: '',
       runningDirect: undefined,
-      versions: [...normalizeVersions(composer.data), ...createdVersions],
+      versions: [
+        ...normalizeVersions(composer.data).filter((item) => !generatedVersionIds.has(item.id)),
+        ...createdVersions,
+      ],
       activeVersionId: version.id,
       reditBaseVersionId: undefined,
       composerEditing: undefined,
       imageUrl: first.url,
       fileName: first.fileName,
-      size,
+      size: version.size,
       model,
       width: version.width,
       height: version.height,
@@ -2552,7 +2621,7 @@ function CanvasWorkspace() {
       responseId: first.responseId,
       imageGenerationCallId: first.imageGenerationCallId,
       responseModel: first.responseModel,
-      responseProfileId: first.responseId ? generationProfile.id : undefined,
+      responseProfileId: first.responseId ? profile.id : undefined,
       finishedAt,
     });
     // 手动生成不挪镜头：结果就落在用户正看着的那张卡片上，平移反而打断他。
@@ -2573,6 +2642,42 @@ function CanvasWorkspace() {
     patchNode(nodeId, target?.data.kind === 'video'
       ? { prompt, videoPromptError: '', videoPromptOriginal: undefined, videoPromptOptimized: false }
       : { prompt, videoPromptError: '' });
+  }), [patchNode]);
+
+  useEffect(() => onEvent<NodeImageSizeDetail>(NODE_EVENTS.imageSize, ({ nodeId, url, width, height }) => {
+    const node = nodesRef.current.find((candidate) => candidate.id === nodeId);
+    if (!node || width <= 0 || height <= 0) return;
+    const currentUrl = String(
+      activeVersionOf(node.data)?.imageUrl
+      || node.data.imageUrl
+      || node.data.referenceDataUrl
+      || '',
+    ).trim();
+    if (url && currentUrl && url !== currentUrl) return;
+    const actualSize = `${width}x${height}`;
+    const versions = Array.isArray(node.data.versions)
+      ? node.data.versions as CanvasNodeVersion[]
+      : null;
+    const activeVersionId = String(node.data.activeVersionId || activeVersionOf(node.data)?.id || '');
+    let versionsChanged = false;
+    const nextVersions = versions?.map((version) => {
+      if (String(version.id || '') !== activeVersionId) return version;
+      if (version.width === width && version.height === height && version.size === actualSize) return version;
+      versionsChanged = true;
+      return { ...version, width, height, size: actualSize };
+    });
+    if (
+      node.data.width === width
+      && node.data.height === height
+      && node.data.size === actualSize
+      && !versionsChanged
+    ) return;
+    patchNode(nodeId, {
+      width,
+      height,
+      size: actualSize,
+      ...(versionsChanged && nextVersions ? { versions: nextVersions } : {}),
+    });
   }), [patchNode]);
 
   useEffect(() => onEvent<NodeTextContentDetail>(NODE_EVENTS.textContent, ({ nodeId, text }) => {
@@ -3102,6 +3207,7 @@ function CanvasWorkspace() {
   useEffect(() => onEvent<NodeReditCancelDetail>(NODE_EVENTS.reditCancel, ({ nodeId }) => cancelRedit(nodeId)), [cancelRedit]);
 
   useEffect(() => onEvent<NodeVersionSetMainDetail>(NODE_EVENTS.versionSetMain, ({ nodeId, versionId }) => {
+    if (nodesRef.current.find((node) => node.id === nodeId)?.data.status === 'running') return;
     setVersionMain(nodeId, versionId);
   }), [setVersionMain]);
 
@@ -3197,6 +3303,9 @@ function CanvasWorkspace() {
             imageUrl: event.url,
             fileName: event.fileName,
             size: event.size || existing.data.size,
+            ...(Number(event.width) > 0 && Number(event.height) > 0
+              ? { width: Number(event.width), height: Number(event.height) }
+              : {}),
             model: event.model || existing.data.model,
             enhancedPrompt: event.usedPrompt && event.usedPrompt !== event.prompt ? event.usedPrompt : '',
             revisedPrompt: String(event.revisedPrompt || ''),
@@ -3230,6 +3339,9 @@ function CanvasWorkspace() {
           imageUrl: event.url,
           fileName: event.fileName,
           size: event.size,
+          ...(Number(event.width) > 0 && Number(event.height) > 0
+            ? { width: Number(event.width), height: Number(event.height) }
+            : {}),
           model: event.model,
           // 对话 agent 推来的图保留 source=chat：PUT 快照保护与自动定位都认它
           source: event.source === 'chat' ? 'chat' : 'mcp',
@@ -3241,10 +3353,63 @@ function CanvasWorkspace() {
     });
   }, [activeId, advanceCursor, appendNode, cursor, markFreshResultNode, patchNode, revealResultNode]);
 
+  /* ── 生成生命周期：MCP / 对话都在调用生图前先推一个 running 占位节点 ── */
+  useEffect(() => {
+    if (!activeId) return undefined;
+    return subscribeNodeState(activeId, (event) => {
+      const incoming = event.node as FlowNode | undefined;
+      const existing = nodesRef.current.find((node) => node.id === event.nodeId);
+      if (event.phase === 'started') {
+        if (incoming) {
+          if (existing) {
+            patchNode(existing.id, incoming.data);
+          } else {
+            appendNode({ ...incoming, selected: false } as FlowNode);
+          }
+        } else if (existing) {
+          patchNode(existing.id, { status: 'running' });
+        }
+        return;
+      }
+      if (event.phase === 'done') {
+        if (incoming) {
+          if (existing) patchNode(existing.id, incoming.data);
+          else appendNode({ ...incoming, selected: false } as FlowNode);
+          markFreshResultNode(event.nodeId);
+        } else if (existing) {
+          patchNode(existing.id, { status: 'done', error: undefined, finishedAt: new Date().toISOString() });
+        }
+        return;
+      }
+      const message = event.error || (event.phase === 'stopped' ? '生成已停止' : '生成失败，请重新生成');
+      if (incoming) {
+        const failed = {
+          ...incoming,
+          data: {
+            ...incoming.data,
+            status: 'error' as const,
+            error: message,
+            runningDirect: undefined,
+            finishedAt: new Date().toISOString(),
+          },
+        } as FlowNode;
+        if (existing) patchNode(existing.id, failed.data);
+        else appendNode({ ...failed, selected: false });
+      } else if (existing) {
+        patchNode(existing.id, {
+          status: 'error',
+          error: message,
+          runningDirect: undefined,
+          finishedAt: new Date().toISOString(),
+        });
+      }
+    });
+  }, [activeId, appendNode, markFreshResultNode, patchNode]);
+
   /* ── 局域网其他页面写入同一画布：拉最新文档合并并刷新视图，看到对方的上传与编辑 ── */
   useEffect(() => {
     if (!activeId) return undefined;
-    return subscribeCanvasUpdated(activeId, (event) => {
+    const refresh = (updatedAt?: string) => {
       // 本地删除/编辑还没上桥时忽略远端水合：否则旧快照会把刚删掉的节点带回来
       if (localWritePendingRef.current) return;
       if (nodeInteractionRef.current || nodePositionProtectionRef.current.size > 0) {
@@ -3253,10 +3418,11 @@ function CanvasWorkspace() {
       }
       void (async () => {
         const local = useCanvasStore.getState().canvases.find((doc) => doc.id === activeId);
-        if (Date.parse(event.updatedAt) <= Date.parse(local?.updatedAt || '')) return;
+        if (updatedAt && Date.parse(updatedAt) <= Date.parse(local?.updatedAt || '')) return;
         const localUpdatedAt = local?.updatedAt || '';
         try {
           const remote = await getCanvases();
+          if (useCanvasStore.getState().activeId !== activeId) return;
           if (nodeInteractionRef.current) {
             remoteUpdatePendingRef.current = true;
             return;
@@ -3273,13 +3439,21 @@ function CanvasWorkspace() {
           useCanvasStore.getState().mergeCanvases(remote);
           const merged = useCanvasStore.getState().canvases.find((doc) => doc.id === activeId);
           if (merged && merged !== previous && !nodeInteractionRef.current) {
-            hydrateActiveCanvas({ interruptRunning: false, preserveSelection: true });
+            hydrateActiveCanvas({ preserveSelection: true });
           }
         } catch {
           /* 单次拉取失败不打断本地使用，下一次写入事件再合并 */
         }
       })();
-    });
+    };
+    const unsubscribe = subscribeCanvasUpdated(activeId, (event) => refresh(event.updatedAt), () => refresh());
+    const timer = window.setInterval(() => {
+      if (nodesRef.current.some((node) => node.data.status === 'running' && node.data.kind !== 'video')) refresh();
+    }, 5_000);
+    return () => {
+      unsubscribe();
+      window.clearInterval(timer);
+    };
   }, [activeId, hydrateActiveCanvas]);
 
   const refreshAfterNodeInteraction = useCallback((force = false) => {
@@ -3328,7 +3502,6 @@ function CanvasWorkspace() {
         const merged = useCanvasStore.getState().canvases.find((doc) => doc.id === canvasId);
         if (merged && (force || merged !== previous) && (force || !nodeInteractionRef.current)) {
           hydrateActiveCanvas({
-            interruptRunning: false,
             preserveSelection: true,
             preservePositions,
           });
@@ -4526,10 +4699,21 @@ function CanvasWorkspace() {
           settingsOpen={settingsOpen}
           direct={direct}
           onSwitch={(id) => {
+            const state = useCanvasStore.getState();
+            const current = state.canvases.find((doc) => doc.id === state.activeId);
+            if (current && current.id !== id && current.nodes.length === 0 && current.edges.length === 0) {
+              state.discardEmptyCanvas(current.id);
+              void deleteCanvasDoc(current.id);
+            }
             setActive(id);
             playEntry();
           }}
           onCreate={() => {
+            const state = useCanvasStore.getState();
+            const current = state.canvases.find((doc) => doc.id === state.activeId);
+            if (current && current.nodes.length === 0 && current.edges.length === 0) {
+              void deleteCanvasDoc(current.id);
+            }
             createCanvas();
             playEntry();
           }}
@@ -4554,6 +4738,14 @@ function CanvasWorkspace() {
           onConnect={onConnect}
           onSelectionChange={({ nodes: selected }) => {
             const nextSelectedId = selected.length === 1 ? String(selected[0].id) : '';
+            const selectedImages = selected.filter((node) => (
+              node.data.kind === 'image' || node.data.kind === 'reference'
+            ));
+            const selectedImageIds = selectedImages.map((node) => String(node.id));
+            const primaryImageId = selectedImageIds.includes(selectedIdRef.current)
+              ? selectedIdRef.current
+              : (selectedImageIds[0] || '');
+            if (activeId) scheduleAgentSelection(activeId, selectedImageIds, primaryImageId);
             const intent = selectionIntentRef.current;
             if (intent && Date.now() < intent.expiresAt) {
               if (nextSelectedId !== intent.nodeId) return;
@@ -4652,9 +4844,6 @@ function CanvasWorkspace() {
           // 删除前先播放缩小退场：返回的 Promise 会推迟 ReactFlow 的真正移除
           onBeforeDelete={async ({ nodes: nodesToRemove }) => {
             if (nodesToRemove.length === 0) return true;
-            // 在退场动画期间就挡住其他标签页的旧快照，不能等节点真正移除后再保护。
-            localWritePendingRef.current = true;
-            remoteSyncRevisionRef.current += 1;
             const expandedNodes = new Map<string, FlowNode>(
               nodesToRemove.map((node) => [String(node.id), node]),
             );
@@ -4663,6 +4852,17 @@ function CanvasWorkspace() {
               collectCanvasGroupMembers(nodesRef.current as CanvasNode[], node.id)
                 .forEach((member) => expandedNodes.set(member.id, member as FlowNode));
             });
+            // 生成中的节点由 bridge 持有在途结果；删除后结果再回来会复活，
+            // 也会让用户误以为任务被取消。等生成完成后再允许删除。
+            if ([...expandedNodes.values()].some((node) => (
+              node.data.status === 'running' || node.data.videoStatus === 'running'
+            ))) {
+              showToast('生成中的节点不能删除，请等待生成完成');
+              return false;
+            }
+            // 在退场动画期间就挡住其他标签页的旧快照，不能等节点真正移除后再保护。
+            localWritePendingRef.current = true;
+            remoteSyncRevisionRef.current += 1;
             const removedIds = new Set(expandedNodes.keys());
             const expandedEdges = new Map<string, Edge>();
             edgesRef.current.forEach((edge) => {
@@ -4691,6 +4891,8 @@ function CanvasWorkspace() {
             setEditingNodeId('');
             selectionIntentRef.current = null;
             setSelectedId('');
+            window.clearTimeout(agentSelectionTimerRef.current);
+            if (activeId) void putAgentSelection({ canvasId: activeId, nodeIds: [] }).catch(() => undefined);
             // 点空白处把所有展开的版本宫格收起来（节点侧还有 Esc / 换选兜底）
             emitEvent(NODE_EVENTS.versionsCollapse, {});
             setAddMenu(null);

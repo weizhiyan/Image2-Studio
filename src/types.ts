@@ -192,8 +192,8 @@ export interface CanvasNodeData {
   createdAt?: string;
   /** image：生成完成的时间。 */
   finishedAt?: string;
-  /** 外部来源：mcp = Codex / 其他 Agent 推来的图。 */
-  source?: 'browser' | 'mcp';
+  /** 外部来源：mcp = Codex / 其他 Agent 推来的图；chat = 内置 AI 对话生图。 */
+  source?: 'browser' | 'mcp' | 'chat';
   width?: number;
   height?: number;
 
@@ -384,6 +384,11 @@ export interface MediaSettings {
 export interface ImageResult {
   fileName: string;
   url: string;
+  /** bridge 为手动生图预生成的版本 id，刷新恢复时与文档里的版本链保持一致。 */
+  versionId?: string;
+  /** 最终位图的真实像素尺寸；可能与请求的 size 不同。 */
+  width?: number;
+  height?: number;
   revisedPrompt?: string;
   responseId?: string;
   imageGenerationCallId?: string;
