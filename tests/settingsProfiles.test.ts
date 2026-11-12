@@ -351,6 +351,11 @@ describe('默认模型必须落在已勾选列表里（resolveDefaultModel）', 
     });
   });
 
+  it('新生图 / 语言配置不预填服务地址、模型或 Key', () => {
+    expect(createProfile('生图')).toMatchObject({ baseUrl: '', model: '', apiKey: '', responsesModel: '' });
+    expect(createProfile('语言', 'text')).toMatchObject({ baseUrl: '', model: '', apiKey: '', responsesModel: '' });
+  });
+
   it('保存空白视频配置时不补入 OpenAI URL 或生图尺寸，也不作为可用模型', async () => {
     const draft = {
       ...videoProfile('video-empty-save'),

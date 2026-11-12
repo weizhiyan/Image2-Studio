@@ -27,7 +27,7 @@ export function resolveResponseModel(profile: { responsesModel?: string }, reque
     const candidate = value?.trim();
     if (candidate && candidate !== 'GPT') return candidate;
   }
-  return 'gpt-5.5';
+  return '';
 }
 
 export function resolveImageContinuation(input: {

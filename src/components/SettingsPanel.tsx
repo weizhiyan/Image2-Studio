@@ -236,8 +236,6 @@ export function ProfileRow({
   );
 }
 
-/** 旧配置没有语言模型时，Responses 链路的兼容兜底。 */
-const DEFAULT_RESPONSES_MODEL = 'gpt-5.5';
 const DEFAULT_CUSTOM_VIDEO_CONFIG: CustomVideoApiConfig = {
   createPath: '/videos',
   pollPath: '/videos/{{taskId}}',
@@ -380,7 +378,7 @@ export default function SettingsPanel({ onClose }: SettingsPanelProps) {
             kind: profile.kind || 'image',
             textFormat: profile.textFormat || 'auto',
             imageApiMode: profile.imageApiMode || 'images',
-            responsesModel: profile.responsesModel || DEFAULT_RESPONSES_MODEL,
+            responsesModel: profile.responsesModel || '',
             videoApiMode: profile.videoApiMode || 'auto',
             videoCustomConfig: profile.videoCustomConfig || DEFAULT_CUSTOM_VIDEO_CONFIG,
             keyConfigured: profile.keyConfigured,
@@ -572,7 +570,7 @@ export default function SettingsPanel({ onClose }: SettingsPanelProps) {
     const draft: ProfileDraft = {
       id: `new_${Date.now().toString(36)}`,
       name: nameByKind[kind] || `配置 ${index}`,
-      baseUrl: kind === 'video' ? '' : 'https://api.openai.com/v1',
+      baseUrl: '',
       apiKey: '',
       model: '',
       defaultSize: kind === 'video' ? '' : SIZE_PRESETS[0],
@@ -582,7 +580,7 @@ export default function SettingsPanel({ onClose }: SettingsPanelProps) {
       kind,
       textFormat: 'auto',
       imageApiMode: 'images',
-      responsesModel: DEFAULT_RESPONSES_MODEL,
+      responsesModel: '',
       videoApiMode: 'auto',
       videoCustomConfig: DEFAULT_CUSTOM_VIDEO_CONFIG,
       keyConfigured: false,
@@ -1159,7 +1157,7 @@ export default function SettingsPanel({ onClose }: SettingsPanelProps) {
                       <input
                         className="model-config-input"
                         value={selected.baseUrl}
-                        placeholder={selected.kind === 'video' ? '填写中转站提供的视频 API Base URL' : 'https://api.openai.com/v1'}
+                        placeholder={selected.kind === 'video' ? '填写中转站提供的视频 API Base URL' : '填写服务商提供的 API Base URL'}
                         onChange={(event) => patchSelected({ baseUrl: event.target.value })}
                       />
                     </div>

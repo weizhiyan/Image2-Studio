@@ -266,12 +266,6 @@ export function normalizeCustomVideoApiConfig(value: unknown, knownApiKey = ''):
   return config;
 }
 
-/** 默认模型按类型分开：视频不沿用生图的 gpt-image-1，那家伙在视频接口上必然报错。 */
-function defaultModelForKind(kind: ProfileKind): string {
-  if (kind === 'text' || kind === 'video') return '';
-  return 'gpt-image-1';
-}
-
 function defaultNameForKind(kind: ProfileKind): string {
   if (kind === 'text') return '语言模型';
   if (kind === 'video') return '视频模型';
@@ -282,16 +276,16 @@ export function createProfile(name: string, kind: ProfileKind = 'image'): ModelP
   return {
     id: createProfileId(),
     name: name.trim() || defaultNameForKind(kind),
-    baseUrl: kind === 'video' ? '' : 'https://api.openai.com/v1',
+    baseUrl: '',
     apiKey: '',
-    model: defaultModelForKind(kind),
+    model: '',
     defaultSize: kind === 'video' ? '' : '1024x1024',
     models: [],
     enabledModels: [],
     kind,
     textFormat: 'auto',
     imageApiMode: 'images',
-    responsesModel: 'gpt-5.5',
+    responsesModel: '',
     videoApiMode: kind === 'video' ? 'auto' : undefined,
     videoCustomConfig: kind === 'video' ? defaultCustomVideoApiConfig() : undefined,
     enabled: true,
@@ -604,7 +598,7 @@ export async function writeSettings(input: {
         : resolveDefaultModel(requestedModel, enabledModels) || previous?.model || '';
       const baseUrl = draftKind === 'video'
         ? String(draft.baseUrl ?? previous?.baseUrl ?? '').trim()
-        : draftBaseUrl || previous?.baseUrl || 'https://api.openai.com/v1';
+        : draftBaseUrl || previous?.baseUrl || '';
       const defaultSize = draftKind === 'video'
         ? String(draft.defaultSize ?? previous?.defaultSize ?? '').trim()
         : String(draft.defaultSize || '').trim() || previous?.defaultSize || '1024x1024';
@@ -621,7 +615,7 @@ export async function writeSettings(input: {
         kind: draftKind,
         textFormat: normalizeTextApiFormat(draft.textFormat ?? previous?.textFormat),
         imageApiMode: normalizeImageApiMode(draft.imageApiMode ?? previous?.imageApiMode),
-        responsesModel: String(draft.responsesModel || previous?.responsesModel || 'gpt-5.5').trim() || 'gpt-5.5',
+        responsesModel: String(draft.responsesModel || previous?.responsesModel || '').trim(),
         videoApiMode: draftKind === 'video'
           ? normalizeVideoApiMode(draft.videoApiMode ?? previous?.videoApiMode)
           : undefined,

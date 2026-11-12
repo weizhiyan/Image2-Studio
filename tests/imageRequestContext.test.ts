@@ -13,8 +13,8 @@ describe('图像请求模型与续接', () => {
     expect(resolveResponseModel(profile)).toBe('reasoner');
     expect(resolveResponseModel(profile, ' outer-override ')).toBe('outer-override');
     expect(resolveResponseModel(profile, 'GPT')).toBe('reasoner');
-    expect(resolveResponseModel({ responsesModel: ' GPT ' })).toBe('gpt-5.5');
-    expect(resolveResponseModel({ responsesModel: ' ' })).toBe('gpt-5.5');
+    expect(resolveResponseModel({ responsesModel: ' GPT ' })).toBe('');
+    expect(resolveResponseModel({ responsesModel: ' ' })).toBe('');
   });
 
   it('同一基准及有效 outer/tool 配置可续接，带上明确去重许可', () => {
