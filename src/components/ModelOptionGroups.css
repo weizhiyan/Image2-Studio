@@ -1,0 +1,21 @@
+.model-option-groups {
+  display: grid;
+  gap: calc(var(--spacing-1) / 2);
+  min-width: 0;
+}
+
+.model-option-group {
+  display: grid;
+  gap: calc(var(--spacing-1) / 2);
+  min-width: 0;
+}
+
+.model-option-group-heading {
+  margin: 0;
+  padding: calc(var(--spacing-1) / 2) var(--spacing-2);
+  color: var(--color-text-tertiary);
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-medium);
+  line-height: var(--line-height-normal);
+  overflow-wrap: anywhere;
+}

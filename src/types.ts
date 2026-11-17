@@ -144,6 +144,7 @@ export interface CanvasNodeData {
   resolution?: '1K' | '2K' | '4K';
   /** composer：一次生成几张（1~8），结果作为多个版本挂回同一节点。 */
   imageCount?: number;
+  outputFormat?: 'png' | 'gif' | 'svg';
   /** 兼容旧字段：true = Image API，false = Responses API；不设则跟随全局 API 模式。 */
   direct?: boolean;
   /**
@@ -248,6 +249,7 @@ export interface CanvasNodeData {
 
 export interface CanvasDoc {
   id: string;
+  hasChat?: boolean;
   name: string;
   nodes: CanvasNode[];
   edges: CanvasEdge[];
@@ -550,6 +552,7 @@ export interface ChatClarificationOption {
 
 export interface ChatClarificationQuestion {
   id: string;
+  purpose?: 'clarification' | 'creative';
   title: string;
   description?: string;
   type?: 'single' | 'multiple' | 'text';

@@ -585,6 +585,11 @@ function drawMatrix(
   }
 }
 
+export function matrixViewport(width: number, height: number) {
+  const scale = Math.max(1, Math.min(width, height)) / 320;
+  return { width: width / scale, height: height / scale, scale };
+}
+
 export function RunningMatrix({ params, mode, inline = false }: { params: MatrixParams; mode: MatrixMode; inline?: boolean }) {
   const boxRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -612,41 +617,67 @@ export function RunningMatrix({ params, mode, inline = false }: { params: Matrix
     let h = 0;
     let builtGap = -1;
     let raf = 0;
+    let visible = true;
+    const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
 
     const rebuild = () => {
       // clientWidth / clientHeight 是布局尺寸，不受 React Flow 的缩放 transform 影响。
       // 用 getBoundingClientRect() 会把屏幕缩放也吃进来，点阵在卡片里就会被二次放大 / 缩小。
-      w = Math.max(1, Math.round(box.clientWidth));
-      h = Math.max(1, Math.round(box.clientHeight));
+      const width = Math.max(1, Math.round(box.clientWidth));
+      const height = Math.max(1, Math.round(box.clientHeight));
+      const viewport = inline ? matrixViewport(width, height) : { width, height, scale: 1 };
+      w = viewport.width;
+      h = viewport.height;
       const dpr = Math.min(window.devicePixelRatio || 1, 2);
-      canvas.width = Math.round(w * dpr);
-      canvas.height = Math.round(h * dpr);
-      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      canvas.width = Math.round(width * dpr);
+      canvas.height = Math.round(height * dpr);
+      ctx.setTransform(dpr * viewport.scale, 0, 0, dpr * viewport.scale, 0, 0);
       dots = buildDots(w, h, paramsRef.current.gap, palette);
       builtGap = paramsRef.current.gap;
     };
 
     let prev = performance.now();
     const frame = (now: number) => {
+      raf = 0;
+      if (!visible || document.hidden) return;
       const dt = now - prev;
       prev = now;
       // 间距是唯一影响点位的参数：变了才重建，其余每帧读最新值
       if (paramsRef.current.gap !== builtGap) rebuild();
       // 时钟走 startRef：切换模式时把它拨回 0，调参的人一按就看到完整一遍
-      drawMatrix(ctx, dots, w, h, paramsRef.current, modeRef.current, now - startRef.current, dt);
-      raf = window.requestAnimationFrame(frame);
+      drawMatrix(ctx, dots, w, h, paramsRef.current, reducedMotion.matches ? 'static' : modeRef.current, now - startRef.current, dt);
+      if (!reducedMotion.matches) raf = window.requestAnimationFrame(frame);
+    };
+
+    const resume = () => {
+      if (raf) window.cancelAnimationFrame(raf);
+      raf = 0;
+      if (visible && !document.hidden) {
+        prev = performance.now();
+        raf = window.requestAnimationFrame(frame);
+      }
     };
 
     rebuild();
-    raf = window.requestAnimationFrame(frame);
+    resume();
 
-    const ro = new ResizeObserver(() => rebuild());
+    const ro = new ResizeObserver(() => { rebuild(); resume(); });
     ro.observe(box);
+    const intersection = new IntersectionObserver(([entry]) => {
+      visible = entry.isIntersecting;
+      resume();
+    });
+    intersection.observe(box);
+    document.addEventListener('visibilitychange', resume);
+    reducedMotion.addEventListener('change', resume);
     return () => {
       window.cancelAnimationFrame(raf);
       ro.disconnect();
+      intersection.disconnect();
+      document.removeEventListener('visibilitychange', resume);
+      reducedMotion.removeEventListener('change', resume);
     };
-  }, []);
+  }, [inline]);
 
   return (
     <div className={`running-matrix${inline ? ' is-inline' : ''}`} ref={boxRef} aria-hidden="true">

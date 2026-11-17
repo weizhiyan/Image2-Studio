@@ -49,11 +49,12 @@ describe('fidelity 联动（GPT-image input_fidelity）', () => {
 });
 
 describe('直连兜底注入 directStyleNote', () => {
-  it('style + 编号段 → 前缀场景约束', async () => {
+  it('style + 编号段 → 按用户用途补充说明，允许保留指定主体和版式', async () => {
     const { directStyleNote } = await import('../bridge/textApi');
     const out = directStyleNote('附带参考图编号（按提供顺序）：图1、图2。\n根据图1风格生成', 'style');
-    expect(out.startsWith('[风格参考约束]')).toBe(true);
-    expect(out).toContain('主体与构图都不同于参考图');
+    expect(out.startsWith('[参考图使用说明]')).toBe(true);
+    expect(out).toContain('用户明确要求保留的身份、内容和布局仍须保留');
+    expect(out).not.toContain('主体与构图都不同于参考图');
     expect(out).toContain('根据图1风格生成');
   });
 

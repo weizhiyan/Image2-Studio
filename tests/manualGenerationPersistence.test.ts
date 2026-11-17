@@ -8,6 +8,12 @@ process.env.HUIBAN_DATA_ROOT = root;
 
 const mocks = vi.hoisted(() => ({
   generateImages: vi.fn(),
+  enhancePromptDetailed: vi.fn(),
+}));
+
+vi.mock('../bridge/textApi.js', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../bridge/textApi')>(),
+  enhancePromptDetailed: mocks.enhancePromptDetailed,
 }));
 
 vi.mock('../bridge/imageApi.js', async (importOriginal) => {
@@ -16,6 +22,7 @@ vi.mock('../bridge/imageApi.js', async (importOriginal) => {
 });
 
 const { createHttpServer } = await import('../bridge/http');
+const { MEDIA_DIR } = await import('../bridge/paths');
 const server = createHttpServer();
 let base = '';
 
@@ -26,6 +33,7 @@ const docsFile = path.join(root, 'canvas-docs.json');
 const readDocs = async () => JSON.parse(await fs.readFile(docsFile, 'utf8'));
 
 beforeAll(async () => {
+  await fs.mkdir(MEDIA_DIR, { recursive: true });
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   const address = server.address();
   if (!address || typeof address === 'string') throw new Error('missing test port');
@@ -34,6 +42,7 @@ beforeAll(async () => {
 
 beforeEach(async () => {
   mocks.generateImages.mockReset();
+  mocks.enhancePromptDetailed.mockReset();
   await fs.writeFile(settingsFile, JSON.stringify({
     profiles: [{
       id: 'image-profile',
@@ -76,6 +85,58 @@ afterAll(async () => {
 });
 
 describe('浏览器手动生图持久化', () => {
+  it('自动优化返回的比例进入实际生成请求和落盘记录', async () => {
+    const settings = JSON.parse(await fs.readFile(settingsFile, 'utf8'));
+    settings.profiles.push({ ...settings.profiles[0], id: 'text-profile', kind: 'text', model: 'text-model' });
+    settings.textProfileId = 'text-profile';
+    await fs.writeFile(settingsFile, JSON.stringify(settings));
+    mocks.enhancePromptDetailed.mockResolvedValue({ prompt: '竖版2:3开业海报，主标题突出，活动区域分组。', aspectRatio: '2:3', usage: 'style' });
+    const enhanced = await fetch(`${base}/api/enhance`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prompt: '做张开业海报', size: '1024x1024', aspectRatio: 'auto', referenceSize: '1536x1024' }),
+    });
+    expect(enhanced.status).toBe(200);
+    const result = (await enhanced.json()).data;
+    expect(result.aspectRatio).toBe('2:3');
+    expect(mocks.enhancePromptDetailed).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ aspectRatio: 'auto', referenceSize: '1536x1024' }));
+    const { planImageGeneration, resolvePlannedImageSize } = await import('../src/lib/imageGenerationPlan');
+    const plan = planImageGeneration({ prompt: '做张开业海报', ratio: 'auto', optimize: true, defaultSize: '1024x1024' });
+    const size = resolvePlannedImageSize(plan, result);
+    mocks.generateImages.mockResolvedValue([{ url: '/api/files/planned.png', fileName: 'planned.png' }]);
+    const response = await fetch(`${base}/api/generate`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prompt: result.prompt, originalPrompt: '做张开业海报', size, canvasId: 'c1', nodeId: 'manual' }),
+    });
+    expect(response.status).toBe(200);
+    expect(mocks.generateImages).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ size, prompt: result.prompt }));
+    const node = (await readDocs()).c1.nodes.find((item: { id: string }) => item.id === 'manual');
+    expect(node.data.size).toBe(size);
+    expect(node.data.enhancedPrompt).toBe(result.prompt);
+  });
+
+  it('传递 SVG 输出格式并按真实宽高保存到画布', async () => {
+    mocks.generateImages.mockResolvedValue([{ url: '/api/files/manual.svg', fileName: 'manual.svg', width: 1600, height: 900 }]);
+    const response = await fetch(`${base}/api/generate`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prompt: '测试矢量图', canvasId: 'c1', nodeId: 'manual', outputFormat: 'svg' }),
+    });
+    expect(response.status).toBe(200);
+    expect(mocks.generateImages).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ outputFormat: 'svg' }));
+    const node = (await readDocs()).c1.nodes.find((item: { id: string }) => item.id === 'manual');
+    expect(node.data).toMatchObject({ status: 'done', fileName: 'manual.svg', outputFormat: 'svg', width: 1600, height: 900 });
+  });
+
+  it('SVG 以正确 MIME 和隔离策略返回，保留矢量源文件', async () => {
+    const source = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 900"><rect width="1600" height="900" fill="red"/></svg>';
+    await fs.writeFile(path.join(MEDIA_DIR, 'test.svg'), source);
+    const response = await fetch(`${base}/api/files/test.svg`);
+    expect(response.status).toBe(200);
+    expect(response.headers.get('content-type')).toBe('image/svg+xml');
+    expect(response.headers.get('content-security-policy')).toContain("default-src 'none'");
+    expect(response.headers.get('x-content-type-options')).toBe('nosniff');
+    expect(await response.text()).toBe(source);
+  });
+
   it('手动 Responses 请求使用图像供应商独立配置的主模型并传递纯基准续接标记', async () => {
     const settings = JSON.parse(await fs.readFile(settingsFile, 'utf8'));
     settings.direct = false;

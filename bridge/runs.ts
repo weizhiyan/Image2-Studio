@@ -5,13 +5,15 @@ import { MEDIA_DIR } from './paths.js';
 import { imageExtensionOf } from './files.js';
 import { pushImage, pushLocate, pushNodeState } from './hub.js';
 import { findProfile, readSettings, resolveTextModel, resolveTextProfile, normalizeChatRuntimeSettings, type ModelProfile } from './settings.js';
-import { generateImages, IMAGE_GENERATION_TIMEOUT_MESSAGE, IMAGE_GENERATION_TIMEOUT_MS } from './imageApi.js';
+import { generateImages, normalizeImageSize, IMAGE_GENERATION_TIMEOUT_MESSAGE, IMAGE_GENERATION_TIMEOUT_MS } from './imageApi.js';
+import { assertPromptAspect, assertPromptFacts, fallbackImageAspect, normalizeAspectRatio, promptAspectRatio } from './imagePlanning.js';
 import { resolveImageContinuation, resolveResponseModel } from './imageRequestContext.js';
-import { detectReferenceUsage, enhancePromptDetailed, fidelityForUsage, buildVisualPromptRules, callTextModel, type EnhanceParams, type PromptEnhancementResult } from './textApi.js';
+import { detectReferenceUsage, enhancePromptDetailed, fidelityForUsage, buildVisualPromptRules, callTextModel, finishVisualDesign, LEVEL_SPECS, type EnhanceParams, type PromptEnhancementResult } from './textApi.js';
+import { visualDesignEnabled, visualDesignRules, type VisualDesign } from './visualDesign.js';
 import { applyMemoryCompaction, buildMemoryContext, memoryPromptBlock, type MemoryImageRef, type MemoryMessage, type PersistedMemory } from './chatMemory.js';
 import { readCanvasDoc, upsertCanvasNodes, type CanvasNodeRecord } from './http.js';
 import { readChatThreads, readChatThread, writeClientThread, writeRunThread } from './chat.js';
-import { askUserToolDef, callAgentModel, generateImageToolDef, normalizeAskUserQuestions, type AgentMessage, type AgentToolCall, type AskUserQuestion } from './agent.js';
+import { ASK_USER_POLICY, askUserToolDef, callAgentModel, generateImageToolDef, normalizeAskUserQuestions, type AgentMessage, type AgentToolCall, type AskUserQuestion } from './agent.js';
 import { normalizePromptRoleSnapshot, promptRoleContext, type PromptRoleSnapshot } from './skills.js';
 
 /**
@@ -175,6 +177,7 @@ interface ChatRun {
   pendingQuestion?: {
     callId: string;
     questions: AskUserQuestion[];
+    submitting?: boolean;
     resolve: (answers: Record<string, string[]> | null) => void;
   };
 }
@@ -313,6 +316,12 @@ export function startChatRun(request: StartRunRequest): string {
   };
   runs.set(runId, run);
   run.readiness = (async () => {
+    const existingThread = await readChatThread(requestCopy.threadId);
+    if (!existingThread && !requestCopy.thread.canvasId) requestCopy.thread.canvasId = requestCopy.canvasId;
+    if (requestCopy.thread.id !== requestCopy.threadId || requestCopy.thread.canvasId !== requestCopy.canvasId
+      || (existingThread && existingThread.canvasId !== requestCopy.canvasId)) {
+      throw new Error('对话不属于当前画布，请先选择所属画布或归档历史对话');
+    }
     const stored = await writeClientThread(requestCopy.thread, requestCopy.threadRevision ?? requestCopy.thread.revision);
     if (!stored) throw new Error('对话已删除，请新建对话');
     const currentIdentity = requestCopy.thread.messages.find((message) => message.id === run.assistantMessageId);
@@ -422,11 +431,9 @@ export async function answerChatRun(
 ): Promise<boolean> {
   const run = runs.get(runId);
   const pending = run?.pendingQuestion;
-  if (!run || run.status !== 'running' || !pending || pending.callId !== callId) return false;
+  if (!run || run.status !== 'running' || !pending || pending.callId !== callId || pending.submitting) return false;
   if (input.cancel) {
-    run.pendingQuestion = undefined;
-    pending.resolve(null);
-    return true;
+    return stopChatRun(runId);
   }
   const rawAnswers = input.answers && typeof input.answers === 'object' ? input.answers : {};
   const answers: Record<string, string[]> = {};
@@ -436,19 +443,20 @@ export async function answerChatRun(
       .map((value) => String(value || '').trim())
       .filter(Boolean);
     const permitted = new Set(question.options.map((option) => option.value));
+    if (question.purpose === 'creative') permitted.add('让 AI 决定');
     const filtered = question.type === 'text' ? values.slice(0, 1).map((value) => value.slice(0, 4000)) : values.filter((value) => (
       value.startsWith('其他：') ? Boolean(value.slice('其他：'.length).trim()) : permitted.has(value)
     ));
-    const selected = question.multiple ? [...new Set(filtered)] : filtered.slice(0, 1);
+    const selected = question.purpose === 'creative' && filtered.includes('让 AI 决定')
+      ? ['让 AI 决定'] : question.multiple ? [...new Set(filtered)] : filtered.slice(0, 1);
     if (selected.length === 0 && !question.optional) return false;
     answers[question.id] = selected;
   }
   const userMessage = continuationMessage(input.userMessage, 'user');
   const assistantMessage = continuationMessage(input.assistantMessage, 'assistant');
-  run.pendingQuestion = undefined;
+  pending.submitting = true;
   if (userMessage && assistantMessage) {
     const previousAssistant = currentRunMessage(run);
-    if (previousAssistant) previousAssistant.status = 'done';
     const retrySource = previousAssistant?.retrySource as Record<string, unknown> | undefined;
     Object.assign(userMessage, {
       agentRole: run.request.agentRole, modelSelection: run.request.modelSelection,
@@ -458,17 +466,28 @@ export async function answerChatRun(
       runId: run.id, agentRole: run.request.agentRole, modelSelection: run.request.modelSelection,
       retrySource: { ...retrySource, answers: { ...((retrySource?.answers || {}) as object), ...answers } },
     });
-    const latest = await readChatThread(run.threadId);
-    if (!latest || Number(latest.generation || 0) !== run.generation || run.status !== 'running') { pending.resolve(null); return false; }
     try {
-      const stored = await writeClientThread({ ...latest, messages: [userMessage, assistantMessage] }, latest.revision);
-      if (!stored || run.status !== 'running') { pending.resolve(null); return false; }
-      run.request.thread.revision = stored.revision;
+      for (let attempt = 0; attempt < 4; attempt += 1) {
+        const latest = await readChatThread(run.threadId);
+        if (!latest || Number(latest.generation || 0) !== run.generation || run.status !== 'running') {
+          await stopChatRun(run.id);
+          return false;
+        }
+        try {
+          const stored = await writeClientThread({ ...latest, messages: [userMessage, assistantMessage] }, latest.revision);
+          if (!stored || run.status !== 'running') { await stopChatRun(run.id); return false; }
+          run.request.thread = { ...stored, messages: run.request.thread.messages, memory: run.request.thread.memory } as ThreadSnapshot;
+          break;
+        } catch (error) {
+          if ((error as { status?: number })?.status === 409 && attempt < 3) continue;
+          throw error;
+        }
+      }
     } catch (error) {
-      pending.resolve(null);
-      await stopChatRun(run.id);
+      pending.submitting = false;
       throw error;
     }
+    if (previousAssistant) previousAssistant.status = 'done';
     const existingIds = new Set(run.request.thread.messages.map((message) => String(message.id || '')));
     if (!existingIds.has(userMessage.id)) run.request.thread.messages.push(userMessage);
     if (!existingIds.has(assistantMessage.id)) run.request.thread.messages.push(assistantMessage);
@@ -524,7 +543,7 @@ async function mediaFileToDataUrl(fileName: string): Promise<string> {
   if (!safe) throw new Error('空文件名');
   const data = await fs.readFile(path.join(MEDIA_DIR, safe));
   const extension = imageExtensionOf(data, path.extname(safe).slice(1));
-  return `data:image/${extension};base64,${data.toString('base64')}`;
+  return `data:image/${extension === 'svg' ? 'svg+xml' : extension === 'jpg' ? 'jpeg' : extension};base64,${data.toString('base64')}`;
 }
 
 /** 外部语言模型只接受完整 data URL；对话历史中的 /api/files 相对地址必须先在 bridge 侧展开。 */
@@ -729,11 +748,14 @@ function sizeForRatio(ratio: string | undefined): string | undefined {
   if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) return undefined;
   const longEdge = 1536;
   const scale = longEdge / Math.max(width, height);
-  return `${Math.round(width * scale / 8) * 8}x${Math.round(height * scale / 8) * 8}`;
+  return normalizeImageSize(`${Math.round(width * scale / 8) * 8}x${Math.round(height * scale / 8) * 8}`);
 }
 
 interface ExecuteImageArgs {
   prompt: string;
+  design?: VisualDesign;
+  preparedReferenceUrls?: string[];
+  outputFormat?: 'png' | 'gif' | 'svg';
   originalPrompt?: string;
   referenceImages?: number[];
   referenceUsage?: 'style' | 'edit';
@@ -777,7 +799,7 @@ async function executeGenerateImage(
     .filter((ref) => !ref.canvasId || ref.canvasId === runContext.canvasId)
     .map((ref) => String(ref.nodeId || '').trim())
     .filter(Boolean))];
-  const sourceAnchor = runContext.sourceAnchor?.nodeId || runContext.sourceAnchor?.versionId || runContext.sourceAnchor?.url
+  const sourceAnchor = args.design?.mode !== 'create' && (runContext.sourceAnchor?.nodeId || runContext.sourceAnchor?.versionId || runContext.sourceAnchor?.url)
     ? runContext.sourceAnchor
     : undefined;
   const sourceAnchorCanvasId = String(sourceAnchor?.canvasId || runContext.canvasId).trim() || runContext.canvasId;
@@ -803,7 +825,9 @@ async function executeGenerateImage(
   }
   const explicitUsage = args.referenceUsage === 'edit' || args.referenceUsage === 'style';
   let usage: 'style' | 'edit' = explicitUsage ? (args.referenceUsage as 'style' | 'edit') : detectReferenceUsage(prompt);
-  const resolved = await resolveReferenceDataUrls(picked, runContext.canvasId);
+  const resolved = args.preparedReferenceUrls
+    ? { urls: [...args.preparedReferenceUrls], notes: [] as string[] }
+    : await resolveReferenceDataUrls(picked, runContext.canvasId);
   if (picked.length > 0) emit(run, { type: 'tool_progress', callId, step: `正在准备 ${picked.length} 张参考图` });
   for (const note of resolved.notes) emit(run, { type: 'tool_progress', callId, step: note });
 
@@ -834,7 +858,7 @@ async function executeGenerateImage(
   const anchorNodeId = explicitConnectFrom[0] || sourceAnchorNodeId || (usage === 'edit' ? baseNodeId : '');
   // 保留显式引用与编辑基准的来源，后续分别合并，避免把基准图重复传给提示词优化器。
   const explicitReferenceUrls = [...resolved.urls];
-  if (picked.length === 0 && sourceAnchor && (sourceAnchorVersion || sourceAnchor.url)) {
+  if (!args.preparedReferenceUrls && picked.length === 0 && sourceAnchor && (sourceAnchorVersion || sourceAnchor.url)) {
     const anchorUrl = String(sourceAnchorVersion?.imageUrl || sourceAnchor.url || '').trim();
     if (anchorUrl) {
       try {
@@ -854,7 +878,7 @@ async function executeGenerateImage(
     if (baseUrl) {
       try {
         baseDataUrl = baseUrl.startsWith('data:') ? baseUrl : await mediaFileToDataUrl(baseUrl.replace(/^\/api\/files\//, ''));
-        if (!resolved.urls.includes(baseDataUrl)) resolved.urls.unshift(baseDataUrl);
+        if (!args.preparedReferenceUrls && !resolved.urls.includes(baseDataUrl)) resolved.urls.unshift(baseDataUrl);
         emit(run, { type: 'tool_progress', callId, step: explicitBaseId ? '已带入基准图，在这张图上继续改' : '已继承上一张生成图，准备继续编辑' });
       } catch {
         emit(run, { type: 'tool_progress', callId, step: '基准图读取失败，按全新提示词生成' });
@@ -863,9 +887,16 @@ async function executeGenerateImage(
   }
 
   const count = Math.min(4, Math.max(1, Math.floor(Number(args.count) || 1)));
-  const size = sizeForRatio(args.ratio);
   const apiMode = settings.direct === false && profile.imageApiMode === 'responses' ? 'responses' : 'images';
-  const originalPrompt = String(args.originalPrompt || '').trim() || String((currentRunMessage(run)?.retrySource as Record<string, unknown> | undefined)?.content || prompt);
+  const userPrompt = String((currentRunMessage(run)?.retrySource as Record<string, unknown> | undefined)?.content || '').trim();
+  const originalPrompt = String(args.originalPrompt || '').trim() || userPrompt || prompt;
+  const aspectRatio = promptAspectRatio(userPrompt) || promptAspectRatio(originalPrompt)
+    || normalizeAspectRatio(args.ratio)
+    || promptAspectRatio(prompt)
+    || fallbackImageAspect(originalPrompt, String(baseVersion?.size || sourceAnchorVersion?.size || ''), usage, profile.defaultSize);
+  assertPromptAspect(prompt, aspectRatio);
+  assertPromptFacts(userPrompt || originalPrompt, prompt);
+  const size = sizeForRatio(aspectRatio);
   const usedPrompt = prompt;
   const enhancedPrompt = prompt;
   const enhancementWarning: string | undefined = undefined;
@@ -896,6 +927,7 @@ async function executeGenerateImage(
         model: runContext.imageModel || profile.model,
         source: 'chat',
         createdAt: startedAt,
+        outputFormat: args.outputFormat,
         enhancedPrompt,
         originalPrompt,
         runningDirect: false,
@@ -970,6 +1002,7 @@ async function executeGenerateImage(
     await pushLocate({
       type: 'locate',
       canvasId: runContext.canvasId,
+      chatThreadId: run.threadId,
       nodeId: placeholderRecords[0].id,
       at: new Date().toISOString(),
       onlyIfOffscreen: true,
@@ -997,6 +1030,11 @@ async function executeGenerateImage(
   try {
     images = await generateImages(profile, {
       prompt: usedPrompt,
+      imagesPrompt: usedPrompt,
+      originalPrompt,
+      optimizedPrompt: enhancedPrompt,
+      requestContext: { source: 'chat', canvasId: runContext.canvasId, nodeId: placeholderRecords[0].id, runId: run.id },
+      outputFormat: args.outputFormat,
       model: runContext.imageModel || profile.model,
       apiMode,
       size,
@@ -1082,6 +1120,7 @@ async function executeGenerateImage(
         source: 'chat',
         createdAt: startedAt,
         finishedAt: now,
+        outputFormat: args.outputFormat,
         enhancedPrompt,
         originalPrompt,
         enhancementWarning: enhancementWarning || undefined,
@@ -1318,23 +1357,25 @@ export function buildAgentHistory(
 }
 
 /** Agent 系统提示词：定规矩——什么时候该聊、什么时候该生图（方案 §12）。 */
-export function buildAgentSystemSpec(): string {
+export function buildAgentSystemSpec(structured = visualDesignEnabled()): string {
   return [
     '你是绘板的 AI 设计助手，专注视觉创作辅助。',
     '',
     '## 核心能力',
     '',
-    '1. **提示词优化**：将用户意图转化为结构化生图提示词（主体、场景、构图、光线、色彩、材质、风格）',
+    structured
+      ? '1. **视觉设计**：理解用户目的，保护事实，补齐尚未决定的设计并形成可执行作品描述'
+      : '1. **需求整理**：以用户原文为基础，理清当前任务、参考关系和已确认的修改，让生图模型完成视觉构思与实现',
     '2. **视觉分析**：理解参考图的视觉元素、风格特征、构图逻辑',
     '3. **方案建议**：在创意表达与技术约束之间找到平衡方案',
     '',
     '## 工作流程',
     '',
     '### 信息收集',
-    '- 只有缺少会实质改变成图结果、且无法从上下文或合理默认值确定的关键信息时，才使用 `ask_user` 工具集中询问 1-4 个问题',
-    '- 例如：核心主体不明、参考图作用冲突、必须出现但尚未提供的精确文字；用途、风格、构图未指定时不必逐项追问',
+    '- ' + ASK_USER_POLICY,
+    '- 例如：连要做什么都无法确定、参考图作用冲突、必须出现但尚未提供的精确文字；已有用途和目标但没有具体造型想法时不必追问',
     '- 什么不是关键信息：可由设计常识补足的细节（如"现代感的配色"、"合适的留白"）',
-    '- 用户明确要求立即生成时，除非核心主体完全不明，否则用合理默认值生成，不因细节阻塞',
+    '- 用户明确要求立即生成时，目标足够明确就生成；未指定的造型与视觉细节交给生图模型，不因用户没有具体画面想法而阻塞',
     '',
     '### 生成判断',
     '仅在以下情况调用 `generate_image`：',
@@ -1354,15 +1395,22 @@ export function buildAgentSystemSpec(): string {
     '- **继续调整当前作品**：`referenceUsage=edit`，默认继承最近生成结果',
     '- **新需求或只借鉴风格**：`referenceUsage=style`，切断旧结果继承',
     '- 有显式引用图片时优先使用用户指定的图片',
+    '- 用户明确要求 GIF 动图或 SVG 矢量图时，设置 `generate_image.outputFormat` 为 `gif` 或 `svg`；默认 PNG，输出格式以所选供应商支持为准',
     '',
     '### 提示词整理',
-    '- 你直接按统一视觉规则整理 `generate_image.prompt`（最终生图提示词）',
+    structured
+      ? '- 你按共享流程提交 `generate_image.design`：需求、实际画面文案、已确定的视觉方案与参考关系。程序核对并组装最终提示词；不要另写重复的 prompt。'
+      : '- 你以原文为基础整理 `generate_image.prompt`（最终生图提示词），清楚的单轮需求可以原样提交；高遵循或均衡档位下，无需合并上下文、说明参考关系或消除歧义时必须逐字保留，不为调用工具重写成视觉方案',
+    '- 提交 prompt 与匹配的 ratio。用户未指定画幅时按用途选择 ratio；明确指定的比例优先，继续编辑时保持基准画幅。确定画幅不代表必须同时指定布局。',
     '- 必须保留：用户精确指定的文字内容、否定约束（"不要…"）、硬性要求（"必须…"）',
     '- `originalPrompt` 字段：保存用户原始表达，用于追溯意图',
-    '- 不要另外调用优化模型或改写用户明确的约束',
+    structured
+      ? '- 不要改写用户明确的约束；已有设计或编辑任务保护确认内容，不把历史错误当成新要求'
+      : '- 不要另外调用优化模型或改写用户明确的约束。多轮只合并已确认内容和本次修改；不把历史建议、失败结果或角色模板当成用户已采纳的设计',
     '',
     '### 结果点评',
-    '- 图片已在对话和画布中展示。生成成功后默认只用一句简短告知（如「已生成。」），不主动点评、不复述提示词、不解释创作过程，也不追加方案或建议',
+    '- 收到本次生成图片后，先核对硬约束、文字遗漏、数值和明显布局问题。确实看到问题时简短说明，不把有明显缺陷的图片说成已完全满足；不自行反复生图或额外消耗额度。',
+    '- 图片已在对话和画布中展示。未发现明显问题时，生成成功后默认只用一句简短告知（如「已生成。」），不主动点评、不复述提示词、不解释创作过程，也不追加方案或建议',
     '- 只有用户要求点评、解释，或本轮确实需要交付 UI / 交互设计方案时，才补充必要说明；生成失败、部分完成或仍有阻塞时如实简短说明',
     '- 只基于本次真实看到的图片内容点评',
     '- 图片加载失败或模型不支持视觉时明确说明，不得凭文件名或提示词假装看到像素',
@@ -1391,7 +1439,7 @@ async function persistRunState(run: ChatRun): Promise<void> {
     generation: run.generation, messageIds: [...run.ownedMessageIds], memoryRevision: run.memoryRevision,
   });
   if (!stored) throw new Error('对话已清空或删除');
-  run.request.thread.revision = stored.revision;
+  run.request.thread = { ...stored, messages: run.request.thread.messages, memory: run.request.thread.memory } as ThreadSnapshot;
   run.memoryRevision = Number(stored.memory?.memoryRevision || run.memoryRevision);
 }
 
@@ -1472,9 +1520,9 @@ async function executeRun(run: ChatRun, request: StartRunRequest): Promise<void>
     memory.contextMessages as unknown as Array<Record<string, unknown>>,
     { inheritMode: memory.visualWorkingSet.inheritMode, baseImageUrl: memory.visualWorkingSet.base?.url },
   );
+  const currentUserMessage = [...messages].reverse().find((message) => message.role === 'user');
   if (request.answers && Object.keys(request.answers).length) messages.push({ role: 'user', content: `已确认的补充信息：${JSON.stringify(request.answers)}` });
   await hydrateAgentHistoryImages(messages);
-  const currentUserMessage = [...messages].reverse().find((message) => message.role === 'user' && message.images?.length);
   const userVisualContextImages = currentUserMessage?.images || [];
   let visualContext = userVisualContextImages.map((url, index) => {
     const output = memory.visualWorkingSet.recentOutputs.find((item) => item.url === (memory.visualWorkingSet.references[index]?.url));
@@ -1506,17 +1554,18 @@ async function executeRun(run: ChatRun, request: StartRunRequest): Promise<void>
   let messageContext: ChatRunContext | undefined;
   // 生图失败就结束本轮：不再把错误喂回模型让它自动重试，用户要看错误自己点重试
   let failureMessage = '';
+  const structured = visualDesignEnabled();
 
   try {
     for (let round = 0; round < runtime.maxModelRounds; round += 1) {
       if (run.status !== 'running') return;
       const finalRound = round === runtime.maxModelRounds - 1;
       const turn = await callAgentModel(agentTextProfile, {
-        systemSpec: `${buildAgentSystemSpec()}\n\n${buildVisualPromptRules(imageProfile?.defaultSize || '', settings.enhanceLevel)}\n\n${memoryPromptBlock(memory)}${rolePrompt}${finalRound ? '\n这是最后一个回合。不要调用工具，简洁总结结果与未完成事项。' : ''}`,
+        systemSpec: `${buildAgentSystemSpec(structured)}\n\n${structured ? visualDesignRules(LEVEL_SPECS[settings.enhanceLevel].freedom, '用户明确画幅优先，否则按用途选择；连续编辑保留基准图画幅。', true) : buildVisualPromptRules('', settings.enhanceLevel)}\n\n${memoryPromptBlock(memory)}${rolePrompt}${finalRound ? '\n这是最后一个回合。不要调用工具，简洁总结结果与未完成事项。' : ''}`,
         messages,
         visualContext,
         maxTokens: runtime.maxOutputTokens,
-        tools: finalRound ? [] : [generateImageToolDef(), askUserToolDef()],
+        tools: finalRound ? [] : [generateImageToolDef(structured), askUserToolDef()],
         temperature: request.agentRole?.temperature,
         onTextDelta: (chunk) => { if (run.status === 'running') emit(run, { type: 'message_delta', text: chunk }); },
         onReasoningDelta: (chunk) => { if (run.status === 'running') emit(run, { type: 'thinking', text: chunk }); },
@@ -1537,6 +1586,11 @@ async function executeRun(run: ChatRun, request: StartRunRequest): Promise<void>
             continue;
           }
           const questions = normalizeAskUserQuestions(call.args.questions);
+          if (questions.some((question) => question.purpose === 'creative') && clarifications.some((entry) => entry.questions.some((question) => question.purpose === 'creative'))) {
+            messages.push({ role: 'assistant', content: '', toolCalls: [call] });
+            messages.push({ role: 'tool', toolCallId: call.id, content: '本轮已进行创作引导。使用用户已选定或委托的方向继续原任务，不再追问审美细节，不新增生成授权。' });
+            continue;
+          }
           if (questions.length === 0) {
             messages.push({ role: 'tool', toolCallId: call.id, content: '问题格式无效，请用简洁文字直接向用户追问。' });
             continue;
@@ -1596,7 +1650,63 @@ async function executeRun(run: ChatRun, request: StartRunRequest): Promise<void>
           messages.push({ role: 'tool', toolCallId: call.id, content: `本轮最多允许 ${runtime.maxImagesPerRun} 张图，剩余 ${runtime.maxImagesPerRun - imageCount} 张；本次未生成。` });
           continue;
         }
+        let preparedReferenceUrls: string[] | undefined;
+        if (structured) {
+          const userPrompt = String((currentRunMessage(run)?.retrySource as Record<string, unknown> | undefined)?.content || currentUserMessage?.content || '').trim();
+          const indices = Array.isArray(call.args.referenceImages) ? call.args.referenceImages.map(Number) : [];
+          if (indices.some(index => !Number.isInteger(index) || index < 1 || index > request.references.length) || new Set(indices).size !== indices.length) throw new Error('设计引用了无效或重复的图片编号，本次未提交生图');
+          const proposed = call.args.design as VisualDesign | undefined;
+          const picked = proposed?.mode === 'create' ? [] : [...request.references];
+          call.args.referenceImages = picked.map((_, index) => index + 1);
+          const references = await resolveReferenceDataUrls(picked, request.canvasId);
+          if (references.urls.length !== picked.length) throw new Error('参考图未能完整读取，本次未提交生图');
+          const explicitBase = String(call.args.baseVersionId || '');
+          if (explicitBase && picked.length) throw new Error('本次已明确引用图片，请直接在引用图中指定编辑基准，不同时混入历史版本');
+          const anchor = proposed?.mode === 'create' ? undefined : memory.visualWorkingSet.sourceAnchor;
+          const baseId = explicitBase || (picked.length === 0 && proposed?.mode === 'edit' ? anchor?.versionId || chainVersionId : '');
+          let referenceSize = '';
+          if (baseId || (picked.length === 0 && anchor)) {
+            const baseCanvasId = (baseId && baseId === anchor?.versionId ? anchor?.canvasId : request.previousCanvasId) || anchor?.canvasId || request.canvasId;
+            const baseDoc = await readCanvasDoc(baseCanvasId).catch(() => null);
+            const baseNodes = (baseDoc?.nodes || []) as CanvasNodeLike[];
+            const version = baseId ? findVersionOnCanvas(baseNodes, baseId)?.version : undefined;
+            const anchorNode = anchor?.nodeId ? baseNodes.find(node => node.id === anchor.nodeId) : undefined;
+            const url = String(version?.imageUrl || anchor?.url || anchorNode?.data?.imageUrl || '');
+            referenceSize = String(version?.size || anchorNode?.data?.size || '');
+            if (!url) throw new Error('无法找到本次编辑或参考的基准图');
+            const dataUrl = url.startsWith('data:') ? url : await mediaFileToDataUrl(url.replace(/^\/api\/files\//, ''));
+            if (!references.urls.includes(dataUrl)) references.urls.unshift(dataUrl);
+          }
+          const result = await finishVisualDesign(agentTextProfile, call.args.design, {
+            prompt: userPrompt,
+            sourceText: proposed?.mode === 'create' ? userPrompt : `${memoryPromptBlock(memory)}\n${messages.filter(message => message.role === 'user').map(message => message.content).join('\n')}\n最新要求：${userPrompt}`,
+            lockedAspect: promptAspectRatio(userPrompt) || (proposed?.mode === 'edit' ? normalizeAspectRatio(referenceSize) : undefined),
+            referenceCount: references.urls.length,
+            usage: explicitBase || (references.urls.length > 0 && detectReferenceUsage(userPrompt) === 'edit') ? 'edit' : undefined,
+          }, { imageUrls: references.urls, signal: run.abort.signal });
+          if (run.status !== 'running') return;
+          Object.assign(call.args, { design: result.design, planning: result.planning, prompt: result.prompt, ratio: result.aspectRatio, referenceUsage: result.usage, originalPrompt: userPrompt });
+          preparedReferenceUrls = references.urls;
+        }
         if (imageCount + requestedCount > runtime.confirmImagesAbove) {
+          const userPrompt = String((currentRunMessage(run)?.retrySource as Record<string, unknown> | undefined)?.content || '').trim();
+          const originalPrompt = String(call.args.originalPrompt || '').trim() || userPrompt || String(call.args.prompt || '');
+          const explicitBaseId = String(call.args.baseVersionId || '').trim();
+          const usage = explicitBaseId ? 'edit' : String(call.args.referenceUsage || detectReferenceUsage(String(call.args.prompt || '')));
+          let referenceSize = '';
+          if (usage === 'edit') {
+            const anchor = memory.visualWorkingSet.sourceAnchor;
+            const baseId = explicitBaseId || anchor?.versionId || chainVersionId;
+            const baseCanvas = (baseId === anchor?.versionId ? anchor?.canvasId : request.previousCanvasId) || request.canvasId;
+            const baseDoc = await readCanvasDoc(baseCanvas).catch(() => null);
+            const baseNodes = (baseDoc?.nodes || []) as CanvasNodeLike[];
+            referenceSize = String(findVersionOnCanvas(baseNodes, String(baseId || ''))?.version?.size || '');
+          }
+          call.args.ratio = promptAspectRatio(userPrompt) || promptAspectRatio(originalPrompt)
+            || normalizeAspectRatio(call.args.ratio) || promptAspectRatio(String(call.args.prompt || ''))
+            || fallbackImageAspect(originalPrompt, referenceSize, usage, imageProfile?.defaultSize);
+          assertPromptAspect(String(call.args.prompt || ''), String(call.args.ratio));
+          assertPromptFacts(userPrompt || originalPrompt, String(call.args.prompt || ''));
           const approved = await new Promise<boolean>((resolve) => {
             const value: ImageConfirmation = {
               callId: call.id, prompt: String(call.args.prompt || '').slice(0, 300), model: imageModel || '',
@@ -1639,7 +1749,7 @@ async function executeRun(run: ChatRun, request: StartRunRequest): Promise<void>
           startedAt,
         });
         try {
-          const generatedResult = await withImageToolTimeout(run, executeGenerateImage(run, call.id, call.args as unknown as ExecuteImageArgs, {
+          const generatedResult = await withImageToolTimeout(run, executeGenerateImage(run, call.id, { ...call.args, preparedReferenceUrls } as unknown as ExecuteImageArgs, {
             canvasId: request.canvasId,
             references: request.references,
             previousVersionId: chainVersionId,
@@ -1689,7 +1799,7 @@ async function executeRun(run: ChatRun, request: StartRunRequest): Promise<void>
           messages.push({
             role: 'tool',
             toolCallId: call.id,
-            content: `已生成 ${generated.length} 张候选图，批次 ${call.id}。图片已展示，默认只需一句简短告知，不要主动点评或复述提示词；用户要求点评或本轮需交付 UI / 交互方案时才补充必要说明。只有提供的视觉附件实际可见时才能点评；缺失图片不得猜测。\n${candidateLines.join('\n')}\n最终提示词：${String(call.args.prompt || '')}`,
+            content: `已生成 ${generated.length} 张候选图，批次 ${call.id}。先检查可见图片是否遗漏硬约束、改错文字数值或存在明显布局问题，若有问题应简短如实说明，不自动重绘。没有明显问题时：图片已展示，默认只需一句简短告知，不要主动点评或复述提示词；用户要求点评或本轮需交付 UI / 交互方案时才补充必要说明。只有提供的视觉附件实际可见时才能点评；缺失图片不得猜测。\n${candidateLines.join('\n')}\n最终提示词：${String(call.args.prompt || '')}`,
           });
         } catch (err) {
           if (run.status !== 'running') return;

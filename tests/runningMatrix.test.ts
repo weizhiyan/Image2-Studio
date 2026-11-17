@@ -1,4 +1,22 @@
 import { describe, expect, it } from 'vitest';
+import { matrixViewport } from '../src/components/canvas/RunningMatrixField';
+
+describe('矩阵随卡片尺寸等比适配', () => {
+  it('卡片等比拉大后，点阵坐标和波纹比例保持一致', () => {
+    const small = matrixViewport(320, 180);
+    const large = matrixViewport(640, 360);
+    expect(large.width).toBeCloseTo(small.width);
+    expect(large.height).toBeCloseTo(small.height);
+    expect(large.scale).toBeCloseTo(small.scale * 2);
+  });
+
+  it.each([[320, 320], [400, 225], [225, 400]])('方图和横竖图都以短边为基准：%s × %s', (width, height) => {
+    const viewport = matrixViewport(width, height);
+    expect(Math.min(viewport.width, viewport.height)).toBeCloseTo(320);
+    expect(viewport.width * viewport.scale).toBeCloseTo(width);
+    expect(viewport.height * viewport.scale).toBeCloseTo(height);
+  });
+});
 import { easeFactor, growthOf, MATRIX_DEFAULTS, waveState, zoneState, type MatrixMode } from '@/components/canvas/RunningMatrixField';
 
 /** 在 u∈[0,1) 上以 step 采样，返回 g 第一次达到 threshold 的 u（到不了就返回 -1） */

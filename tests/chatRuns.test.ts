@@ -1,8 +1,9 @@
 import { EventEmitter } from 'node:events';
 import type { ServerResponse } from 'node:http';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { normalizeAskUserQuestions, type AgentTurn } from '../bridge/agent';
 import { answerChatRun, buildAgentSystemSpec, confirmChatRun, getChatRunSnapshot, startChatRun, stopChatRun, subscribeChatRun, type StartRunRequest } from '../bridge/runs';
+import { compileVisualDesign, type VisualDesign } from '../bridge/visualDesign';
 
 const mocks = vi.hoisted(() => ({
   pushImage: vi.fn(),
@@ -11,6 +12,7 @@ const mocks = vi.hoisted(() => ({
   upsertCanvasNodes: vi.fn(async () => true),
   readCanvasDoc: vi.fn(async () => ({ nodes: [] as Array<Record<string, unknown>> })),
   callAgentModel: vi.fn(),
+  callTextModel: vi.fn(),
   generateImages: vi.fn(),
   savedThreads: new Map<string, import('../bridge/chat').ChatThreadRecord>(),
   writeClientThread: vi.fn(),
@@ -80,6 +82,7 @@ vi.mock('../bridge/imageApi.js', async (importOriginal) => ({
 }));
 vi.mock('../bridge/textApi.js', async (importOriginal) => ({
   ...await importOriginal<typeof import('../bridge/textApi')>(),
+  callTextModel: mocks.callTextModel,
   enhancePromptDetailed: vi.fn(async () => ({ prompt: '优化后的测试提示词', usage: 'style' })),
 }));
 vi.mock('../bridge/settings.js', async (importOriginal) => {
@@ -89,7 +92,7 @@ vi.mock('../bridge/settings.js', async (importOriginal) => {
     defaultSize: '1024x1024', models: [], enabledModels: [],
   };
   const image = { ...common, id: 'image', name: '测试生图', model: 'image-model', kind: 'image' };
-  const text = { ...common, id: 'text', name: '测试语言', model: 'text-model', kind: 'text', textFormat: 'chat' };
+  const text = { ...common, id: 'text', name: '测试语言', model: 'text-model', enabledModels: ['text-model', 'next-model'], kind: 'text', textFormat: 'chat' };
   return {
     ...actual,
     readSettings: vi.fn(async () => ({
@@ -110,6 +113,7 @@ const events = (chunks: string[]) => chunks.flatMap((chunk) => {
   return event && data ? [{ event, payload: JSON.parse(data) as Record<string, any> }] : [];
 });
 const hasEvent = (chunks: string[], event: string) => events(chunks).some((entry) => entry.event === event);
+afterEach(() => { vi.unstubAllEnvs(); vi.unstubAllGlobals(); });
 const savedMessage = (threadId: string, messageId: string) => mocks.savedThreads.get(threadId)?.messages.find((message) => message.id === messageId);
 async function approvePendingImages(runId: string, callId: string): Promise<void> {
   await vi.waitFor(() => expect(getChatRunSnapshot(runId)?.pendingConfirmation?.callId).toBe(callId));
@@ -124,10 +128,14 @@ describe('Agent 出图回复规则', () => {
     expect(spec).toContain('普通生图或改图请求信息足够时，直接调用 `generate_image`');
     expect(spec).toContain('交互设计、UI 设计，或用户明确要求讨论、分析、比较方案时，可以先给简短方案');
     expect(spec).toContain('用户明确要求直接出图时仍直接生成');
-    expect(spec).toContain('无法从上下文或合理默认值确定的关键信息');
+    expect(spec).toContain('无法合理确定的必要事实');
+    expect(spec).toContain('没写风格不等于必须反问');
+    expect(spec).toContain('让 AI 决定');
     expect(spec).toContain('以上直接出图与简短回复规则也适用于当前角色及其 Skill');
     expect(spec).toContain('生成成功后默认只用一句简短告知');
     expect(spec).toContain('生成失败、部分完成或仍有阻塞时如实简短说明');
+    expect(spec).toContain('清楚的单轮需求可以原样提交');
+    expect(spec).not.toContain('主体、场景、构图、光线、色彩、材质、风格');
     expect(spec).not.toContain('300-400 字');
   });
 });
@@ -139,6 +147,7 @@ describe('chat run image delivery', () => {
     mocks.savedThreads.clear();
     mocks.writeClientThread.mockClear();
     mocks.callAgentModel.mockReset();
+    mocks.callTextModel.mockReset();
     mocks.upsertCanvasNodes.mockClear();
     mocks.readCanvasDoc.mockReset().mockResolvedValue({ nodes: [] });
     mocks.pushImage.mockClear();
@@ -149,6 +158,189 @@ describe('chat run image delivery', () => {
       { url: '/api/files/first.png', fileName: 'first.png' },
       { url: '/api/files/second.png', fileName: 'second.png' },
     ]);
+  });
+
+  it('默认链路将无需改写的原文原样提交，不再调用独立优化器', async () => {
+    const prompt = '为“山间来信”设计咖啡馆Logo，安静、温暖，没有具体造型想法，最多两种颜色，不要咖啡杯图案，只要标志。画幅1:1。';
+    mocks.callAgentModel
+      .mockResolvedValueOnce({ text: '', protocol: 'tools', toolCalls: [{ id: 'unchanged', name: 'generate_image', args: { prompt, originalPrompt: prompt, ratio: '1:1', count: 1 } }] })
+      .mockResolvedValueOnce({ text: '已生成。', protocol: 'tools', toolCalls: [] });
+    mocks.generateImages.mockResolvedValueOnce([{ url: '/api/files/logo.png', fileName: 'logo.png' }]);
+    const now = new Date().toISOString();
+    const runId = startChatRun({
+      threadId: 'raw-preserving-run', canvasId: 'canvas-raw-preserving', assistantMessageId: 'assistant', references: [],
+      thread: { id: 'raw-preserving-run', title: '原文保留', createdAt: now, updatedAt: now, messages: [
+        { id: 'user', role: 'user', content: prompt, createdAt: now },
+        { id: 'assistant', role: 'assistant', content: '', status: 'running', createdAt: now },
+      ] },
+    });
+    await vi.waitFor(() => expect(getChatRunSnapshot(runId)?.status).toBe('done'));
+    expect(mocks.generateImages).toHaveBeenCalledTimes(1);
+    expect(mocks.generateImages).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ prompt, imagesPrompt: prompt, size: '1536x1536' }));
+    expect(mocks.callTextModel).not.toHaveBeenCalled();
+  });
+
+  it('新设计流程在Agent与生图之间编译，不把结构数据或旧图送进新创作', async () => {
+    vi.stubEnv('HUIBAN_VISUAL_DESIGN', '1');
+    const design: VisualDesign = {
+      task: 'background', mode: 'create', goal: '旅行结尾背景', aspectRatio: '16:9',
+      requirements: [{ source: '不要文字', instruction: '画面无字' }], exactText: [], copy: [], openDecisions: ['选择景物'],
+      visual: { idea: '山路走向远方海湾', focus: '小路与地平线', composition: '下方小路向海延伸，上方天空留白', appearance: '暖色水彩', typography: '', changes: '', preserve: '' },
+      references: [],
+    };
+    mocks.generateImages.mockResolvedValue([{ url: '/api/files/one.png', fileName: 'one.png' }]);
+    mocks.callAgentModel
+      .mockResolvedValueOnce({ text: '', protocol: 'tools', toolCalls: [{ id: 'design-call', name: 'generate_image', args: { design } }] })
+      .mockResolvedValueOnce({ text: '已完成。', toolCalls: [], protocol: 'tools' });
+    const now = new Date().toISOString();
+    const runId = startChatRun({
+      threadId: 'design-thread', canvasId: 'design-canvas', assistantMessageId: 'design-assistant', references: [], previousVersionId: 'old-version',
+      thread: { id: 'design-thread', title: '设计', createdAt: now, updatedAt: now, messages: [
+        { id: 'old-user', role: 'user', content: '画一张红色海报', createdAt: now },
+        { id: 'old-ai', role: 'assistant', content: '完成', media: [{ url: 'data:image/png;base64,b2xk', nodeId: 'old-node', versionId: 'old-version' }], createdAt: now },
+        { id: 'design-user', role: 'user', content: '生成旅行结尾背景，16:9，不要文字', createdAt: now },
+        { id: 'design-assistant', role: 'assistant', content: '', status: 'running', createdAt: now },
+      ] },
+    });
+    await vi.waitFor(() => expect(getChatRunSnapshot(runId)?.status).toBe('done'));
+    expect(mocks.generateImages).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ prompt: compileVisualDesign(design), size: '1536x864', referenceDataUrls: undefined }));
+    expect(mocks.callAgentModel.mock.calls[0][1].tools[0].parameters.required).toEqual(['design']);
+    expect(mocks.callTextModel).not.toHaveBeenCalled();
+    const saved = savedMessage('design-thread', 'design-assistant');
+    expect(JSON.stringify(saved)).toContain('design-brief-v1');
+    expect(JSON.stringify(saved)).not.toContain('preparedReferenceUrls');
+  });
+
+  it('新设计缺少真实参考图时在任何付费生图前失败', async () => {
+    vi.stubEnv('HUIBAN_VISUAL_DESIGN', '1');
+    mocks.callAgentModel.mockResolvedValueOnce({ text: '', protocol: 'tools', toolCalls: [{ id: 'invalid-ref', name: 'generate_image', args: { referenceImages: [9] } }] });
+    const now = new Date().toISOString();
+    const runId = startChatRun({
+      threadId: 'invalid-design-ref', canvasId: 'canvas', assistantMessageId: 'assistant', references: [],
+      thread: { id: 'invalid-design-ref', title: '参考检查', createdAt: now, updatedAt: now, messages: [
+        { id: 'user', role: 'user', content: '生成一张海报', createdAt: now },
+        { id: 'assistant', role: 'assistant', content: '', status: 'running', createdAt: now },
+      ] },
+    });
+    await vi.waitFor(() => expect(getChatRunSnapshot(runId)?.status).toBe('error'));
+    expect(mocks.generateImages).not.toHaveBeenCalled();
+    expect(mocks.upsertCanvasNodes).not.toHaveBeenCalled();
+  });
+
+  it('新设计在核对与生图两个阶段都保持用户图1图2的原始顺序', async () => {
+    vi.stubEnv('HUIBAN_VISUAL_DESIGN', '1');
+    const first = 'data:image/png;base64,Zmlyc3Q=';
+    const second = 'data:image/png;base64,c2Vjb25k';
+    const design: VisualDesign = {
+      task: 'illustration', mode: 'reference', goal: '参考两张图创作', aspectRatio: '1:1',
+      requirements: [], exactText: [], copy: [], openDecisions: [],
+      visual: { idea: '主体置于山丘前', focus: '主体', composition: '前景主体，后景山丘', appearance: '水彩', typography: '', changes: '', preserve: '' },
+      references: [{ index: 1, use: '只保留主体' }, { index: 2, use: '只参考水彩风格' }],
+    };
+    const fetchMock = vi.fn(async (_url: string, _init: RequestInit) => new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ issues: [], design: null }) }, finish_reason: 'stop' }] }), { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+    mocks.readCanvasDoc.mockResolvedValue({ nodes: [
+      { id: 'ref-first', data: { imageUrl: first } },
+      { id: 'ref-second', data: { imageUrl: second } },
+    ] });
+    mocks.generateImages.mockResolvedValue([{ url: '/api/files/one.png', fileName: 'one.png' }]);
+    mocks.callAgentModel
+      .mockResolvedValueOnce({ text: '', protocol: 'tools', toolCalls: [{ id: 'design-refs', name: 'generate_image', args: { design, referenceImages: [2, 1] } }] })
+      .mockResolvedValueOnce({ text: '已完成。', toolCalls: [], protocol: 'tools' });
+    const now = new Date().toISOString();
+    const runId = startChatRun({
+      threadId: 'design-refs', canvasId: 'canvas', assistantMessageId: 'assistant', references: [{ nodeId: 'ref-first' }, { nodeId: 'ref-second' }],
+      thread: { id: 'design-refs', title: '参考顺序', createdAt: now, updatedAt: now, messages: [
+        { id: 'user', role: 'user', content: '根据图1的主体与图2的水彩风格生成插画', createdAt: now },
+        { id: 'assistant', role: 'assistant', content: '', status: 'running', createdAt: now },
+      ] },
+    });
+    await vi.waitFor(() => expect(getChatRunSnapshot(runId)?.status).toBe('done'));
+    expect(mocks.generateImages).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ referenceDataUrls: [first, second] }));
+    const request = JSON.parse(String(fetchMock.mock.calls[0][1].body));
+    expect(request.messages[1].content.filter((part: { type: string }) => part.type === 'image_url').map((part: { image_url: { url: string } }) => part.image_url.url)).toEqual([first, second]);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ['模型选择竖版', '请做一张开业海报', '竖版2:3开业海报，标题突出，活动信息分组。', '2:3', '1024x1536'],
+    ['遗漏比例的用途兜底', '请做一张开业海报', '开业海报，主标题突出，活动信息按主次分组。', undefined, '1024x1536'],
+    ['用户明确横版', '请做16:9的海报', '横版16:9海报，标题在左，活动区域在右。', undefined, '1536x864'],
+  ])('%s：对话请求使用一致画幅且不注入默认方形', async (_label, original, prompt, ratio, size) => {
+    mocks.generateImages.mockResolvedValue([{ url: '/api/files/one.png', fileName: 'one.png' }]);
+    mocks.callAgentModel
+      .mockResolvedValueOnce({ text: '', protocol: 'tools', toolCalls: [{ id: 'planned', name: 'generate_image', args: { prompt, originalPrompt: original, ratio } }] })
+      .mockResolvedValueOnce({ text: '已完成。', toolCalls: [], protocol: 'tools' });
+    const now = new Date().toISOString();
+    const threadId = `plan-${size}-${String(ratio)}`;
+    const runId = startChatRun({
+      threadId, canvasId: 'canvas-plan', assistantMessageId: 'assistant-plan', references: [],
+      thread: { id: threadId, title: '画幅测试', createdAt: now, updatedAt: now, messages: [
+        { id: 'user-plan', role: 'user', content: original, createdAt: now },
+        { id: 'assistant-plan', role: 'assistant', content: '', status: 'running', createdAt: now },
+      ] },
+    });
+    await vi.waitFor(() => expect(getChatRunSnapshot(runId)?.status).toBe('done'));
+    expect(mocks.generateImages).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ size, prompt, imagesPrompt: prompt }));
+    expect(mocks.callAgentModel.mock.calls[0][1].systemSpec).toContain('画幅为自动');
+    expect(mocks.callAgentModel.mock.calls[0][1].systemSpec).not.toContain('目标画幅 1024x1024');
+  });
+
+  it('多图确认展示的自动画幅与最终请求保持一致', async () => {
+    mocks.callAgentModel
+      .mockResolvedValueOnce({ text: '', protocol: 'tools', toolCalls: [{ id: 'plan-confirm', name: 'generate_image', args: { prompt: '开业海报，主标题醒目，正文分组。', count: 2 } }] })
+      .mockResolvedValueOnce({ text: '已完成。', toolCalls: [], protocol: 'tools' });
+    const now = new Date().toISOString();
+    const runId = startChatRun({
+      threadId: 'plan-confirm', canvasId: 'canvas-plan-confirm', assistantMessageId: 'assistant-confirm', references: [],
+      thread: { id: 'plan-confirm', title: '确认测试', createdAt: now, updatedAt: now, messages: [
+        { id: 'user-confirm', role: 'user', content: '请做两张开业海报', createdAt: now },
+        { id: 'assistant-confirm', role: 'assistant', content: '', status: 'running', createdAt: now },
+      ] },
+    });
+    await vi.waitFor(() => expect(getChatRunSnapshot(runId)?.pendingConfirmation?.size).toBe('1024x1536'));
+    expect(mocks.generateImages).not.toHaveBeenCalled();
+    await approvePendingImages(runId, 'plan-confirm');
+    await vi.waitFor(() => expect(getChatRunSnapshot(runId)?.status).toBe('done'));
+    expect(mocks.generateImages).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ size: '1024x1536', n: 2 }));
+  });
+
+  it('对话的画幅冲突在调用生图之前被拦截', async () => {
+    mocks.callAgentModel.mockResolvedValueOnce({ text: '', protocol: 'tools', toolCalls: [{ id: 'plan-conflict', name: 'generate_image', args: {
+      prompt: '设计1:1方形海报，活动信息分组。', originalPrompt: '生成2:3海报', ratio: '1:1',
+    } }] });
+    const now = new Date().toISOString();
+    const runId = startChatRun({
+      threadId: 'plan-conflict', canvasId: 'canvas-plan-conflict', assistantMessageId: 'assistant-conflict', references: [],
+      thread: { id: 'plan-conflict', title: '冲突测试', createdAt: now, updatedAt: now, messages: [
+        { id: 'user-conflict', role: 'user', content: '生成2:3海报', createdAt: now },
+        { id: 'assistant-conflict', role: 'assistant', content: '', status: 'running', createdAt: now },
+      ] },
+    });
+    await vi.waitFor(() => expect(getChatRunSnapshot(runId)?.status).toBe('error'));
+    expect(mocks.generateImages).not.toHaveBeenCalled();
+  });
+
+  it('聊天生图工具透传 GIF 格式并把原格式记录到画布', async () => {
+    mocks.generateImages.mockResolvedValue([{ url: '/api/files/animated.gif', fileName: 'animated.gif', width: 640, height: 360 }]);
+    mocks.callAgentModel
+      .mockResolvedValueOnce({ text: '', protocol: 'tools', toolCalls: [{ id: 'call-gif', name: 'generate_image', args: { prompt: '测试动图', count: 1, outputFormat: 'gif' } }] })
+      .mockResolvedValueOnce({ text: '已完成。', toolCalls: [], protocol: 'tools' });
+    const now = new Date().toISOString();
+    const runId = startChatRun({
+      threadId: 'thread-gif', canvasId: 'canvas-gif', assistantMessageId: 'assistant-gif', references: [],
+      thread: {
+        id: 'thread-gif', canvasId: 'canvas-gif', title: 'GIF', createdAt: now, updatedAt: now,
+        messages: [
+          { id: 'user-gif', role: 'user', content: '生成 GIF', createdAt: now },
+          { id: 'assistant-gif', role: 'assistant', content: '', status: 'running', createdAt: now },
+        ],
+      },
+    });
+    await vi.waitFor(() => expect(getChatRunSnapshot(runId)?.status).toBe('done'));
+    expect(mocks.generateImages).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ outputFormat: 'gif' }));
+    const finalNodes = (mocks.upsertCanvasNodes.mock.calls as unknown as Array<[string, Array<{ data: Record<string, unknown> }>]>).at(-1)![1];
+    expect(finalNodes[0].data).toMatchObject({ status: 'done', fileName: 'animated.gif', outputFormat: 'gif', width: 640, height: 360 });
   });
 
   it('显式引用的参考图既作为连线起点，结果也摆在它右侧', async () => {
@@ -446,6 +638,40 @@ describe('chat run image delivery', () => {
     mocks.callAgentModel.mockClear();
   });
 
+  it.each([
+    ['new-without-image', '全新需求：设计蓝色Logo，不要文字', false, false, undefined],
+    ['new-with-image', '全新需求：参考这张图设计蓝色Logo', true, false, 'current'],
+    ['continue-edit', '把上一张标题放大', false, false, 'result'],
+    ['clarification', '参考这张图设计Logo', true, true, 'current'],
+    ['new-clarification', '全新需求：设计蓝色Logo，不要文字', false, true, undefined],
+  ])('%s：视觉上下文只取当前需求，不回捞旧附件', async (tag, content, hasAttachment, hasAnswers, expectedImage) => {
+    mocks.callAgentModel.mockResolvedValueOnce({ text: '已收到需求。', toolCalls: [], protocol: 'tools' });
+    mocks.callTextModel.mockRejectedValue(new Error('摘要暂不可用，保留原文'));
+    const oldImage = 'data:image/png;base64,b2xk';
+    const currentImage = 'data:image/png;base64,Y3VycmVudA==';
+    const resultImage = 'data:image/png;base64,cmVzdWx0';
+    const now = new Date().toISOString();
+    const threadId = `visual-boundary-${tag}`;
+    const runId = startChatRun({
+      threadId, canvasId: 'canvas-visual-boundary', assistantMessageId: 'current-assistant', references: [],
+      ...(hasAnswers ? { answers: { style: ['蓝色'] } } : {}),
+      thread: {
+        id: threadId, title: '视觉上下文边界', createdAt: now, updatedAt: now,
+        messages: [
+          { id: 'old-user', role: 'user', content: '参考这张图做红金海报', createdAt: now, attachments: [{ canvasId: 'canvas-visual-boundary', nodeId: 'old-reference', url: oldImage }] },
+          { id: 'old-assistant', role: 'assistant', content: '已完成。', status: 'done', createdAt: now, media: [{ canvasId: 'canvas-visual-boundary', nodeId: 'old-result', versionId: 'old-version', url: resultImage }] },
+          { id: 'current-user', role: 'user', content, createdAt: now, ...(hasAttachment ? { attachments: [{ canvasId: 'canvas-visual-boundary', nodeId: 'current-reference', url: currentImage }] } : {}) },
+          { id: 'current-assistant', role: 'assistant', content: '', status: 'running', createdAt: now },
+        ],
+      },
+    });
+    await vi.waitFor(() => expect(getChatRunSnapshot(runId)?.status).toBe('done'));
+    const params = mocks.callAgentModel.mock.calls[0][1];
+    expect(params.visualContext.map((item: { url: string }) => item.url)).toEqual(expectedImage ? [expectedImage === 'current' ? currentImage : resultImage] : []);
+    if (hasAnswers) expect(params.messages.filter((message: { role: string }) => message.role === 'user').at(-1)?.content).toContain('已确认的补充信息');
+    expect(mocks.generateImages).not.toHaveBeenCalled();
+  });
+
   it('只注入本轮选中的角色及其 Skill，不复活历史消息里的其他角色', async () => {
     mocks.callAgentModel.mockReset().mockResolvedValueOnce({
       text: '按当前角色处理。', toolCalls: [], protocol: 'json',
@@ -519,7 +745,7 @@ describe('chat run image delivery', () => {
     expect(options.systemSpec).not.toContain('当前对话角色：');
   });
 
-  it('追问 schema 限制为最多四题且过滤无效选项', () => {
+  it('追问 schema 限制为最多两题且过滤无效选项', () => {
     const questions = normalizeAskUserQuestions([
       { id: 'subject', title: '主体是什么？', options: ['商品', '场景'] },
       { title: '风格？', multiple: true, options: [{ label: '简约', recommended: true }, { label: '复古' }] },
@@ -527,7 +753,7 @@ describe('chat run image delivery', () => {
       { title: '比例？', options: ['横向', '竖向'] },
       { title: '超出上限', options: ['A', 'B'] },
     ]);
-    expect(questions).toHaveLength(3);
+    expect(questions).toHaveLength(2);
     expect(questions[1].multiple).toBe(true);
     expect(questions[1].options[0].recommended).toBe(true);
     expect(normalizeAskUserQuestions(null)).toEqual([]);
@@ -718,6 +944,77 @@ describe('chat run image delivery', () => {
     expect(mocks.upsertCanvasNodes).not.toHaveBeenCalled();
     expect(mocks.pushImage).not.toHaveBeenCalled();
     expect(mocks.callAgentModel).toHaveBeenCalledTimes(1);
+  });
+
+  it('待回答时切换模型保留上下文，旧 run 继续原模型，下一轮使用新模型', async () => {
+    const now = new Date().toISOString();
+    const question = { id: 'style', title: '希望什么感觉？', purpose: 'creative', options: [{ label: '温暖', value: 'warm' }] };
+    mocks.callAgentModel
+      .mockResolvedValueOnce({ text: '', protocol: 'tools', toolCalls: [{ id: 'ask-switch', name: 'ask_user', args: { questions: [question] } }] })
+      .mockResolvedValueOnce({ text: '保留文字，只调整颜色。', protocol: 'tools', toolCalls: [] })
+      .mockResolvedValueOnce({ text: '继续按已确认的内容调整。', protocol: 'tools', toolCalls: [] });
+    const runId = startChatRun({
+      threadId: 'switch-run', canvasId: 'canvas-switch', assistantMessageId: 'a1', references: [],
+      modelSelection: { textProfileId: 'text', textModel: 'text-model' },
+      thread: { id: 'switch-run', canvasId: 'canvas-switch', title: '切模型', createdAt: now, updatedAt: now, messages: [
+        { id: 'u1', role: 'user', content: '保留山间来信这几个字，只改颜色', createdAt: now },
+        { id: 'a1', role: 'assistant', content: '', status: 'running', createdAt: now },
+      ] },
+    });
+    await vi.waitFor(() => expect(getChatRunSnapshot(runId)?.thread.messages[1].status).toBe('awaiting_input'));
+    const latest = mocks.savedThreads.get('switch-run')!;
+    mocks.savedThreads.set('switch-run', { ...latest, textProfileId: 'text', textModel: 'next-model', revision: latest.revision + 1 });
+    const transient = Object.assign(new Error('并发更新'), { status: 409 });
+    mocks.writeClientThread.mockRejectedValueOnce(transient);
+    const input = { answers: { style: ['warm'] }, userMessage: { id: 'u2', content: '温暖' }, assistantMessage: { id: 'a2', content: '' } };
+    expect(await answerChatRun(runId, 'ask-switch', input)).toBe(true);
+    expect(await answerChatRun(runId, 'ask-switch', input)).toBe(false);
+    await vi.waitFor(() => expect(getChatRunSnapshot(runId)?.status).toBe('done'));
+    expect(mocks.callAgentModel.mock.calls.slice(0, 2).map(([profile]) => profile.model)).toEqual(['text-model', 'text-model']);
+    const saved = mocks.savedThreads.get('switch-run')!;
+    expect(saved.textModel).toBe('next-model');
+    expect(saved.messages.find((message) => message.id === 'a2')?.modelSelection).toMatchObject({ textModel: 'text-model' });
+    const next = startChatRun({
+      threadId: saved.id, canvasId: 'canvas-switch', assistantMessageId: 'a3', references: [],
+      modelSelection: { textProfileId: 'text', textModel: 'next-model' },
+      thread: { ...saved, messages: [...saved.messages, { id: 'u3', role: 'user', content: '继续', createdAt: now }, { id: 'a3', role: 'assistant', content: '', status: 'running', createdAt: now }] },
+    });
+    await vi.waitFor(() => expect(getChatRunSnapshot(next)?.status).toBe('done'));
+    expect(mocks.callAgentModel.mock.calls[2][0].model).toBe('next-model');
+    expect(JSON.stringify(mocks.callAgentModel.mock.calls[2][1].messages)).toContain('保留山间来信这几个字');
+    expect(mocks.generateImages).not.toHaveBeenCalled();
+  });
+
+  it('答案保存失败后保持待答，允许重试且不重复追加', async () => {
+    const now = new Date().toISOString();
+    mocks.callAgentModel
+      .mockResolvedValueOnce({ text: '', protocol: 'tools', toolCalls: [{ id: 'ask-retry', name: 'ask_user', args: { questions: [{ id: 'text', title: '需要哪段文字？', type: 'text' }] } }] })
+      .mockResolvedValueOnce({ text: '已收到。', protocol: 'tools', toolCalls: [] });
+    const runId = startChatRun({ threadId: 'answer-retry', canvasId: 'canvas-retry', assistantMessageId: 'a1', references: [], thread: {
+      id: 'answer-retry', title: '重试答案', createdAt: now, updatedAt: now, messages: [
+        { id: 'u1', role: 'user', content: '生成品牌标志', createdAt: now }, { id: 'a1', role: 'assistant', content: '', status: 'running', createdAt: now },
+      ],
+    } });
+    await vi.waitFor(() => expect(getChatRunSnapshot(runId)?.thread.messages[1].status).toBe('awaiting_input'));
+    mocks.writeClientThread.mockRejectedValueOnce(new Error('暂时无法保存'));
+    const input = { answers: { text: ['山间来信'] }, userMessage: { id: 'u2', content: '山间来信' }, assistantMessage: { id: 'a2', content: '' } };
+    await expect(answerChatRun(runId, 'ask-retry', input)).rejects.toThrow('暂时无法保存');
+    expect(getChatRunSnapshot(runId)).toMatchObject({ status: 'running' });
+    expect(getChatRunSnapshot(runId)?.thread.messages[1].status).toBe('awaiting_input');
+    expect(await answerChatRun(runId, 'ask-retry', input)).toBe(true);
+    await vi.waitFor(() => expect(getChatRunSnapshot(runId)?.status).toBe('done'));
+    expect(mocks.savedThreads.get('answer-retry')?.messages).toHaveLength(4);
+  });
+
+  it('拒绝把已有对话发送到另一画布，且不调用模型', async () => {
+    const now = new Date().toISOString();
+    const thread = { id: 'wrong-owner', canvasId: 'canvas-a', title: '归属校验', createdAt: now, updatedAt: now, messages: [], revision: 1, generation: 0 };
+    mocks.savedThreads.set(thread.id, thread);
+    const runId = startChatRun({ threadId: thread.id, canvasId: 'canvas-b', assistantMessageId: 'a1', references: [], thread: { ...thread, canvasId: 'canvas-b' } });
+    await vi.waitFor(() => expect(getChatRunSnapshot(runId)?.status).toBe('error'));
+    expect(mocks.writeClientThread).not.toHaveBeenCalled();
+    expect(mocks.callAgentModel).not.toHaveBeenCalled();
+    expect(mocks.savedThreads.get(thread.id)?.canvasId).toBe('canvas-a');
   });
 
   it('结构化追问会暂停当前 run，提交答案后继续同一轮', async () => {

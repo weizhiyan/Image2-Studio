@@ -11,9 +11,12 @@ describe('Agent 与独立优化器共用视觉规则', () => {
     expect(rules).toContain('竖向画幅');
     expect(rules).toContain('图中文字');
     expect(rules).toContain('一字不改');
-    expect(rules).toContain('保留参考图的主体与构图');
+    expect(rules).toContain('原图编辑默认保护未要求修改的文字、Logo、UI');
+    expect(rules).toContain('用户明确要求改动某一项时按要求修改');
     expect(rules).toContain('必须保留');
     expect(rules).toContain('否定约束');
+    expect(rules).toContain('原文已经清楚时可以原样返回');
+    expect(rules).toContain('多轮任务仅继承与当前作品有关的已确认内容');
     expect(rules).not.toMatch(/唯一任务|只输出|JSON|输出格式/);
     const standalone = textApi.buildSystemSpec('1024x1536', level);
     expect(standalone).toContain(rules);
@@ -26,6 +29,8 @@ describe('Agent 与独立优化器共用视觉规则', () => {
     const properties = definition.parameters.properties as Record<string, { description: string }>;
     expect(properties.prompt.description).toMatch(/最终.*提示词/);
     expect(properties.originalPrompt.description).toContain('原始');
+    expect(properties.prompt.description).toContain('清楚的单轮需求可以原样提交');
+    expect(jsonProtocolSpec()).toContain('不要求补齐视觉方案');
     expect(definition.parameters.required).toEqual(['prompt']);
     expect(jsonProtocolSpec()).toContain('最终');
     expect(jsonProtocolSpec()).toContain('originalPrompt');

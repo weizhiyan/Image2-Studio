@@ -83,6 +83,14 @@ describe('Responses 文本解析', () => {
 });
 
 describe('文本接口连通测试', () => {
+  it('连接中断保留错误阶段和原因，不误报响应结构错误', async () => {
+    const failure = Object.assign(new TypeError('terminated'), { cause: { code: 'UND_ERR_SOCKET' } });
+    const fetchMock = vi.fn(async () => ({ ok: true, json: async () => { throw failure; } }));
+    vi.stubGlobal('fetch', fetchMock);
+    await expect(callTextModel(chatProfile, { systemSpec: 'reply', userText: 'OK', imageUrls: [], maxTokens: 64 })).rejects.toThrow('提示词模型连接中断或超时，未收到完整提示词（UND_ERR_SOCKET）');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
   it('保留 Chat Completions 的标准解析', async () => {
     const fetchMock = vi.fn(async (_url: string, _init?: RequestInit) => new Response(JSON.stringify({
       choices: [{ message: { content: 'OK' }, finish_reason: 'stop' }],
@@ -141,6 +149,60 @@ describe('文本温度兼容与输出完整性', () => {
   it('Responses incomplete 即使有 output_text 仍然拒绝', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ status: 'incomplete', output_text: '半句话' }))));
     await expect(callTextModel(responsesProfile, input)).rejects.toThrow(/incomplete|最终回答/);
+  });
+});
+
+describe('提示词输出预算恢复', () => {
+  const input = { systemSpec: 'design', userText: 'design a poster', imageUrls: [], maxTokens: 8192, maxTokensOnTruncation: 16000 };
+  const limited = (format: string) => new Response(JSON.stringify(format === 'chat'
+    ? { choices: [{ message: { content: 'partial' }, finish_reason: 'length' }] }
+    : { status: 'incomplete', incomplete_details: { reason: 'max_output_tokens' }, output_text: 'partial' }));
+
+  it.each(['chat', 'responses'] as const)('%s 明确耗尽输出预算才扩大预算重试一次', async (textFormat) => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(limited(textFormat))
+      .mockResolvedValueOnce(new Response(JSON.stringify(textFormat === 'chat'
+        ? { choices: [{ message: { content: 'complete prompt' }, finish_reason: 'stop' }] }
+        : { status: 'completed', output_text: 'complete prompt' })));
+    vi.stubGlobal('fetch', fetchMock);
+    await expect(callTextModel({ ...responsesProfile, textFormat }, input)).resolves.toBe('complete prompt');
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock.mock.calls[0][0]).toBe(fetchMock.mock.calls[1][0]);
+    const first = JSON.parse(fetchMock.mock.calls[0][1].body);
+    const second = JSON.parse(fetchMock.mock.calls[1][1].body);
+    const key = textFormat === 'chat' ? 'max_tokens' : 'max_output_tokens';
+    expect(first[key]).toBe(8192);
+    expect(second).toEqual({ ...first, [key]: 16000 });
+  });
+
+  it('第二次仍然截断就停止，不使用部分文本', async () => {
+    const fetchMock = vi.fn(async () => limited('responses'));
+    vi.stubGlobal('fetch', fetchMock);
+    await expect(callTextModel(responsesProfile, input)).rejects.toThrow('输出上限不足');
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(['content_filter', undefined])('Responses 不因 %s 原因不完整而重复请求', async (reason) => {
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({ status: 'incomplete', incomplete_details: { reason }, output_text: 'partial' })));
+    vi.stubGlobal('fetch', fetchMock);
+    await expect(callTextModel(responsesProfile, input)).rejects.toThrow('未收到完整可用');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('默认不自动扩大调用方的预算', async () => {
+    const fetchMock = vi.fn(async () => limited('chat'));
+    vi.stubGlobal('fetch', fetchMock);
+    await expect(callTextModel(chatProfile, { ...input, maxTokensOnTruncation: undefined })).rejects.toThrow('输出上限不足');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('已达到预算上限不重试，取消请求不重试', async () => {
+    const fetchMock = vi.fn(async () => limited('chat'));
+    vi.stubGlobal('fetch', fetchMock);
+    await expect(callTextModel(chatProfile, { ...input, maxTokens: 16000, maxTokensOnTruncation: 32000 })).rejects.toThrow('输出上限不足');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    fetchMock.mockClear();
+    await expect(callTextModel(chatProfile, { ...input, signal: AbortSignal.abort() })).rejects.toThrow();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 });
 

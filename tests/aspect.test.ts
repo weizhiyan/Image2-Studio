@@ -65,6 +65,7 @@ describe('ratioToNumber', () => {
   it('按宽:高解析成高度/宽度比例', () => {
     expect(ratioToNumber('16:9')).toBeCloseTo(0.56, 2);
     expect(ratioToNumber('3:4')).toBeCloseTo(1.33, 2);
+    expect(ratioToNumber('4:3')).toBeCloseTo(0.75, 2);
     expect(ratioToNumber('9:16')).toBeCloseTo(1.78, 2);
     expect(ratioToNumber('1:1')).toBe(1);
   });
@@ -184,6 +185,20 @@ describe('nodeBoxFor', () => {
     expect(wide.width).toBe(400);
     expect(wide.height).toBeCloseTo(224, 6);
     expect(nodeBoxFor(data({ kind: 'composer' }))).toEqual({ width: 320, height: 320 });
+  });
+
+  it.each(['3:4', '4:3'])('composer 的 %s 预览尺寸与请求比例一致', (ratio) => {
+    const heightPerWidth = ratioToNumber(ratio);
+    const width = composerWidthForRatio(heightPerWidth);
+    const box = nodeBoxFor(data({ kind: 'composer', ratio, cardWidth: width }));
+    expect(box.width).toBe(width);
+    expect(box.height).toBeCloseTo(width * heightPerWidth, 5);
+  });
+
+  it('手动拉伸仍优先使用手动高度', () => {
+    expect(nodeBoxFor(data({
+      kind: 'composer', ratio: '3:4', cardWidth: 360, nodeHeightManual: true, nodeHeight: 300,
+    }))).toEqual({ width: 360, height: 300 });
   });
 
   it('Markdown 文本节点使用固定卡片尺寸，不按图片比例扩高', () => {

@@ -1,6 +1,9 @@
 import { normalizeEnhanceLevel, type EnhanceLevel, type PreferenceEntry } from './settings.js';
 import type { ModelProfile, TextApiFormat } from './settings.js';
 import { describeHttpError } from './imageApi.js';
+import { assertPromptAspect, assertPromptFacts, imageAspectPlan, imagePlanningTokenBudget, normalizeAspectRatio, PLANNED_IMAGE_RATIOS, promptAspectRatio } from './imagePlanning.js';
+import { describeNetworkFailure } from './requestErrors.js';
+import { compileVisualDesign, needsVisualReview, parseVisualDesign, parseVisualJson, visualDesignEnabled, visualDesignIssues, visualDesignRules, VISUAL_DESIGN_VERSION, VISUAL_REVIEW_RULES, type VisualDesign, type VisualDesignContext } from './visualDesign.js';
 
 /** auto 的尝试顺序：先兼容面最广的 /chat/completions，路由类错误再回落 /responses。 */
 const FORMAT_ORDER: Record<TextApiFormat, TextApiFormat[]> = {
@@ -29,7 +32,7 @@ export function isUnsupportedTemperatureError(detail: string): boolean {
 
 /** 带状态码的调用失败：回落策略和报错文案都靠它判断。 */
 class TextCallError extends Error {
-  constructor(readonly status: number, readonly detail: string, readonly format: TextApiFormat) {
+  constructor(readonly status: number, readonly detail: string, readonly format: TextApiFormat, readonly outputLimit = false) {
     super('text call failed');
   }
 }
@@ -42,115 +45,84 @@ export interface EnhanceParams {
   prompt: string;
   /** 目标尺寸（1024x1024 / 1024x1536 / 1536x1024），用于让改写适配画幅。 */
   size?: string;
+  aspectRatio?: string;
+  referenceSize?: string;
   /** 上游参考图的 dataURL：带上后让语言模型先「看懂」参考图再融合。 */
   referenceDataUrls?: string[];
   /** 整理强度：高遵循 / 均衡 / 创意。 */
   level?: EnhanceLevel;
   /** 用户长期偏好档案；仅在开启时传入。 */
   preferences?: PreferenceEntry[];
+  planningMode?: 'design' | 'legacy';
 }
 
 export interface PromptEnhancementResult {
   prompt: string;
   usage: ReferenceUsage;
+  aspectRatio?: string;
   referenceRoles?: Array<{ index: number; role: string }>;
+  design?: VisualDesign;
+  planning?: { version: string; reviewed: boolean; repaired: boolean; issues: string[]; durationMs: number };
 }
 
-/**
- * 三档整理强度。只改"这次对话怎么改写"的松紧，不碰生图模型的任何参数：
- * - strict：用户写什么画什么，只补光线与画幅这类必要维度；
- * - balanced：用户没提到的重要维度才补，已提的尊重原意；
- * - creative：允许在用户意图内补氛围、环境细节与风格联想，主体不得替换。
- */
 export const LEVEL_SPECS: Record<EnhanceLevel, { brief: string; words: string; freedom: string }> = {
   strict: {
-    brief: '高遵循（用户写什么就画什么）',
-    words: '60–100 词',
-    freedom: '只做轻度整理：可补光线与画幅构图，其余用户没提的元素一律不加，措辞尽量保留原样',
+    brief: '高遵循（尽量保持原文）',
+    words: '清楚的原文可以原样返回，只补会影响执行的必要信息',
+    freedom: '高遵循：保留用户的表达与全部已确定内容，只消除真实歧义、补充参考图对应及编辑边界；未指定的视觉细节交给生图模型，不新增设计方向',
   },
   balanced: {
-    brief: '均衡（补齐必要细节，不改变意图）',
-    words: '80–150 词',
-    freedom: '用户没提到的重要视觉维度才补；已提到的一律尊重原意；不引入用户没说的新主体',
+    brief: '均衡（保留原意，补充必要信息）',
+    words: '保留有效的原句，只为歧义、上下文或真实约束增加说明，不为短需求扩写',
+    freedom: '均衡：以原文为基础，必要时整理文案分组、用途、参考关系和多轮修改要求；不主动指定用户未决定的主体、配色、字体、材质或布局，不把氛围要求换成具体物件清单',
   },
   creative: {
-    brief: '创意（在用户意图内主动发挥）',
-    words: '120–180 词',
-    freedom: '可补充氛围、环境细节、次要道具与风格联想来强化画面；主体与核心动作不得替换或增加',
+    brief: '创意（允许补充一个简短方向）',
+    words: '需要构思时只补一个简短方向，保留视觉实现空间，不展开成逐项施工说明',
+    freedom: '创意：用户尚无方案时可以补充一个服务目标的简短构思；不强行融合品牌名的每个字，不连带锁定整套颜色、字体、轮廓和布局。已有明确方案或局部编辑仍按原要求执行',
   },
 };
 
 /** 目标画幅 → 构图提示，改写时据此安排主体位置与留白。 */
 function aspectHint(size: string): string {
-  const [w, h] = size.split('x').map((item) => Number(item));
-  if (!w || !h) return '画幅未指定，按 1:1 方形构图';
+  const [w, h] = size.split(/[x:]/).map((item) => Number(item));
+  if (!w || !h) return `画幅为自动：依据用途、信息量、阅读顺序和构图选择适合的宽:高比例（${PLANNED_IMAGE_RATIOS.join('、')}），不要把未指定等同于 1:1。编辑已有图片时优先保留基准图画幅；仅借鉴风格时不必继承参考图比例。`;
   const ratio = w / h;
-  if (ratio > 1.15) return `目标画幅 ${size}（${ratio.toFixed(2)}:1 横向宽画幅）：横向展开构图，主体与地平线沿画面左右方向铺陈`;
-  if (ratio < 0.87) return `目标画幅 ${size}（${ratio.toFixed(2)}:1 竖向画幅）：纵向构图，主体居中或置于画面中轴线，利用上下空间表现层次`;
-  return `目标画幅 ${size}（1:1 方形）：主体居中或对角线构图，注意四角留白`;
+  if (ratio > 1.15) return `目标画幅 ${size}（${normalizeAspectRatio(size)} 横向宽画幅），这是已确定的生成参数；布局适配此画幅，不另写相反的比例。`;
+  if (ratio < 0.87) return `目标画幅 ${size}（${normalizeAspectRatio(size)} 竖向画幅），这是已确定的生成参数；布局适配此画幅，不强制居中，不另写相反的比例。`;
+  return `目标画幅 ${size}（${normalizeAspectRatio(size)}${ratio === 1 ? ' 方形' : ''}），这是已确定的生成参数，构图与其一致。`;
 }
 
-/**
- * 提示词工程规范：来源是 OpenAI 官方对 gpt-image 系列公开的生图提示词建议
- * （自然语言完整描述 / 具体细节 / 图内文字加引号 / 媒介与镜头词 / 空间位置描述 /
- *  说"要什么"而非"不要什么"）+ ChatGPT 网页版生图的编排层行为（理解意图 →
- *  补齐缺失视觉维度 → 输出单段详细提示词 → 内容安全红线）。
- */
 export function buildVisualPromptRules(size: string, level: EnhanceLevel): string {
   const spec = LEVEL_SPECS[level];
   return [
-    '- prompt 使用用户描述的主要语言；用户要求图中文字时按原语言用英文引号 “...” 精确保留，一字不改',
-    '- prompt 是一段连贯的自然语言，完整句子；不要关键词堆砌、标签列表或分点',
-    '- 图中的文字内容用英文引号包裹，例如：a neon sign reading “OPEN 24H”',
+    '【以原文为基础】',
+    '- 生图模型负责视觉构思和画面实现。你负责准确传递用户意图，处理真实歧义与上下文；优化不等于重写设计。原文已经清楚时可以原样返回；高遵循或均衡档位下，无需合并上下文、说明参考关系或消除歧义的单轮需求，必须逐字保留原文。',
+    '- 保留原文中的目的、情绪、使用场景及表达重点，不能只留下物件和风格标签。只修改确实有歧义或缺少上下文的片段，其余原句保留；口语、短句、没有具体造型、文案较多，都不是必须改写的理由。不做同义润色，不增加通用设计口号。',
+    '- 用户没想法、没有指定造型，不等于信息不足。将目标与期待感受交给生图模型构思，不默认由语言模型先锁定主体、配色、字体、光线、材质和布局。',
+    '- 保留用户已经指定或明确采纳的设计。用户要求你构思一个方向或当前使用创意档位时，可以补一个简短方向；除此之外不增加未经要求的设计决定。不要把自己的建议当成用户确认的要求。',
+    '- 多轮任务仅继承与当前作品有关的已确认内容，合并最新修改并去掉被明确替换的旧要求；新任务不继承上一张图的视觉方案。长期偏好仅在适用且不冲突时参考。',
     '',
-    '【描述结构：用户没提到的维度才补，已提到的一律尊重原意】',
-    '1. 主体：谁 / 什么，外貌、姿态、表情、服饰、材质',
-    '2. 动作与场景：在做什么、环境、时间、天气、季节',
-    '3. 构图与镜头：景别（特写 / 半身 / 全身 / 全景）、机位、视角、空间关系（如 “positioned in the left third”）',
-    '4. 光线：光源方向、软硬、色温、时段氛围',
-    '5. 色彩与影调：主色、对比度、饱和度倾向',
-    '6. 媒介与风格：具体媒介（如 35mm film photography, watercolor, 3D render, flat vector illustration）',
-    '7. 质感与细节：纹理、精度程度（如 highly detailed, soft focus）',
-    '',
-    '【参考图用法（只在附带参考图时生效）】',
-    '- 判断依据是用户的措辞：用户说”根据…风格 / 呼应 / 同样的感觉 / 调性像” → 只迁移参考图的氛围、色系、光线、质感与图层结构（天地海如何分层、主体偏左还是居中），绝不复刻参考图里的具体主体、构图、文字与版式元素',
-    '- 用户说”基于这张图 / 把这张图改成 / 加上” → 图生图模式：保留参考图的主体与构图，只应用用户要求的改动',
-    '- 用户指定用途（做背景 / 放在某页 / 结尾用）时，必须在提示词里写明为文字预留的干净区域的位置与大致占比',
-    '- 参考图里出现的文字、Logo、UI 元素一律不进最终提示词（用户没要求图内文字时）',
+    '【参考图用法】',
+    '- 仅在有参考图时生效。图1、图2严格对应提供顺序；分别在最终提示词中说明各图需要借鉴或保留什么，一张图可承担多个作用，不把全部图片一律当风格参考。',
+    '- 风格参考提取所需色彩、造型、媒介和质感，不自动复制无关主体或文字；主体 / 身份参考保护识别特征与必要内容；版式参考提取布局、对齐与层级，不照搬无关内容。',
+    '- 原图编辑默认保护未要求修改的文字、Logo、UI、主体、构图和背景。用户明确要求改动某一项时按要求修改，该项不受默认保留规则限制。不要把“用户没再重复原图文字”理解为可以删掉文字。',
     '',
     '【忠实性红线】',
-    '- 用户明确要的元素一个不少；用户没提的重要元素一个不加（没说人就不加人，没说文字就不加文字）',
-    '- 用户输入已足够详细（超过 40 词，或已含镜头 / 媒介 / 风格描述）时只做轻度整理：补光线与构图，保留原有措辞与细节',
-    '- 优先正面描述画面，但用户明确的否定约束、禁止修改项与必须保留项必须完整保留，不得为缩短提示词而丢弃（如”不要改背景”必须落实为背景保持原样）',
-    '- 用户明确提供的本人品牌 Logo / 标识应按原样保留，不擅自改写；要求复制未提供的第三方受保护角色或标识时，改写成气质相近的原创元素',
-    '- 不使用在世艺术家的姓名作为风格词；用流派或视觉特征描述替代',
+    '- 使用用户的主要语言，区分需求说明与图中文字。标题、品牌名、产品名、地址、声明及明确要求逐字呈现的内容一字不改，并用引号标明；不要把设计说明画进图中。未要求新文字时不自行新增文案。',
+    '- 金额、日期、数量、限量、有效期及其条件关系必须保留。不能只保留数字而调换对应关系，不能把有条件赠送改成无条件赠送、概率奖励改成必得，不编造营销承诺。',
+    '- 在不改变语义与精确文案的前提下允许分组和断行；非逐字指定的内容可以规范标点和日期格式（日期“号”与“日”等价，地址门牌号不等价）。',
+    '- 用户明确的否定约束和必须保留项完整保留。除此之外优先正面描述，不自行禁止有价值的材质、颜色、光效或表现方式。缺少真实二维码等精确素材时预留空间，不伪造可验证信息。',
     '',
     '【整理强度】',
     `- 当前档位：${spec.brief}`,
     `- ${spec.freedom}`,
-    `- 输出长度：${spec.words}`,
+    `- 篇幅：${spec.words}`,
+    '- 三档均保留事实与硬约束。不要套固定模板、堆形容词或罗列互斥备选；没有必要改动时，保留原文也是有效结果。',
     '',
-    '【常见错误与避坑】',
-    '❌ 错误1：用户说”一只猫”，你写”a cute fluffy Persian cat with blue eyes” → 过度具象化',
-    '✅ 正确：”a cat” 即可，让模型发挥；除非用户明确要”波斯猫”或”蓝眼睛”',
-    '',
-    '❌ 错误2：用户说”风格像梵高”，你写”in the style of Van Gogh” → 使用在世艺术家姓名',
-    '✅ 正确：”post-impressionist style with visible brushstrokes and vibrant colors”',
-    '',
-    '❌ 错误3：参考图是风格参考，你在提示词里描述了参考图的主体 → 会复刻主体',
-    '✅ 正确：只写”warm color palette, soft focus, dreamy atmosphere”这类氛围词',
-    '',
-    '❌ 错误4：用户提示词已经很详细（>50词），你还大幅改写 → 改变了用户意图',
-    '✅ 正确：只补光线/构图这类必要维度，保留原措辞',
-    '',
-    '❌ 错误5：用户说”不要背景”，你写”simple background” → 忽略了否定约束',
-    '✅ 正确：”isolated on white background” 或 “transparent background”',
-    '',
-    '❌ 错误6：用户说”根据参考图风格”，你写”a [参考图里的主体]...” → 会生成相同主体',
-    '✅ 正确：完全不提参考图的主体，只写新场景的主体和氛围感',
-    '',
-    '【现实约束】',
-    '- 生图模型内部还会再润色一次提示词，所以不要写过度精细到互相冲突的细节',
+    '【提交前自检】',
+    '- 对照原文核对硬约束、精确文案、数值与条件关系、参考图用途和画幅。删除没有需求依据的新增限制，保留生图模型的视觉发挥空间；不因检查而再次扩写方案。',
+    '- 这是生成前的文本检查，不代表成图已通过视觉验收。只有实际看到生成图片才能判断其画面与文字质量。',
     `- ${aspectHint(size)}`,
   ].join('\n');
 }
@@ -159,26 +131,20 @@ export function buildSystemSpec(size: string, level: EnhanceLevel, hasReferenceI
   // ✅ 如果有参考图，先加视觉理解环节
   const visualAnalysisSection = hasReferenceImages ? `
 【参考图分析流程】
-在改写提示词之前，你必须先分析参考图（如果用户提供了）：
-1. 主体识别：参考图里的主要对象是什么（人/物/场景）
-2. 风格特征：色系（暖/冷/中性）、光线（自然/人工/戏剧性）、质感（光滑/粗糙/朦胧）
-3. 构图结构：主体位置（居中/三分法/对角线）、景深（浅/深）、画幅比例
-4. 细节提取：纹理、材质、氛围感、情绪倾向
-
-⚠️ 关键约束：
-- 如果用户说"风格参考/呼应/同样的感觉" → 只迁移第2、3、4点的特征，主体必须全新
-- 如果用户说"基于这张图改/把这张图改成" → 保留第1点的主体，只改用户要求的部分
-- 参考图里的文字、Logo、UI元素一律不进提示词（除非用户明确要求）
+依据用户要求判断每张图的作用，只分析与本次任务有关的特征；Logo不需要机械分析景深，摄影不需要套用标志设计清单。
+风格、主体、版式、内容可分别参考或组合使用；把各图的实际用途和必须保留项写进最终prompt，不能只放在referenceRoles或分析说明中。
+编辑时保护未要求修改的文字、Logo、UI及其他内容；用户明确要求修改的部分优先于默认保留规则。
 ` : '';
 
   return [
-    '你是图像生成模型的提示词工程师。用户会给一句想画的内容（可能很短、很口语），也可能是中文。',
-    '你的唯一任务：把它改写成一段高质量的生图提示词，原文语义一个不丢。',
+    '你是生图需求整理助手，保留用户表达，把准确的需求交给生图模型。',
+    '你的唯一任务：以原文为基础，仅补执行所必需的信息，并返回匹配画幅；不默认重新设计。',
     '',
     visualAnalysisSection,
     '【输出格式】',
     '- 只输出一个 JSON 对象，不要 Markdown 代码块、解释、道歉或额外文字',
-    '- JSON 必须包含 prompt（最终给生图模型的一段自然语言提示词）和 usage（style 或 edit）',
+    '- JSON 必须包含 prompt（最终给生图模型的需求，可以与原文相同）、usage（style 或 edit）、aspectRatio（宽:高，如 2:3）',
+    '- 已给目标尺寸时 aspectRatio 与其一致；画幅自动时按用途选择比例。画幅单独返回，不为补比例而重写原文，也不要在 prompt 写另一种画幅。',
     '- 可选字段 referenceRoles：数组元素为 {"index": number, "role": "style|identity|layout|object|background"}',
     hasReferenceImages ? '- 可选字段 analysisNotes（调试用）：对参考图的简短分析结论（50字内）' : '',
     '',
@@ -193,61 +159,16 @@ export function buildSystemSpec(size: string, level: EnhanceLevel, hasReferenceI
  */
 export function directStyleNote(prompt: string, usage: ReferenceUsage): string {
   if (usage !== 'style' || !/附带参考图编号/.test(String(prompt || ''))) return String(prompt || '');
-  return `[风格参考约束] 附带图片只提供风格（色系、光线氛围、质感），请生成一个主体与构图都不同于参考图的全新场景，并正面写清新场景里有什么；不要以原参考图的主体作画面主角。\n${prompt}`;
+  return `[参考图使用说明] 按用户要求借鉴参考图的风格、主体或版式；只参考风格时不自动复制无关主体与文字。用户明确要求保留的身份、内容和布局仍须保留，新作品不自动沿用整张参考图。\n${prompt}`;
 }
 
-/**
- * 直连模式的轻量级提示词优化
- * 不调用语言模型，纯规则处理，用于直连模式下提升基础提示词质量
- */
 export function preprocessDirectPrompt(
   prompt: string,
-  size: string,
-  usage: ReferenceUsage,
-  hasReference: boolean
+  _size?: string,
+  _usage?: ReferenceUsage,
+  _hasReference?: boolean
 ): string {
-  let enhanced = prompt.trim();
-
-  // ✅ 1. 如果提示词太短，补充基础维度
-  const wordCount = enhanced.split(/\s+/).length;
-  if (wordCount < 10) {
-    const [w, h] = size.split('x').map(Number);
-    const isLandscape = w > h * 1.15;
-    const isPortrait = h > w * 1.15;
-
-    // 补充构图建议
-    if (isLandscape && !/\b(landscape|horizontal|wide)\b/i.test(enhanced)) {
-      enhanced += ', wide horizontal composition';
-    } else if (isPortrait && !/\b(portrait|vertical)\b/i.test(enhanced)) {
-      enhanced += ', vertical portrait composition';
-    }
-
-    // 补充基础光线（如果完全没提）
-    if (!/\b(light|lighting|sunny|shadow|bright|dark|glow|illuminate)\b/i.test(enhanced)) {
-      enhanced += ', natural lighting';
-    }
-
-    // 补充质感（如果完全没提）
-    if (!/\b(detail|quality|resolution|sharp|soft|texture|fine)\b/i.test(enhanced)) {
-      enhanced += ', high quality';
-    }
-  }
-
-  // ✅ 2. 风格参考的特殊处理
-  if (hasReference && usage === 'style') {
-    // 在开头加上明确的约束，防止模型复刻参考图主体
-    enhanced = `Style reference only (do not replicate subject): ${enhanced}`;
-  }
-
-  // ✅ 3. 图生图的保真指令
-  if (hasReference && usage === 'edit') {
-    // 确保有"保留"/"改动"的明确指向
-    if (!/\b(keep|preserve|maintain|change|modify|replace|add|edit|based on)\b/i.test(enhanced)) {
-      enhanced = `Based on reference image, ${enhanced}`;
-    }
-  }
-
-  return enhanced;
+  return prompt.trim();
 }
 
 /**
@@ -283,9 +204,10 @@ function preferenceBlock(entries: PreferenceEntry[]): string {
  * 语言模型跑偏时的兜底：返回的不是可用提示词就抛错，调用方据此按原文发送。
  * 没有这道关，模型的道歉、说明文字、空结果会被原样发给生图模型。
  */
-function assertUsablePrompt(text: string): void {
+function assertUsablePrompt(text: string, original?: string): void {
   const cleaned = text.trim();
   if (!cleaned) throw new Error('语言模型没有返回内容');
+  if (cleaned === original?.trim()) return;
   if (/\b(i'?m sorry|as an ai|cannot (?:assist|help|comply|generate)|unable to (?:assist|help|generate))\b/i.test(cleaned)
     || /作为(?:一个)?(?:人工智能|AI|语言模型)/.test(cleaned)
     || cleaned.startsWith('{') || cleaned.startsWith('[')) {
@@ -294,7 +216,7 @@ function assertUsablePrompt(text: string): void {
   const words = cleaned.split(/\s+/).filter(Boolean).length;
   const cjk = (cleaned.match(/[\u4e00-\u9fff]/g) || []).length;
   if (cjk < 8 && words < 12) throw new Error('语言模型返回过短，无法作为提示词');
-  if (words > 400) throw new Error('语言模型返回过长，已按原文发送');
+  if (cleaned.length > 24000) throw new Error('语言模型返回过长，已按原文发送');
 }
 
 /** 模型偶尔会把结果包在 ``` 里：剥掉码罩，取出纯提示词。 */
@@ -342,8 +264,10 @@ function describeTextError(err: TextCallError, fellBack: boolean): string {
   const parts: string[] = [];
   if (fellBack && err.format === 'responses') parts.push('已自动改走 Responses 接口重试');
   if (code) parts.push(`上游错误码 ${code}`);
-  if (err.status === 200 && /status=incomplete|思考输出耗尽|没有最终 message/i.test(err.detail)) {
-    parts.push('模型只完成了思考，没有生成最终回答：请提高输出上限，或把「上游接口格式」改成 Chat Completions');
+  if (err.outputLimit) {
+    parts.push('输出上限不足，可能包含思考消耗；请提高输出上限或简化任务。本次未使用不完整提示词');
+  } else if (err.status === 200 && /status=incomplete|没有最终 message|finish_reason=content_filter/i.test(err.detail)) {
+    parts.push('未收到完整可用的最终回答，本次未使用该提示词');
   } else if (err.status === 200) {
     parts.push('响应结构对不上：这家中转站可能用了别的上游格式，去「生图设置」手动指定');
   } else if (err.status === 401 || err.status === 403) parts.push('Key 无效或没有该模型权限：确认这路配置填的是语言模型的 Key');
@@ -422,14 +346,15 @@ function readChatText(body: unknown): string {
   const choices = (body as { choices?: Array<{ message?: { content?: unknown }; finish_reason?: string }> })?.choices;
   const finishReason = choices?.[0]?.finish_reason;
   if (finishReason === 'length' || finishReason === 'content_filter') {
-    throw new TextCallError(200, `Chat 输出不完整或被过滤（finish_reason=${finishReason}），本次输出不可用`, 'chat');
+    throw new TextCallError(200, `Chat 输出不完整或被过滤（finish_reason=${finishReason}），本次输出不可用`, 'chat', finishReason === 'length');
   }
   return stripFences(readContent(choices?.[0]?.message?.content));
 }
 
 function readResponsesText(body: unknown): string {
   if ((body as { status?: unknown })?.status === 'incomplete') {
-    throw new TextCallError(200, 'Responses 返回 status=incomplete，输出被截断，没有生成完整最终回答', 'responses');
+    const outputLimit = (body as { incomplete_details?: { reason?: unknown } })?.incomplete_details?.reason === 'max_output_tokens';
+    throw new TextCallError(200, 'Responses 返回 status=incomplete，没有生成完整最终回答', 'responses', outputLimit);
   }
   const payload = body as {
     output_text?: unknown;
@@ -460,10 +385,6 @@ function readResponsesText(body: unknown): string {
     }
   }
   const text = stripFences(parts.join('\n'));
-  const incomplete = (body as { status?: unknown })?.status === 'incomplete';
-  if (!text && incomplete) {
-    throw new TextCallError(200, 'Responses 返回 status=incomplete，思考输出耗尽预算，没有生成最终回答', 'responses');
-  }
   if (!text) {
     throw new TextCallError(200, 'Responses 返回 200，但只有 reasoning 或没有最终 message 文本', 'responses');
   }
@@ -475,6 +396,7 @@ interface TextCallParams {
   userText: string;
   imageUrls: string[];
   maxTokens: number;
+  maxTokensOnTruncation?: number;
   /** 角色温度；chat 缺省 0.6，responses 仅在显式设置时发送。 */
   temperature?: number;
   signal?: AbortSignal;
@@ -530,7 +452,10 @@ async function callTextOnce(profile: ModelProfile, format: TextApiFormat, params
       if (hasNextBase && shouldRetryOtherBase(response.status, contentType)) continue;
       throw new TextCallError(response.status, finalDetail, format);
     }
-    const parsed = await response.json().catch(() => null) as unknown;
+    const parsed = await response.json().catch((error: unknown) => {
+      if (error instanceof SyntaxError) return null;
+      throw error;
+    }) as unknown;
     const text = format === 'responses' ? readResponsesText(parsed) : readChatText(parsed);
     if (!text) throw new TextCallError(200, `接口返回 200 但解析不到文本（${format} 响应结构不匹配）`, format);
     return text;
@@ -544,15 +469,23 @@ export async function callTextModel(profile: ModelProfile, params: TextCallParam
   let lastError: TextCallError | null = null;
   let fellBack = false;
   for (const format of order) {
-    try {
-      return await callTextOnce(profile, format, params);
-    } catch (err) {
-      if (!(err instanceof TextCallError)) throw err;
-      lastError = err;
-      const isLast = format === order[order.length - 1];
-      // 路由类错误（404/405/5xx）才值得换格式重试；400/401/429 换了也是同样结果
-      if (isLast || !isRouteError(err.status)) throw new Error(describeTextError(err, fellBack));
-      fellBack = true;
+    let requestParams = params;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        return await callTextOnce(profile, format, requestParams);
+      } catch (err) {
+        if (!(err instanceof TextCallError)) throw describeNetworkFailure(err, 'text') || err;
+        const retryBudget = Math.min(16000, Math.floor(params.maxTokensOnTruncation || 0));
+        if (err.outputLimit && attempt === 0 && retryBudget > params.maxTokens && !params.signal?.aborted) {
+          requestParams = { ...params, maxTokens: retryBudget };
+          continue;
+        }
+        lastError = err;
+        const isLast = format === order[order.length - 1];
+        if (isLast || !isRouteError(err.status)) throw new Error(describeTextError(err, fellBack));
+        fellBack = true;
+        break;
+      }
     }
   }
   throw new Error(describeTextError(lastError as TextCallError, fellBack));
@@ -586,6 +519,7 @@ function parseEnhancementResult(raw: string, fallbackUsage: ReferenceUsage): Pro
     const parsed = JSON.parse(first >= 0 && last > first ? cleaned.slice(first, last + 1) : cleaned) as {
       prompt?: unknown;
       usage?: unknown;
+      aspectRatio?: unknown;
       referenceRoles?: unknown;
     };
     const prompt = typeof parsed.prompt === 'string' ? parsed.prompt.trim() : '';
@@ -599,7 +533,7 @@ function parseEnhancementResult(raw: string, fallbackUsage: ReferenceUsage): Pro
           return Number.isInteger(index) && index > 0 && role ? { index, role } : null;
         }).filter((item): item is { index: number; role: string } => Boolean(item))
         : undefined;
-      return { prompt, usage, referenceRoles };
+      return { prompt, usage, referenceRoles, aspectRatio: normalizeAspectRatio(parsed.aspectRatio) };
     }
   } catch {
     /* 兼容不支持结构化输出的中转站：下面按纯 prompt 处理。 */
@@ -617,6 +551,8 @@ export async function enhancePromptDetailed(profile: ModelProfile, params: Enhan
     throw new Error(`尚未配置语言模型 Key：请在「生图设置」的「${profile.name}」里填写`);
   }
   const level = normalizeEnhanceLevel(params.level);
+  const structured = params.planningMode === 'design' || (params.planningMode !== 'legacy' && visualDesignEnabled());
+  const startedAt = Date.now();
   const userText = `用户想画的内容：\n${params.prompt.trim()}`;
   const imageUrls = (params.referenceDataUrls || []).filter((url) => url.startsWith('data:image/'));
   // 多张参考图必须带编号语义：用户嘴里的「图一 / 图二」就是画布 chips 上标的序号，
@@ -624,15 +560,22 @@ export async function enhancePromptDetailed(profile: ModelProfile, params: Enhan
   const numbering = imageUrls.map((_, index) => `参考图 ${index + 1} = 第 ${index + 1} 张图`).join('，');
   const usage = params.usage || 'style';
   const isOutpaintRequest = /(扩图|扩展画布|延展画布|补全画面|补足画面|扩展到|改为\s*\d{1,2}\s*[:：]\s*\d{1,2})/i.test(params.prompt);
-  const usageRule = usage === 'edit'
+  const usageRule = structured
+    ? usage === 'edit'
+      ? '\n\n本次是已有图的编辑：design.mode 使用 edit，记录 changes 和 preserve。扩图只新增画布区域，保留原图已有内容；其它编辑只改变用户指定部分。'
+      : '\n\n依据用户目的选择 design.mode：借用参考创作为 reference，直接修改原图为 edit。逐张在 design.references 写明用途，不能把只参考风格变成复制原图主体。'
+    : usage === 'edit'
     ? isOutpaintRequest
       ? `\n\n本次用法：扩图 / 画布延展。不是重绘，也不是风格参考。必须保留参考图中已有的主体、位置、比例、视角、光线、色彩和细节，原图区域只作为不可改动的已存在画面；只描述需要新增的画布区域及其与原图边缘的自然衔接。若用户指定主体位于左侧、右侧留白等空间关系，必须原样保留，不得把原图主体改成新的主体。`
-      : `\n\n本次用法：图生图——保留参考图的主体与构图，只把用户要求的改动应用上去，其余保持原样。`
-    : `\n\n本次用法：风格参考。请按这个思路写提示词：参考图只贡献色系、光线氛围、质感与情绪，最终提示词必须正面描述一个与参考图主体不同的全新场景——新的主体、新的视角或新的构图完整写出来（比如把灯塔换成一道从云海中崛起的山脊），不要只换角度保留原主体，也不要罗列"不要出现什么"，用"画面里有什么"来写。若用户要求这张图"做背景 / 放在某页 / 结尾用"，在提示词里写明为文字预留的干净区域的位置与大致占比（如 upper third in deep blue for a title, lower two thirds calm）。若同时给了页面参考图：把它当版式锚点，描述它的留白结构让新图适配，而不要复刻页面里的内容。`;
+      : `\n\n本次用法：图生图——按用户要求修改指定部分，保护其余内容，包括原有文字、Logo、UI和背景。若用户明确要求改主体或构图，按要求修改，不受默认保留规则限制。`
+    : `\n\n本次整体用法预判：参考创作。以用户描述为准分别确定每张图的实际作用；风格、主体身份、版式和内容可以组合参考，不把全部图片强制当成纯风格。用户要求呼应但不同的新场景时，保留这个创作目标，不擅自锁定新的具体主体；明确指定的主体、布局和保留项仍须遵守。若实际是修改原图，usage应返回edit并保护未要求修改的内容。每张图的用途必须写进prompt，不只写在referenceRoles中。`;
+  const referenceOutput = structured
+    ? '在 design.references 中逐张写明用途与必要保留项，程序将这些结论编译到最终提示词。'
+    : '请在 JSON 的 referenceRoles 中标注每张图的作用；各图用途与必要保留项写进prompt，其余分析过程不输出。';
   const referenceGuide = imageUrls.length > 1
-      ? `\n\n（本次附带 ${imageUrls.length} 张参考图，按消息中的提供顺序编号：${numbering}。用户提到的「图一 / 图二 / 图1 / 图2」等说法一律按此编号对应，不要按画面内容自行调换顺序。${usageRule}\n请在 JSON 的 referenceRoles 中标注每张图的作用；不要把参考图分析或说明文字写进 prompt。）`
+      ? `\n\n（本次附带 ${imageUrls.length} 张参考图，按消息中的提供顺序编号：${numbering}。用户提到的「图一 / 图二 / 图1 / 图2」等说法一律按此编号对应，不要按画面内容自行调换顺序。${usageRule}\n${referenceOutput}）`
       : imageUrls.length === 1
-      ? `\n\n（另附 1 张参考图。${usageRule}\n请在 JSON 的 referenceRoles 中标注它的作用；不要把参考图分析或说明文字写进 prompt。）`
+      ? `\n\n（另附 1 张参考图。${usageRule}\n${referenceOutput}）`
       : '';
   // 参考图融合说明拼在用户段里：chat 只认 text 分段、responses 只认 input_text 分段
   const withReferences = imageUrls.length > 0
@@ -640,21 +583,94 @@ export async function enhancePromptDetailed(profile: ModelProfile, params: Enhan
     : userText;
   // ✅ 检测是否有参考图
   const hasReferenceImages = Boolean(params.referenceDataUrls && params.referenceDataUrls.length > 0);
+  const aspect = imageAspectPlan(params);
+  const plannedSize = aspect.locked
+    ? (normalizeAspectRatio(params.size) === aspect.aspectRatio ? params.size! : aspect.aspectRatio)
+    : '';
   const spec = [
-    buildSystemSpec(String(params.size || ''), level, hasReferenceImages),  // ✅ 传递参考图标志
+    structured ? visualDesignRules(LEVEL_SPECS[level].freedom, aspectHint(plannedSize)) : buildSystemSpec(plannedSize, level, hasReferenceImages),
+    !aspect.locked && params.referenceSize ? `参考图尺寸 ${params.referenceSize} 仅作判断依据，不是固定输出尺寸；用途和用户本次需求优先。` : '',
     preferenceBlock(params.preferences || []),
   ].filter(Boolean).join('\n\n');
   const text = await callTextModel(profile, {
     systemSpec: spec,
     userText: withReferences,
     imageUrls,
-    maxTokens: 1400,
+    maxTokens: imagePlanningTokenBudget(params.prompt),
+    maxTokensOnTruncation: 16000,
+    temperature: level === 'strict' ? 0.2 : level === 'creative' ? 0.85 : 0.6,
     signal: params.signal,
   });
+  if (structured) {
+    let design: unknown;
+    try { design = parseVisualJson(text).design; } catch { design = text; }
+    const result = await finishVisualDesign(profile, design, {
+      prompt: params.prompt,
+      lockedAspect: aspect.locked ? aspect.aspectRatio : undefined,
+      referenceCount: imageUrls.length,
+      usage: imageUrls.length ? params.usage : undefined,
+    }, { imageUrls, signal: params.signal });
+    result.planning!.durationMs = Date.now() - startedAt;
+    return result;
+  }
   // 跑偏兜底：抛错让调用方按原文继续发，别把道歉发给生图模型
   const result = parseEnhancementResult(text, usage);
-  assertUsablePrompt(result.prompt);
+  assertUsablePrompt(result.prompt, params.prompt);
+  result.aspectRatio = aspect.locked
+    ? aspect.aspectRatio
+    : result.aspectRatio || promptAspectRatio(result.prompt) || aspect.aspectRatio;
+  assertPromptAspect(result.prompt, result.aspectRatio);
+  assertPromptFacts(params.prompt, result.prompt);
+  if (params.usage === 'edit') result.usage = 'edit';
   return result;
+}
+
+export async function finishVisualDesign(
+  profile: ModelProfile,
+  value: unknown,
+  context: VisualDesignContext,
+  options: { imageUrls: string[]; signal?: AbortSignal },
+): Promise<PromptEnhancementResult> {
+  const startedAt = Date.now();
+  let design: VisualDesign | undefined;
+  let issues: string[];
+  try {
+    design = parseVisualDesign(value);
+    issues = visualDesignIssues(design, context);
+  } catch (error) {
+    issues = [error instanceof Error ? error.message : String(error)];
+  }
+  const reviewed = issues.length > 0 || (design ? needsVisualReview(design, context) : true);
+  let repaired = false;
+  if (reviewed) {
+    const review = parseVisualJson(await callTextModel(profile, {
+      systemSpec: `${visualDesignRules('只修正明确问题，保留原方案的创作方向。', context.lockedAspect ? aspectHint(context.lockedAspect) : '保留合理的已选画幅。')}\n\n本次是核对阶段，以下核对输出协议替代设计阶段的输出协议：\n${VISUAL_REVIEW_RULES}`,
+      userText: JSON.stringify({ sourceText: context.sourceText || context.prompt, currentRequest: context.prompt, referenceCount: context.referenceCount, lockedAspect: context.lockedAspect, issues, design: design || value }),
+      imageUrls: options.imageUrls,
+      maxTokens: imagePlanningTokenBudget(context.prompt),
+      maxTokensOnTruncation: 16000,
+      temperature: 0.2,
+      signal: options.signal,
+    }));
+    if (!Array.isArray(review.issues) || review.issues.some(issue => typeof issue !== 'string')) throw new Error('设计核对未返回有效问题清单，本次不采用未核对的改写');
+    issues = [...issues, ...review.issues as string[]];
+    if (review.design) {
+      design = parseVisualDesign(review.design);
+      repaired = true;
+    } else if (issues.length) {
+      throw new Error(`设计核对未能修正：${issues.join('；')}`);
+    }
+  }
+  if (!design) throw new Error('没有可用设计结果');
+  const remaining = visualDesignIssues(design, context);
+  if (remaining.length) throw new Error(`设计核对后仍不符合需求：${remaining.join('；')}`);
+  const prompt = compileVisualDesign(design);
+  assertUsablePrompt(prompt);
+  return {
+    prompt, aspectRatio: design.aspectRatio, usage: design.mode === 'edit' ? 'edit' : 'style', design,
+    referenceRoles: design.references.map(item => ({ index: item.index, role: item.use })),
+    planning: { version: VISUAL_DESIGN_VERSION, reviewed, repaired, issues: [...new Set(issues)], durationMs: Date.now() - startedAt },
+  };
 }
 
 export async function enhancePrompt(profile: ModelProfile, params: EnhanceParams): Promise<string> {

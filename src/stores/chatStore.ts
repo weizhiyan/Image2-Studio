@@ -5,18 +5,26 @@ import type { ChatImageRef, ChatMessage, ChatThread } from '@/types';
 import { createId } from '@/lib/id';
 import { ChatConflictError, clearChatThread, deleteChatThread, putChatThread, type ChatRunEvent, type ChatRunConfirmation } from '@/lib/bridge';
 import { mergeAuthoritativeThread, reduceChatRunEvent, type ChatRunState } from '@/lib/chatRunEvents';
+import { useCanvasStore } from './canvasStore';
+
+type ChatDraft = { draft: string; draftAttachments: ChatImageRef[]; draftBase: ChatImageRef | null };
+type ThreadMetadata = Partial<Pick<ChatThread, 'title' | 'textProfileId' | 'textModel' | 'imageProfileId' | 'imageModel'>>;
+const emptyDraft = (): ChatDraft => ({ draft: '', draftAttachments: [], draftBase: null });
+const draftScope = (canvasId: string, threadId: string) => threadId ? `thread:${threadId}` : `canvas:${canvasId}`;
+const currentDraft = (state: ChatState): ChatDraft => ({ draft: state.draft, draftAttachments: state.draftAttachments, draftBase: state.draftBase });
+const savedDrafts = (state: ChatState) => state.activeCanvasId || state.activeThreadId
+  ? { ...state.draftsByScope, [draftScope(state.activeCanvasId, state.activeThreadId)]: currentDraft(state) }
+  : state.draftsByScope;
 
 /**
- * 对话状态：全局独立线程（threads 是实体数组，activeThreadId 指向当前线程）。
+ * 对话状态：线程按画布归属，activeThreadId 指向当前画布的线程。
  *
  * 数据分工——消息只存 nodeId / versionId 引用，图片本体在画布节点上；
  * 本地（localStorage，本 store）是工作副本，bridge 的 chat-docs.json 是第二拷贝，
  * 线程变更后 600ms 防抖上桥（与 putCanvasDoc 同一节拍）。
- * 启动时 mergeRemoteThreads 按 updatedAt 合并：本地缺 / 本地旧的采用远端，
- * 本地更新的保留并回推（last-writer-wins per thread，MVP 不做多标签页实时同步）。
+ * 服务端 revision 决定消息合并，运行中的增量和待保存元数据单独保护。
  *
- * 持久化版本 2：v1 是「一画布一条线程」（threads 以 canvasId 为键），
- * migrate 会把旧数据整批迁移成默认线程（id = thread_<canvasId>），历史消息不丢。
+ * 持久化版本 3：保留旧线程实体，按画布/线程保存活动对话与草稿。
  */
 
 /** 运行中的 agent run：刷新后靠它判断"运行状态未知"，不伪装成完成。 */
@@ -36,8 +44,15 @@ export function draftKeyOf(ref: Pick<ChatImageRef, 'nodeId' | 'versionId'>): str
 interface ChatState {
   threads: ChatThread[];
   activeThreadId: string;
-  /** 当前画布 id：用于新对话默认落点及当前画布图片选择，不用于筛选线程。 */
+  /** 当前画布 id：筛选历史对话、恢复草稿并确定新对话归属。 */
   activeCanvasId: string;
+  activeThreadByCanvas: Record<string, string>;
+  draftsByScope: Record<string, ChatDraft>;
+  pendingMetadata: Record<string, ThreadMetadata>;
+  setThreadDraft: (threadId: string, draft: ChatDraft) => void;
+  consumeThreadDraft: (threadId: string, expected: ChatDraft) => void;
+  flushThreadMetadata: (threadId: string) => Promise<boolean>;
+  removeCanvasThreads: (canvasId: string) => void;
   /** 面板是否展开（右下角 AI 按钮控制）。 */
   open: boolean;
   /** 当前会话选中的角色 id；会话态，不持久化，刷新后恢复未选择角色。 */
@@ -74,7 +89,6 @@ interface ChatState {
     imageModel?: string;
     preserveDraft?: boolean;
   }) => string;
-  /** 未开始对话的线程可以换语言模型；已有消息时锁定并返回 false。 */
   setThreadTextProfile: (threadId: string, textProfileId: string, textModel?: string) => boolean;
   /** Agent 出图模型：对话开始后仍可随时切换。 */
   setThreadImageModel: (threadId: string, imageProfileId: string, imageModel?: string) => boolean;
@@ -188,7 +202,7 @@ export function normalizeLocalThread(raw: unknown): ChatThread | null {
   } as ChatThread;
 }
 
-type PersistedChat = Pick<ChatState, 'threads' | 'draft' | 'draftAttachments' | 'draftBase' | 'activeRun' | 'runEventCursors'>;
+type PersistedChat = Pick<ChatState, 'threads' | 'draft' | 'draftAttachments' | 'draftBase' | 'activeRun' | 'runEventCursors' | 'activeCanvasId' | 'activeThreadId' | 'activeThreadByCanvas' | 'draftsByScope' | 'pendingMetadata'>;
 let pendingPersistence: { key: string; value: StorageValue<PersistedChat> } | undefined;
 let persistenceTimer: ReturnType<typeof setTimeout> | undefined;
 let persistedReferences: PersistedChat | undefined;
@@ -243,25 +257,62 @@ function writeScroll(threadId: string, top: number): void {
 
 /** Only explicit metadata actions queue writes; never an SSE patch or run placeholder. */
 const pushTimers = new Map<string, ReturnType<typeof setTimeout>>();
+const pushes = new Map<string, Promise<boolean>>();
 function cancelPush(threadId: string): void {
   const timer = pushTimers.get(threadId);
   if (timer !== undefined) clearTimeout(timer);
   pushTimers.delete(threadId);
 }
-function schedulePush(threadId: string): void {
+function schedulePush(threadId: string, patch: ThreadMetadata): void {
   if (!threadId) return;
+  const state = useChatStore.getState();
+  useChatStore.setState({ pendingMetadata: { ...state.pendingMetadata, [threadId]: { ...state.pendingMetadata[threadId], ...patch } } });
   cancelPush(threadId);
   pushTimers.set(threadId, setTimeout(() => {
     pushTimers.delete(threadId);
-    const thread = useChatStore.getState().threads.find((item) => item.id === threadId);
-    if (!thread) return;
-    void putChatThread(thread, { metadataOnly: true }).then((remote) => {
-      useChatStore.getState().mergeRemoteThreads([remote]);
-    }).catch((error) => {
-      if (error instanceof ChatConflictError && error.current) useChatStore.getState().mergeRemoteThreads([error.current]);
-      useChatStore.setState({ syncError: error instanceof Error ? error.message : '对话保存失败，请重试' });
-    });
+    void flushThreadMetadata(threadId);
   }, 600));
+}
+
+async function flushThreadMetadata(threadId: string): Promise<boolean> {
+  cancelPush(threadId);
+  const inFlight = pushes.get(threadId);
+  if (inFlight) {
+    if (!await inFlight) return false;
+    return flushThreadMetadata(threadId);
+  }
+  const patch = useChatStore.getState().pendingMetadata[threadId];
+  if (!patch || Object.keys(patch).length === 0) return true;
+  const operation = (async () => {
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      const thread = useChatStore.getState().threads.find((item) => item.id === threadId);
+      if (!thread) return false;
+      try {
+        const remote = await putChatThread(thread, { metadataOnly: thread.revision !== undefined, metadata: patch });
+        if (!useChatStore.getState().threads.some((item) => item.id === threadId)) return false;
+        const pending = { ...useChatStore.getState().pendingMetadata[threadId] };
+        for (const key of Object.keys(patch) as Array<keyof ThreadMetadata>) {
+          if (pending[key] === patch[key]) delete pending[key];
+        }
+        useChatStore.setState({ pendingMetadata: { ...useChatStore.getState().pendingMetadata, [threadId]: pending }, syncError: '' });
+        useChatStore.getState().mergeRemoteThreads([remote]);
+        return true;
+      } catch (error) {
+        if (error instanceof ChatConflictError && error.current) {
+          if (!useChatStore.getState().threads.some((item) => item.id === threadId)) return false;
+          useChatStore.getState().mergeRemoteThreads([error.current]);
+          if (attempt < 3) continue;
+        }
+        useChatStore.setState({ syncError: '模型或标题尚未保存，发送时会重试；请检查服务连接。' });
+        return false;
+      }
+    }
+    return false;
+  })();
+  pushes.set(threadId, operation);
+  const success = await operation;
+  pushes.delete(threadId);
+  return success ? flushThreadMetadata(threadId) : false;
 }
 
 /** v1 旧数据（threads: Record<canvasId, 线程>）→ v2 实体线程数组。 */
@@ -290,6 +341,9 @@ export const useChatStore = create<ChatState>()(
       threads: [],
       activeThreadId: '',
       activeCanvasId: '',
+      activeThreadByCanvas: {},
+      draftsByScope: {},
+      pendingMetadata: {},
       open: false,
       activeRoleId: '',
       draft: '',
@@ -302,18 +356,46 @@ export const useChatStore = create<ChatState>()(
       runEventCursors: {},
 
       setActiveCanvas: (canvasId) => {
-        const hasActiveThread = Boolean(get().activeThreadId && get().threads.some((item) => item.id === get().activeThreadId));
-        if (get().activeCanvasId === canvasId && hasActiveThread) return;
-        // 线程是全局实体；切画布只更新默认结果落点，不切换对话或丢弃明确引用。
-        if (hasActiveThread) {
-          set({ activeCanvasId: canvasId });
-          return;
+        const state = get();
+        const candidates = state.threads.filter((item) => item.canvasId === canvasId);
+        const remembered = state.activeCanvasId === canvasId ? state.activeThreadId : state.activeThreadByCanvas[canvasId];
+        const threadId = candidates.find((item) => item.id === remembered)?.id || mostRecentThread(candidates)?.id || '';
+        if (state.activeCanvasId === canvasId && state.activeThreadId === threadId) return;
+        const drafts = savedDrafts(state);
+        set({ activeCanvasId: canvasId, activeThreadId: threadId, activeRoleId: '',
+          activeThreadByCanvas: { ...state.activeThreadByCanvas, [canvasId]: threadId }, draftsByScope: drafts,
+          ...drafts[draftScope(canvasId, threadId)] || emptyDraft(), messageScrollTop: readScroll(threadId) });
+        flushChatPersistence();
+      },
+
+      setThreadDraft: (threadId, draft) => set({
+        draftsByScope: { ...get().draftsByScope, [draftScope('', threadId)]: draft },
+        ...(get().activeThreadId === threadId ? draft : {}),
+      }),
+
+      consumeThreadDraft: (threadId, expected) => {
+        const draft = get().activeThreadId === threadId ? currentDraft(get()) : get().draftsByScope[draftScope('', threadId)];
+        if (JSON.stringify(draft) === JSON.stringify(expected)) get().setThreadDraft(threadId, emptyDraft());
+      },
+
+      flushThreadMetadata,
+
+      removeCanvasThreads: (canvasId) => {
+        const removed = get().threads.filter((thread) => thread.canvasId === canvasId);
+        removed.forEach((thread) => cancelPush(thread.id));
+        const draftsByScope = { ...get().draftsByScope };
+        const pendingMetadata = { ...get().pendingMetadata };
+        const activeThreadByCanvas = { ...get().activeThreadByCanvas };
+        delete activeThreadByCanvas[canvasId];
+        delete draftsByScope[draftScope(canvasId, '')];
+        for (const thread of removed) {
+          delete draftsByScope[draftScope('', thread.id)];
+          delete pendingMetadata[thread.id];
         }
-        // 刷新后 activeThreadId 是会话态，不持久化；有历史时恢复最近更新的一条，
-        // 让用户重新打开面板就能看到上次的对话，而不是误显示空态。即使画布 id 没变
-        // 也要补选：远端线程可能是在 setActiveCanvas 之后才合并进来的。
-        const latestThread = mostRecentThread(get().threads);
-        set({ activeCanvasId: canvasId, activeThreadId: latestThread?.id || '' });
+        set({ threads: get().threads.filter((thread) => thread.canvasId !== canvasId),
+          draftsByScope, pendingMetadata, activeThreadByCanvas,
+          ...(removed.some((thread) => thread.id === get().activeRun?.threadId) ? { activeRun: null } : {}),
+          ...(get().activeCanvasId === canvasId ? { activeThreadId: '', ...emptyDraft() } : {}) });
       },
 
       setOpen: (open) => set(open ? { open, unread: false } : { open }),
@@ -401,10 +483,13 @@ export const useChatStore = create<ChatState>()(
           createdAt: now,
           updatedAt: now,
         };
-        // 新对话开始一份干净上下文，避免草稿文字或上一线程的基准图串入；
-        // 换模型触发的「新建对话」要保留用户已经打好的草稿。
+        const drafts = savedDrafts(get());
+        if (options.preserveDraft && !get().activeThreadId) delete drafts[draftScope(get().activeCanvasId, '')];
         set({
           threads: [...get().threads, thread],
+          draftsByScope: drafts,
+          activeCanvasId: target || '',
+          activeThreadByCanvas: { ...get().activeThreadByCanvas, [target || '']: thread.id },
           activeThreadId: thread.id,
           activeRoleId: '',
           open: true,
@@ -417,7 +502,7 @@ export const useChatStore = create<ChatState>()(
       setThreadTextProfile: (threadId, textProfileId, textModel) => {
         const thread = get().threads.find((item) => item.id === threadId);
         const nextProfileId = String(textProfileId || '').trim();
-        if (!thread || thread.messages.length > 0 || !nextProfileId) return false;
+        if (!thread || !nextProfileId) return false;
         const nextModel = String(textModel || '').trim();
         set({
           threads: get().threads.map((item) => (
@@ -425,13 +510,13 @@ export const useChatStore = create<ChatState>()(
               ? {
                 ...item,
                 textProfileId: nextProfileId,
-                ...(nextModel ? { textModel: nextModel } : {}),
+                textModel: nextModel,
                 updatedAt: new Date().toISOString(),
               }
               : item
           )),
         });
-        schedulePush(threadId);
+        schedulePush(threadId, { textProfileId: nextProfileId, textModel: nextModel });
         return true;
       },
 
@@ -446,21 +531,24 @@ export const useChatStore = create<ChatState>()(
               ? {
                 ...item,
                 imageProfileId: nextProfileId,
-                ...(nextModel ? { imageModel: nextModel } : {}),
+                imageModel: nextModel,
                 updatedAt: new Date().toISOString(),
               }
               : item
           )),
         });
-        schedulePush(threadId);
+        schedulePush(threadId, { imageProfileId: nextProfileId, imageModel: nextModel });
         return true;
       },
 
       switchThread: (threadId) => {
         const thread = get().threads.find((item) => item.id === threadId);
-        if (!thread) return;
+        if (!thread || thread.canvasId !== get().activeCanvasId) return;
         flushChatPersistence();
-        set({ activeThreadId: threadId, activeRoleId: '', draft: '', draftAttachments: [], draftBase: null, messageScrollTop: readScroll(threadId) });
+        const drafts = savedDrafts(get());
+        set({ activeThreadId: threadId, activeRoleId: '', draftsByScope: drafts,
+          activeThreadByCanvas: { ...get().activeThreadByCanvas, [get().activeCanvasId]: threadId },
+          ...(drafts[draftScope('', threadId)] || emptyDraft()), messageScrollTop: readScroll(threadId) });
         flushChatPersistence();
       },
 
@@ -472,7 +560,7 @@ export const useChatStore = create<ChatState>()(
             item.id === threadId ? { ...item, title: trimmed, updatedAt: new Date().toISOString() } : item
           )),
         });
-        schedulePush(threadId);
+        schedulePush(threadId, { title: trimmed });
       },
 
       deleteThread: async (threadId) => {
@@ -484,19 +572,23 @@ export const useChatStore = create<ChatState>()(
         const rest = get().threads.filter((item) => item.id !== threadId);
         // 删的是当前线程：落到最近更新的线程上，别让用户对着空面板。
         const nextActive = get().activeThreadId === threadId
-          ? ([...rest].sort((a, b) => Date.parse(b.updatedAt || '') - Date.parse(a.updatedAt || ''))[0]?.id || '')
+          ? (mostRecentThread(rest.filter((item) => item.canvasId === get().activeCanvasId))?.id || '')
           : get().activeThreadId;
         const deletingActive = get().activeThreadId === threadId;
         const activeRun = get().activeRun;
+        const draftsByScope = { ...get().draftsByScope };
+        const pendingMetadata = { ...get().pendingMetadata };
+        delete draftsByScope[draftScope('', threadId)];
+        delete pendingMetadata[threadId];
         set({
           threads: rest,
+          draftsByScope, pendingMetadata,
           activeThreadId: nextActive,
+          activeThreadByCanvas: { ...get().activeThreadByCanvas, [get().activeCanvasId]: nextActive },
           ...(deletingActive ? {
             activeRoleId: '',
-            draft: '',
-            draftAttachments: [],
-            draftBase: null,
-            messageScrollTop: 0,
+            ...(draftsByScope[draftScope(get().activeCanvasId, nextActive)] || emptyDraft()),
+            messageScrollTop: readScroll(nextActive),
           } : {}),
           ...(activeRun?.threadId === threadId ? { activeRun: null } : {}),
         });
@@ -557,7 +649,6 @@ export const useChatStore = create<ChatState>()(
             ? get().threads.map((item) => (item.id === threadId
               ? {
                 ...item,
-                ...(get().activeCanvasId ? { canvasId: get().activeCanvasId } : {}),
                 ...modelFields,
                 messages,
                 title,
@@ -574,6 +665,8 @@ export const useChatStore = create<ChatState>()(
               updatedAt: now,
             }],
         });
+        const owner = existing?.canvasId || get().activeCanvasId;
+        if (owner) useCanvasStore.getState().markCanvasChat(owner);
         return id;
       },
 
@@ -616,7 +709,13 @@ export const useChatStore = create<ChatState>()(
             item.id === threadId ? { ...item, ...patch, updatedAt: new Date().toISOString() } : item
           )),
         });
-        if (options?.save) schedulePush(threadId);
+        if (options?.save) {
+          const metadata: ThreadMetadata = {};
+          for (const key of ['title', 'textProfileId', 'textModel', 'imageProfileId', 'imageModel'] as const) {
+            if (patch[key] !== undefined) metadata[key] = patch[key];
+          }
+          schedulePush(threadId, metadata);
+        }
       },
 
       applyRunEvents: (threadId, events) => {
@@ -628,7 +727,7 @@ export const useChatStore = create<ChatState>()(
         for (const event of events) state = reduceChatRunEvent(state, event);
         if (state.thread !== thread || state.activeRun !== get().activeRun) {
           const entries = state.cursor ? [...Object.entries(get().runEventCursors).filter(([id]) => id !== state.cursor!.runId), [state.cursor.runId, state.cursor.seq]] : Object.entries(get().runEventCursors);
-          set({ threads: get().threads.map((item) => item.id === threadId ? state.thread : item), activeRun: state.activeRun, runEventCursors: Object.fromEntries(entries.slice(-128)) });
+          set({ threads: get().threads.map((item) => item.id === threadId ? { ...state.thread, ...get().pendingMetadata[threadId] } : item), activeRun: state.activeRun, runEventCursors: Object.fromEntries(entries.slice(-128)) });
         }
         if (!state.activeRun) flushChatPersistence();
         return Boolean(state.needsSnapshot);
@@ -654,35 +753,45 @@ export const useChatStore = create<ChatState>()(
               const ids = new Set(owned.map((message) => message.id));
               merged.messages = [...merged.messages.map((message) => ids.has(message.id) ? owned.find((entry) => entry.id === message.id)! : message), ...owned.filter((message) => !merged.messages.some((entry) => entry.id === message.id))];
             }
-            next[index] = merged;
+            next[index] = { ...merged, ...get().pendingMetadata[item.id] };
           }
         }
         const activeThreadId = get().activeThreadId;
-        const keepActive = Boolean(activeThreadId && next.some((item) => item.id === activeThreadId));
+        const keepActive = Boolean(activeThreadId && next.some((item) => item.id === activeThreadId && item.canvasId === get().activeCanvasId));
         // 首次打开或本地副本为空时，远端线程合并后要补选最近一条；否则头部会停在
         // “新对话”，记忆等线程级入口因 thread 为空而不可用。
-        const nextActiveThreadId = keepActive ? activeThreadId : mostRecentThread(next)?.id || '';
+        const nextActiveThreadId = keepActive ? activeThreadId : mostRecentThread(next.filter((item) => item.canvasId === get().activeCanvasId))?.id || '';
         set({
           threads: next,
-          ...(nextActiveThreadId !== activeThreadId ? { activeThreadId: nextActiveThreadId } : {}),
         });
+        if (nextActiveThreadId !== activeThreadId) get().setActiveCanvas(get().activeCanvasId);
+        for (const thread of next) if (thread.canvasId && thread.messages.length) useCanvasStore.getState().markCanvasChat(thread.canvasId);
       },
     }),
     {
       name: 'huiban-chat-v1',
-      version: 2,
+      version: 3,
       storage: chatPersistence,
-      migrate: (persisted) => {
+      migrate: (persisted): PersistedChat => {
         const state = (persisted || {}) as Record<string, unknown>;
-        return {
-          // open / activeCanvasId / activeRoleId 是会话态不持久化；线程、草稿与在途 run 要跨刷新保留。
-          // 旧版草稿附件没有 canvasId / versionId 字段，一次性迁移时丢弃（草稿本是暂态）
-          threads: migrateThreads(persisted),
+        const legacyDraft = {
           draft: typeof state.draft === 'string' ? state.draft : '',
+          draftAttachments: Array.isArray(state.draftAttachments)
+            ? state.draftAttachments.map(normalizeLocalImageRef).filter((ref): ref is ChatImageRef => ref !== null) : [],
+          draftBase: normalizeLocalImageRef(state.draftBase),
+        };
+        return {
+          threads: migrateThreads(persisted),
+          draft: '',
           draftAttachments: [],
           draftBase: null,
           activeRun: (state.activeRun as ChatActiveRun | null) || null,
           runEventCursors: {},
+          activeCanvasId: '',
+          activeThreadId: '',
+          activeThreadByCanvas: {},
+          draftsByScope: legacyDraft.draft || legacyDraft.draftAttachments.length || legacyDraft.draftBase ? { 'canvas:': legacyDraft } : {},
+          pendingMetadata: {},
         };
       },
       partialize: (state) => ({
@@ -693,20 +802,25 @@ export const useChatStore = create<ChatState>()(
         // 刷新后要凭 runId 重连 SSE，否则生成中的消息会永远停在 running。
         activeRun: state.activeRun,
         runEventCursors: state.runEventCursors,
+        activeCanvasId: state.activeCanvasId,
+        activeThreadId: state.activeThreadId,
+        activeThreadByCanvas: state.activeThreadByCanvas,
+        draftsByScope: state.draftsByScope,
+        pendingMetadata: state.pendingMetadata,
       }),
     },
   ),
 );
 
-/** 当前线程：activeThreadId 命中的全局线程。 */
+/** 当前线程：activeThreadId 命中的当前画布线程。 */
 export function activeThreadOf(state: ChatState): ChatThread | undefined {
   if (!state.activeThreadId) return undefined;
-  return state.threads.find((item) => item.id === state.activeThreadId);
+  return state.threads.find((item) => item.id === state.activeThreadId && item.canvasId === state.activeCanvasId);
 }
 
-/** 全部对话线程，按更新时间新的在前。 */
+/** 当前画布对话线程，按更新时间新的在前。 */
 export function allThreads(state: ChatState): ChatThread[] {
   return [...state.threads]
-    .filter((thread) => thread.messages.length > 0)
+    .filter((thread) => thread.messages.length > 0 && thread.canvasId === state.activeCanvasId)
     .sort((a, b) => Date.parse(b.updatedAt || '') - Date.parse(a.updatedAt || ''));
 }

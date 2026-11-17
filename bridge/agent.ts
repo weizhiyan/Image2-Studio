@@ -1,5 +1,6 @@
 import type { ModelProfile } from './settings.js';
 import { callTextModel, isUnsupportedTemperatureError } from './textApi.js';
+import { visualDesignEnabled, visualDesignSchema } from './visualDesign.js';
 
 /** 角色温度统一收口到 0-1；旧快照里的越界值不直接发给上游。 */
 function normalizeRoleTemperature(value: number | undefined): number | undefined {
@@ -134,8 +135,11 @@ function parseToolArguments(value: unknown): Record<string, unknown> {
   return parsed as Record<string, unknown>;
 }
 
+export const ASK_USER_POLICY = '使用 ask_user 时默认只问最有价值的1题，确有必要最多2题。purpose=clarification 用于无法合理确定的必要事实、参考用途冲突或缺失的精确文字，不编造事实；purpose=creative 只在尚无审美方向、且不同选择会明显影响结果时可询问一次用途、受众或希望传达的感受，给少量具体方向，允许自填或让 AI 决定。没写风格不等于必须反问；已有参考风格、情绪目标、局部修改要求，或用户说你发挥、你决定、直接生成时，不再追问视觉方向。不要连续追问风格、配色、造型、字体整套表单。type=single/multiple 至少2选项，type=text 可开放输入；optional=true 允许跳过非必要题。不得预选推荐项或将未选择的建议写入提示词。回答后继续原任务，原本已授权生成则直接生成；只是讨论不获得新增生图授权。';
+
 export interface AskUserQuestion {
   id: string;
+  purpose?: 'clarification' | 'creative';
   title: string;
   description?: string;
   type?: 'single' | 'multiple' | 'text';
@@ -146,7 +150,7 @@ export interface AskUserQuestion {
 
 export function normalizeAskUserQuestions(value: unknown): AskUserQuestion[] {
   if (!Array.isArray(value)) return [];
-  return value.slice(0, 4).flatMap((raw, questionIndex) => {
+  return value.slice(0, 2).flatMap((raw, questionIndex) => {
     if (!raw || typeof raw !== 'object') return [];
     const item = raw as Record<string, unknown>;
     const title = String(item.title || item.question || '').trim().slice(0, 240);
@@ -169,12 +173,15 @@ export function normalizeAskUserQuestions(value: unknown): AskUserQuestion[] {
     const rawType = String(item.type || item.kind || item.mode || '').toLowerCase();
     const multiple = item.multiple === true || ['multiple', 'multi', 'checkbox'].includes(rawType);
     const type: 'single' | 'multiple' | 'text' = rawType === 'text' ? 'text' : multiple ? 'multiple' : 'single';
+    const creative = item.purpose === 'creative';
+    if (creative && type !== 'text' && !options.some((option) => option.value === '让 AI 决定')) options.push({ label: '让 AI 决定', value: '让 AI 决定' });
     if (!title || (type !== 'text' && options.length < 2)) return [];
     return [{
       id: String(item.id || `question_${questionIndex + 1}`).trim().slice(0, 80) || `question_${questionIndex + 1}`,
       title,
       ...(String(item.description || item.hint || '').trim() ? { description: String(item.description || item.hint).trim().slice(0, 320) } : {}),
       type,
+      purpose: creative ? 'creative' as const : 'clarification' as const,
       ...(typeof item.optional === 'boolean' ? { optional: item.optional } : {}),
       multiple: type === 'multiple',
       options: type === 'text' ? [] : options,
@@ -185,19 +192,20 @@ export function normalizeAskUserQuestions(value: unknown): AskUserQuestion[] {
 export function askUserToolDef(): AgentToolDef {
   return {
     name: 'ask_user',
-    description: '普通歧义优先用自然语言追问；只有关键多项创作决策存在实质歧义时才向用户发起结构化澄清，一次 1 到 4 个互不重复的问题。type=single/multiple 时提供至少2个选项，type=text 为开放输入、不需要 options；optional=true 允许跳过本题，跳过不等于取消整个任务。已有信息不要重复询问；闲聊、纯分析和用户已明确要求立即生成时不要调用。收到答案后继续本轮对话。',
+    description: ASK_USER_POLICY,
     parameters: {
       type: 'object',
       properties: {
         questions: {
           type: 'array',
           minItems: 1,
-          maxItems: 4,
+          maxItems: 2,
           items: {
             type: 'object',
             properties: {
               id: { type: 'string' },
               title: { type: 'string', description: '简短、具体的问题' },
+              purpose: { type: 'string', enum: ['clarification', 'creative'], description: 'clarification 为必须确认的事实或指令冲突；creative 为可委托 AI 决定的审美方向，不能用来编造事实' },
               description: { type: 'string', description: '可选的补充说明' },
               type: { type: 'string', enum: ['single', 'multiple', 'text'] },
               optional: { type: 'boolean', description: '允许用户跳过本题，不取消整个任务' },
@@ -246,25 +254,28 @@ export interface AgentCallParams {
 
 /* ── 工具定义 ── */
 
-export function generateImageToolDef(): AgentToolDef {
+export function generateImageToolDef(structured = visualDesignEnabled()): AgentToolDef {
   return {
     name: 'generate_image',
     description: '调用绘板生图模型生成图片。仅在用户明确要求生成（如「生成」「做一版」「按这个方向出图」）或方案已聊透且用户认可时调用；用户只要分析、评价、比较时不要调用。单轮最多调用 2 次。',
     parameters: {
       type: 'object',
       properties: {
-        prompt: {
+        ...(structured ? { design: { ...visualDesignSchema, description: '按共享设计规则填写需求、文案及已决定的视觉方案。程序核对后组装最终生图提示词；不得省略设计结果。references 编号始终对应用户原始图片顺序；提供了多图时逐张说明用途，不使用的图明确写不使用。隐式继承上一版编辑时图1就是基准图。' } } : {}),
+        ...(!structured ? { prompt: {
           type: 'string',
-          description: '由当前 Agent 按系统中的统一视觉规则直接整理的最终生图提示词，将原样交给生图模型，不再调用其它优化模型。完整保留多轮已确认的主体、风格、构图、精确图中文字、否定约束，以及必须保留和只修改的内容。',
-        },
+          description: '以用户原文为基础的最终生图提示词，清楚的单轮需求可以原样提交。仅补必要的上下文、参考关系和修改边界，保留已确认内容、精确图中文字与否定约束；未指定的视觉细节交给生图模型。将原样提交，不再调用其它优化模型。',
+        } } : {}),
         originalPrompt: {
           type: 'string',
-          description: '用户原始意图与本次修改要求，用于留档追溯；不要用它代替最终 prompt。',
+          description: '用户原始意图与本次修改要求，用于留档追溯。无需整理时可以与最终 prompt 相同。',
         },
         referenceImages: {
           type: 'array',
           items: { type: 'number' },
-          description: '要作为参考图的用户图片编号（从 1 开始，对应用户消息里「图 N」的顺序）。不传表示不参考任何图片。',
+          description: structured
+            ? 'reference/edit 模式下系统保持全部用户图片的原始编号与顺序，不重排或压缩编号；请逐张在 design.references 写明使用或不使用的用途。create 模式不使用图片。'
+            : '要作为参考图的用户图片编号（从 1 开始，对应用户消息里「图 N」的顺序）。不传表示不参考任何图片。',
         },
         referenceUsage: {
           type: 'string',
@@ -273,7 +284,12 @@ export function generateImageToolDef(): AgentToolDef {
         },
         ratio: {
           type: 'string',
-          description: '画幅比例，如 1:1、16:9、3:2。用户没提就不传，按自动。',
+          description: '本次设计确定的宽:高比例，如 1:1、16:9、2:3。用户明确指定时必须遵守；未指定时根据用途、信息量与构图主动选择并传入，继续编辑时保留基准图比例。必须与最终 prompt 的画幅一致，不默认省略或固定方形。',
+        },
+        outputFormat: {
+          type: 'string',
+          enum: ['png', 'gif', 'svg'],
+          description: '用户明确要求 GIF 动图或 SVG 矢量图时指定对应格式；默认 PNG。需要当前生图供应商支持该输出格式。',
         },
         count: {
           type: 'number',
@@ -284,7 +300,7 @@ export function generateImageToolDef(): AgentToolDef {
           description: '要接着迭代的历史生成图版本 id（只在用户明确指定某张历史图修改时传；同一线程无外部引用且判定为 edit 时，系统自动续接最近一张）。',
         },
       },
-      required: ['prompt'],
+      required: structured ? ['design'] : ['prompt'],
     },
   };
 }
@@ -307,13 +323,16 @@ function prepareVisualMessages(params: AgentCallParams): {
 } {
   const lastUserIndex = params.messages.map((message) => message.role).lastIndexOf('user');
   const legacyImages = params.visualContextImages ?? params.messages[lastUserIndex]?.images ?? [];
-  const visuals = (params.visualContext ?? legacyImages.map((url, index) => ({
+  const candidates = (params.visualContext ?? legacyImages.map((url, index) => ({
     id: `legacy-image-${index + 1}`,
     label: params.visualContextImages === undefined ? `用户引用图 ${index + 1}` : `当前视觉图片 ${index + 1}`,
     url,
   }))).filter((item) => /^(?:data:image\/|https?:\/\/)/i.test(item.url));
+  const isSvg = (url: string) => /^data:image\/svg(?:\+xml)?[;,]/i.test(url) || /\.svg(?:$|[?#])/i.test(url);
+  const visuals = candidates.filter((item) => !isSvg(item.url));
+  const vectorFiles = candidates.filter((item) => isSvg(item.url));
   const messages = params.messages.map(({ images: _images, ...message }) => ({ ...message }));
-  if (visuals.length === 0) return { messages, visualIndex: -1, visuals };
+  if (candidates.length === 0) return { messages, visualIndex: -1, visuals };
   // 新生成候选发生在工具结果之后，不能写回之前的 user 消息，亦不能插进 tool_calls/results 中间。
   let visualIndex = lastUserIndex;
   if (lastUserIndex < 0 || messages.slice(lastUserIndex + 1).some((message) => message.role === 'tool' || message.toolCalls?.length)) {
@@ -321,9 +340,10 @@ function prepareVisualMessages(params: AgentCallParams): {
     visualIndex = messages.length - 1;
   }
   const note = [
-    '视觉附件按以下顺序与图片一一对应；用户引用编号和生成候选编号是独立的，不得混用：',
+    ...(visuals.length ? ['视觉附件按以下顺序与图片一一对应；用户引用编号和生成候选编号是独立的，不得混用：'] : []),
     ...visuals.map((item, index) => `视觉附件 ${index + 1}：${item.label}；ID=${item.id}`),
-    '请实际查看图片内容后再回答，不要仅凭文字描述推测。',
+    ...(visuals.length ? ['请实际查看图片内容后再回答，不要仅凭文字描述推测。'] : []),
+    ...vectorFiles.map((item) => `SVG 文件：${item.label}；ID=${item.id}。原文件保留在画布，未作为视觉附件发送，不得声称已查看其画面。`),
   ].join('\n');
   messages[visualIndex] = { ...messages[visualIndex], content: `${messages[visualIndex].content}\n\n${note}` };
   return { messages, visualIndex, visuals };
@@ -692,15 +712,19 @@ function stripJsonAction(raw: string): string {
 }
 
 /** JSON 协议的系统提示增量：告诉模型怎么表达"我要调工具"。 */
-export function jsonProtocolSpec(): string {
+export function jsonProtocolSpec(structured = visualDesignEnabled()): string {
   return [
     '需要向用户结构化追问时，输出 ask_user JSON；决定生图时输出 generate_image JSON。每次只输出一个动作代码块。',
     '不要输出 XML、DSML 或其他工具调用源码；工具动作只使用下面的 JSON 格式。',
     '```json',
-    '{"action": "generate_image", "args": {"prompt": "按统一视觉规则整理、可直接执行的最终生图提示词", "originalPrompt": "用户原始意图与本次修改要求", "referenceImages": [1], "referenceUsage": "style", "ratio": "1:1", "count": 1}}',
+    structured
+      ? '{"action":"generate_image","args":{"design":<按系统给定结构填写完整设计结果>,"originalPrompt":"用户原始需求","referenceImages":[],"count":1}}'
+      : '{"action": "generate_image", "args": {"prompt": "以用户原文为基础的最终生图提示词，无需整理时与原文相同", "originalPrompt": "用户原始意图与本次修改要求", "referenceImages": [1], "referenceUsage": "style", "ratio": "1:1", "count": 1}}',
     '```',
-    'prompt 是由当前 Agent 按系统统一视觉规则整理的最终生图提示词，原样提交生图模型，不再另调优化模型。完整保留精确图中文字、否定约束、必须保留项与修改边界；originalPrompt 可选，用于留档原始意图。',
-    '普通生图或改图请求信息足够时直接输出 generate_image 动作，不附带需求复述、方案或确认提问；可用合理默认值补足的普通歧义不追问。只有缺少会实质改变成图结果且无法合理确定的关键信息时才使用 ask_user。questions 为1-4题；type=single/multiple 时至少2选项；type=text 为开放输入、可省略 options；optional=true 允许只跳过该题，不取消整个任务。',
+    structured
+      ? '必须提供 design，由程序组装最终提示词，不另写重复的 prompt。originalPrompt 保留原始意图；design.references 始终对应全部用户图片原始编号与顺序，不使用的图也需写明；隐式继承基准图时编号为1。'
+      : 'prompt 以用户原文为基础，可以原样保留，只补必要的上下文、参考关系和修改边界。未指定的视觉细节交给生图模型，不要求补齐视觉方案；不再另调优化模型。完整保留精确图中文字、否定约束和必须保留项；originalPrompt 可选，用于留档原始意图。',
+    '普通生图或改图请求信息足够时直接输出 generate_image 动作，不附带需求复述、方案或确认提问。' + ASK_USER_POLICY,
     '```json',
     '{"action":"ask_user","args":{"questions":[{"id":"subject","title":"画面主体是什么？","type":"single","options":[{"label":"产品本身"},{"label":"使用场景"}]}]}}',
     '```',
@@ -830,7 +854,7 @@ async function callWithJsonProtocol(
     .join('\n\n');
   const userText = history || '（无历史）';
   const reply = await callTextModel(profile, {
-    systemSpec: params.tools.length > 0 ? `${params.systemSpec}\n\n${jsonProtocolSpec()}` : params.systemSpec,
+    systemSpec: params.tools.length > 0 ? `${params.systemSpec}\n\n${jsonProtocolSpec(params.tools.some(tool => Boolean((tool.parameters.properties as Record<string, unknown>)?.design)))}` : params.systemSpec,
     userText,
     imageUrls: visuals.map((item) => item.url),
     maxTokens: params.maxTokens || AGENT_MAX_OUTPUT_TOKENS,

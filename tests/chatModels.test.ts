@@ -2,7 +2,6 @@ import { describe, expect, it } from 'vitest';
 import {
   chatImageModelOptions,
   chatTextModelOptions,
-  isChatTextModelLocked,
   resolveChatImageSelection,
   resolveChatTextSelection,
 } from '@/lib/chatModels';
@@ -67,13 +66,6 @@ describe('对话模型选项', () => {
     expect(list.map((item) => item.key)).toEqual(['img:img-1', 'img:img-2']);
   });
 
-  it('线程开始对话后锁定语言模型', () => {
-    expect(isChatTextModelLocked(thread())).toBe(false);
-    expect(isChatTextModelLocked(thread({
-      messages: [{ id: 'm1', role: 'user', content: 'x', createdAt: '' }],
-    }))).toBe(true);
-    expect(isChatTextModelLocked(undefined)).toBe(false);
-  });
 });
 
 describe('对话模型解析', () => {

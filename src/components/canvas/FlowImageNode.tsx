@@ -39,12 +39,13 @@ import './NodeVersionGrid.css';
 /** 注入给 ImageNodes.css 的 JS 变量：宽度定卡片，比例定图片不变形（变量是宽/高，与 CSS aspect-ratio 同向）。 */
 function nodeStyleVars(data: CanvasNodeData): Record<string, string> {
   const hasManualHeight = data.nodeHeightManual === true;
+  const isComposer = data.kind === 'composer' && !String(data.imageUrl || data.referenceDataUrl || '').trim();
   const box = nodeBoxFor(data);
   const aspect = nodeAspectRatio(data);
   return {
     '--image-node-width': `${nodeWidthFor(data)}px`,
     '--image-aspect-ratio': String(Math.round(aspect * 100) / 100),
-    ...(hasManualHeight ? { '--image-node-height': `${box.height}px` } : {}),
+    ...(hasManualHeight || isComposer ? { '--image-node-height': `${box.height}px` } : {}),
   };
 }
 
@@ -527,13 +528,13 @@ export default function FlowImageNode({ id, data, selected }: NodeProps) {
   useLayoutEffect(() => {
     const input = composerInputRef.current;
     if (!input) return;
-    if (hasManualHeight) {
+    if (hasManualHeight || isComposer) {
       input.style.height = '';
       return;
     }
     input.style.height = '0px';
     input.style.height = `${Math.min(220, Math.max(72, input.scrollHeight))}px`;
-  }, [promptDraft, isRunning, references.length, hasManualHeight]);
+  }, [promptDraft, isRunning, references.length, hasManualHeight, isComposer]);
 
   // 宫格同时只展开一个：从选中态被点掉（换选节点 / 点空白）、按 Esc 都收起。
   // 这里只认“曾经选中过”：角标点击不抢选中态时，节点没被选中过也不该自己秒收。

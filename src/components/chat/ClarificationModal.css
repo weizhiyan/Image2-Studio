@@ -1,4 +1,5 @@
 .hb-clarification-overlay {
+  flex-shrink: 0;
   position: relative;
   width: auto;
   margin: 0 var(--spacing-2) var(--spacing-2);
@@ -10,7 +11,7 @@
   flex-direction: column;
   min-height: 0;
   width: 100%;
-  max-height: min(560px, calc(100dvh - 140px));
+  max-height: min(560px, 48dvh);
   overflow: hidden;
   border: 0;
   border-radius: var(--radius-lg);
@@ -18,6 +19,12 @@
   color: var(--color-text-primary);
   box-shadow: var(--chat-composer-shadow);
   animation: hb-clarification-enter var(--motion-normal) var(--ease-out);
+}
+
+.hb-clarification-content:not([hidden]) {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
 }
 
 @keyframes hb-clarification-enter {
@@ -183,7 +190,7 @@
   position: relative;
   min-width: 0;
   display: grid;
-  grid-template-columns: auto auto minmax(0, 1fr);
+  grid-template-columns: auto minmax(0, 1fr);
   align-items: center;
   gap: var(--spacing-2);
   min-height: 44px;
@@ -272,7 +279,7 @@
 }
 
 .hb-clarification-other {
-  grid-column: 3;
+  box-sizing: border-box;
   width: 100%;
   min-width: 0;
   height: var(--control-height-compact);
@@ -356,6 +363,12 @@
   cursor: not-allowed;
   background: var(--clarification-primary-disabled-bg);
   color: var(--clarification-primary-disabled-fg);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .hb-clarification-modal {
+    animation: none;
+  }
 }
 
 .hb-clarification-secondary:focus-visible,

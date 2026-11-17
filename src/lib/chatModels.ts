@@ -36,11 +36,6 @@ export function chatImageModelOptions(settings: MediaSettings | null | undefined
   return optionsOf(settings, 'image');
 }
 
-/** 线程发出第一条消息后锁定语言模型，换模型只能新建对话。 */
-export function isChatTextModelLocked(thread: ChatThread | undefined): boolean {
-  return Boolean(thread && thread.messages.length > 0);
-}
-
 function savedOption(
   settings: MediaSettings | null | undefined,
   kind: 'text' | 'image',

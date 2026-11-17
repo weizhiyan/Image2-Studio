@@ -31,6 +31,7 @@
 .image-node-running-border {
   position: absolute;
   inset: 0;
+  z-index: 6;
   border-radius: var(--radius-lg);
   corner-shape: var(--corner-smooth);
   pointer-events: none;

@@ -436,6 +436,8 @@
   display: grid;
   gap: 0;
   padding: 0;
+  border-radius: inherit;
+  corner-shape: inherit;
 }
 
 .image-node-kind-label {
@@ -550,6 +552,20 @@
   cursor: grab;
 }
 
+.image-node-composer.is-empty {
+  width: 100%;
+}
+
+.react-flow__node-flow-image:has(> .image-node-composer.is-empty:not(.has-manual-height)) {
+  transition: width var(--motion-slower) var(--ease-in-out);
+}
+
+.image-node-composer.is-empty:not(.has-manual-height) .image-node-composer-shell {
+  min-height: 0;
+  max-height: none;
+  transition: height var(--motion-slower) var(--ease-in-out);
+}
+
 .image-node-composer-shell {
   position: relative;
   width: 100%;
@@ -642,6 +658,7 @@
   overflow-y: hidden;
 }
 
+.image-node-composer.is-empty .image-node-composer-shell textarea,
 .image-flow-node.has-manual-height .image-node-composer-shell textarea {
   flex: 1 1 auto;
   min-height: 72px;
@@ -677,6 +694,7 @@
   z-index: 5;
   overflow: hidden;
   border-radius: inherit;
+  corner-shape: inherit;
   background: color-mix(in srgb, var(--color-ui-panel) 88%, var(--color-bg-base));
   pointer-events: none;
 }
@@ -1295,7 +1313,8 @@
   place-items: center;
   gap: 8px;
   border: 1px solid color-mix(in srgb, var(--color-ui-border-subtle) 52%, transparent);
-  border-radius: var(--radius-sm);
+  border-radius: inherit;
+  corner-shape: inherit;
   background: var(--color-ui-panel);
   color: var(--color-text-tertiary);
 }
@@ -1310,7 +1329,7 @@
   overflow: hidden;
   color: var(--color-text-primary);
   border-color: color-mix(in srgb, var(--color-text-primary) 16%, transparent);
-  background: color-mix(in srgb, var(--color-ui-panel) 88%, var(--color-bg-base));
+  background: var(--running-card-bg);
   box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-text-primary) 8%, transparent);
 }
 
@@ -2726,6 +2745,8 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .react-flow__node-flow-image:has(> .image-node-composer.is-empty:not(.has-manual-height)),
+  .image-node-composer.is-empty:not(.has-manual-height) .image-node-composer-shell,
   .image-node-composer-foot,
   .image-node-result-meta,
   .image-node-version-actions,

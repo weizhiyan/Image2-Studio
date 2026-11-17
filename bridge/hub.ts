@@ -122,6 +122,7 @@ export function pushNodeState(payload: PushedNodeState): Promise<void> {
 
 export interface LocateRequest {
   type: 'locate';
+  chatThreadId?: string;
   /** 目标节点所在画布：浏览器停在别的画布时，前端会先切过去再聚焦。 */
   canvasId: string;
   nodeId: string;

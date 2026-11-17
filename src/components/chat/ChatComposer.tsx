@@ -2,11 +2,12 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, typ
 import { useCanvasStore } from '@/stores/canvasStore';
 import { activeThreadOf, draftKeyOf, useChatStore } from '@/stores/chatStore';
 import { activeVersionOf, normalizeVersions } from '@/lib/versions';
-import { chatImageModelOptions, chatTextModelOptions, isChatTextModelLocked, resolveChatImageSelection, resolveChatTextSelection, type ChatModelOption } from '@/lib/chatModels';
+import { chatImageModelOptions, chatTextModelOptions, resolveChatImageSelection, resolveChatTextSelection, type ChatModelOption } from '@/lib/chatModels';
 import { useSettingsStore } from '@/stores/settingsStore';
 import type { ChatImageRef, ChatModelSelection, ChatRoleSnapshot } from '@/types';
 import { createPortal } from 'react-dom';
 import { ModelGlyphIcon } from '@/components/canvas/NodeToolbarIcons';
+import ModelOptionGroups from '@/components/ModelOptionGroups';
 import { chatInlineSegments, chatInlineSignature, chatRoleLabel } from '@/lib/chatInlineRefs';
 import { CHAT_ROLES_UPDATED_EVENT, chatRoleSnapshotOf, enabledChatRoles, toggleChatRoleSelection } from '@/lib/chatRoles';
 import { getPromptSkills, type PromptSkill } from '@/lib/bridge';
@@ -357,11 +358,15 @@ export default function ChatComposer({
   onStop,
   running,
   submitting = false,
+  blockedReason = '',
+  awaitingInput = false,
 }: {
   onSend: (text: string, refs: ChatImageRef[], modelSelection: ChatModelSelection, agentRole?: ChatRoleSnapshot) => void;
   onStop: () => void;
   running: boolean;
   submitting?: boolean;
+  blockedReason?: string;
+  awaitingInput?: boolean;
 }) {
   const draft = useChatStore((state) => state.draft);
   const setDraft = useChatStore((state) => state.setDraft);
@@ -371,7 +376,6 @@ export default function ChatComposer({
   const addDraftAttachment = useChatStore((state) => state.addDraftAttachment);
   const removeDraftAttachment = useChatStore((state) => state.removeDraftAttachment);
   const setDraftAttachments = useChatStore((state) => state.setDraftAttachments);
-  const clearDraft = useChatStore((state) => state.clearDraft);
   const canvasId = useChatStore((state) => state.activeCanvasId);
   const activeRoleId = useChatStore((state) => state.activeRoleId);
   const setActiveRole = useChatStore((state) => state.setActiveRole);
@@ -403,7 +407,7 @@ export default function ChatComposer({
   const thread = useChatStore(activeThreadOf);
   const textOptions = useMemo(() => chatTextModelOptions(settings), [settings]);
   const imageOptions = useMemo(() => chatImageModelOptions(settings), [settings]);
-  const textModelLocked = isChatTextModelLocked(thread);
+  const [modelNotice, setModelNotice] = useState('');
   const selectedText = thread
     ? resolveChatTextSelection(settings, thread)
     : (pendingText || resolveChatTextSelection(settings, undefined));
@@ -528,19 +532,9 @@ export default function ChatComposer({
   const chooseTextModel = (option: ChatModelOption) => {
     setModelMenu(false);
     setTextMenuOpen(false);
+    setModelNotice(option.model);
     if (!thread) {
       setPendingText(option);
-      return;
-    }
-    if (textModelLocked) {
-      // 对话已经开始：换模型等于换上下文，直接带着当前草稿和 Agent 生图模型新建一条对话。
-      useChatStore.getState().createThread(canvasId, {
-        textProfileId: option.profileId,
-        textModel: option.model,
-        imageProfileId: selectedImage?.profileId,
-        imageModel: selectedImage?.model,
-        preserveDraft: true,
-      });
       return;
     }
     useChatStore.getState().setThreadTextProfile(thread.id, option.profileId, option.model);
@@ -732,15 +726,13 @@ export default function ChatComposer({
       onStop();
       return;
     }
-    if (submitting || !canSend) return;
+    if (submitting || blockedReason || awaitingInput || !canSend) return;
     const leadingWhitespace = draft.length - draft.trimStart().length;
     const sendAttachments = attachments.map((attachment) => ({
       ...attachment,
       position: Math.max(0, (attachment.position ?? draft.length) - leadingWhitespace),
     }));
     onSend(draft.trim(), sendAttachments, modelSelection, activeRole ? chatRoleSnapshotOf(activeRole) : undefined);
-    clearDraft();
-    setDraftBase(null);
     window.requestAnimationFrame(() => {
       textareaRef.current?.focus();
       adjustHeight();
@@ -918,11 +910,11 @@ export default function ChatComposer({
           <button
             type="button"
             className={`hb-chat-model-pill ${modelMenu ? 'is-open' : ''}`}
-            title={`Agent 生图模型 ${imageModelLabel} · 对话模型 ${textModelLabel}${textModelLocked ? '（对话模型已锁定，切换会新建对话）' : ''}`}
+            title={`Agent 生图模型 ${imageModelLabel} · 对话模型 ${textModelLabel}${running || awaitingInput ? '（切换下轮生效）' : ''}`}
             aria-label={`选择生图模型，当前 ${imageModelLabel}；对话模型 ${textModelLabel}`}
             aria-haspopup="menu"
             aria-expanded={modelMenu}
-            disabled={running}
+            disabled={submitting}
             onClick={toggleModelMenu}
           >
             <ModelGlyphIcon />
@@ -937,7 +929,7 @@ export default function ChatComposer({
               aria-label="选择模型"
             >
               <p className="hb-chat-model-section-title">Agent 生图模型</p>
-              {imageOptions.map((option) => {
+              <ModelOptionGroups options={imageOptions}>{(option) => {
                 const active = selectedImage?.key === option.key;
                 return (
                   <button
@@ -950,7 +942,6 @@ export default function ChatComposer({
                   >
                     <span className="hb-chat-model-option-text">
                       <span>{option.model}</span>
-                      <small>{option.profileName}</small>
                     </span>
                     {active ? (
                       <span className="hb-chat-model-option-check" aria-hidden="true">
@@ -961,7 +952,7 @@ export default function ChatComposer({
                     ) : null}
                   </button>
                 );
-              })}
+              }}</ModelOptionGroups>
               {imageOptions.length === 0 ? <p className="hb-chat-menu-empty">暂无可用生图模型，请到模型设置启用</p> : null}
 
               <div className="hb-chat-model-divider" aria-hidden="true" />
@@ -984,7 +975,7 @@ export default function ChatComposer({
                   <span>对话模型</span>
                   <small>
                     {selectedText ? `${selectedText.model} · ${selectedText.profileName}` : '未配置'}
-                    {textModelLocked ? ' · 已锁定' : ''}
+                    {running || awaitingInput ? ' · 切换下轮生效' : ''}
                   </small>
                 </span>
                 <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
@@ -1004,7 +995,7 @@ export default function ChatComposer({
               onMouseEnter={cancelCloseTextMenu}
               onMouseLeave={scheduleCloseTextMenu}
             >
-              {textOptions.map((option) => {
+              <ModelOptionGroups options={textOptions}>{(option) => {
                 const active = selectedText?.key === option.key;
                 return (
                   <button
@@ -1017,7 +1008,6 @@ export default function ChatComposer({
                   >
                     <span className="hb-chat-model-option-text">
                       <span>{option.model}</span>
-                      <small>{option.profileName}{textModelLocked ? ' · 新建对话' : ''}</small>
                     </span>
                     {active ? (
                       <span className="hb-chat-model-option-check" aria-hidden="true">
@@ -1028,7 +1018,7 @@ export default function ChatComposer({
                     ) : null}
                   </button>
                 );
-              })}
+              }}</ModelOptionGroups>
               {textOptions.length === 0 ? <p className="hb-chat-menu-empty">暂无可用对话模型，请到模型设置启用</p> : null}
             </div>,
             document.body,
@@ -1037,8 +1027,8 @@ export default function ChatComposer({
         <button
           type="button"
           className={`hb-chat-send ${running ? 'is-stop' : ''}`}
-          disabled={!running && (submitting || !canSend)}
-          title={running ? '停止运行' : submitting ? '正在发送' : '发送（Enter）'}
+          disabled={!running && (submitting || Boolean(blockedReason) || awaitingInput || !canSend)}
+          title={running ? '停止运行' : blockedReason || (awaitingInput ? '请先完成当前问题或确认' : submitting ? '正在发送' : '发送（Enter）')}
           aria-label={running ? '停止运行' : submitting ? '正在发送' : '发送'}
           aria-busy={submitting}
           onClick={send}
@@ -1047,6 +1037,7 @@ export default function ChatComposer({
         </button>
       </div>
 
+      {modelNotice || blockedReason || awaitingInput ? <p className="hb-chat-panel-notice" role="status">{blockedReason || (awaitingInput ? '请先回答或取消当前任务；模型切换下轮生效。' : modelNotice ? `已选择 ${modelNotice}${running ? '，下轮生效' : '，继续当前对话'}` : '')}</p> : null}
       {atOpen ? (
         <div className="hb-chat-picker" role="dialog" aria-label="引用画布图片">
           <div className="hb-chat-picker-head">

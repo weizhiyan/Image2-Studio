@@ -11,7 +11,7 @@ import { resolveResponseModel } from './imageRequestContext.js';
 import { detectReferenceUsage, directStyleNote, enhancePromptDetailed, fidelityForUsage, optimizeVideoPrompt, testTextProfile, usageForGenerateRequest } from './textApi.js';
 import { fetchProviderModels, fetchRemoteImage, testProviderConnection } from './providerApi.js';
 import { ackPendingLocate, addSseClient, countOpenTabs, peekPendingLocate, pushCanvasUpdated, pushImage, pushLocate, pushNodeState, pushVideo } from './hub.js';
-import { ChatConflictError, clearChatThread, deleteChatThread, readChatThread, readChatThreads, removeChatMediaReferences, updateChatMemory, writeClientThread } from './chat.js';
+import { assignChatThreadCanvas, ChatConflictError, clearChatThread, deleteChatThread, readChatThread, readChatThreads, removeChatMediaReferences, updateChatMemory, writeClientThread } from './chat.js';
 import { answerChatRun, buildAgentSystemSpec, confirmChatRun, getChatRunSnapshot, startChatRun, stopChatRun, stopThreadRuns, subscribeChatRun, waitChatRunReady, type StartRunRequest } from './runs.js';
 import { contentTypeOf, copyMediaFile, deleteMediaFile, imageExtensionOf, revealLocalFile, saveDataUrl, safeMediaPath } from './files.js';
 import { createVideoTask, describeVideoModel, downloadVideoUrl, encodeVideoImagesAsDataUrls, getMediaVideoPriceQuote, listVideoModels, normalizeVideoRatio, normalizeVideoResolution, probeVideoConnection, validateVideoConfig, validateVideoImageDataUrls, VideoConfigurationError, VideoImageInputError, VideoRequestError, videoImagesUseDataUrls, videoUploadSupportsInlineDataUrl } from './videoApi.js';
@@ -132,6 +132,10 @@ async function serveMediaFile(req: http.IncomingMessage, res: http.ServerRespons
   res.setHeader('Accept-Ranges', 'bytes');
   res.setHeader('Cache-Control', 'private, max-age=31536000, immutable');
   res.setHeader('Content-Type', contentType);
+  if (contentType === 'image/svg+xml') {
+    res.setHeader('Content-Security-Policy', "sandbox; default-src 'none'; style-src 'unsafe-inline'; img-src data:");
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+  }
 
   // 视频播放器（尤其 Safari）要求分段请求：没有 206 会直接判成无法播放。
   const rangeHeader = String(req.headers.range || '').trim();
@@ -1176,6 +1180,8 @@ function readReferenceUrls(body: { referenceDataUrl?: unknown; referenceDataUrls
           const enhanced = await enhancePromptDetailed(textProfile, {
             prompt,
             size: body.size ? String(body.size) : undefined,
+            aspectRatio: body.aspectRatio ? String(body.aspectRatio) : undefined,
+            referenceSize: body.referenceSize ? String(body.referenceSize) : undefined,
             // 多图按前端传的数组顺序走：数组第 1 张就是画布 chips 上的「图 1」
             referenceDataUrls: readReferenceUrls(body),
             level: current.enhanceLevel,
@@ -1277,6 +1283,10 @@ function readReferenceUrls(body: { referenceDataUrl?: unknown; referenceDataUrls
         try {
           images = await generateImages(profile, {
             prompt: finalPrompt,
+            originalPrompt,
+            optimizedPrompt: originalPrompt !== prompt ? prompt : undefined,
+            requestContext: { source: 'browser', canvasId, nodeId },
+            outputFormat: body.outputFormat as 'png' | 'gif' | 'svg' | undefined,
             apiMode,
             imagesPrompt,
             size: body.size ? String(body.size) : undefined,
@@ -1350,6 +1360,7 @@ function readReferenceUrls(body: { referenceDataUrl?: unknown; referenceDataUrls
             error: '',
             imageUrl: firstVersion.imageUrl,
             fileName: firstVersion.fileName,
+            outputFormat: body.outputFormat as 'png' | 'gif' | 'svg' | undefined,
             size: actualSize,
             ...(Number(firstVersion.width) > 0 && Number(firstVersion.height) > 0
               ? { width: Number(firstVersion.width), height: Number(firstVersion.height) }
@@ -1988,6 +1999,28 @@ function readReferenceUrls(body: { referenceDataUrl?: unknown; referenceDataUrls
       }
       if (pathname.startsWith('/api/canvases') && req.method === 'DELETE') {
         const canvasId = pathname.slice('/api/canvases/'.length);
+        if (url.searchParams.get('onlyIfEmpty') === '1') {
+          const deleted = await withCanvasWriteLock(async () => {
+            const docs = await readCanvasDocs();
+            const doc = docs[canvasId];
+            const hasThread = (await readChatThreads()).some((thread) => thread.canvasId === canvasId);
+            if (doc?.nodes.length || doc?.edges.length || hasThread) return false;
+            const registry = await readRegistry();
+            delete docs[canvasId];
+            delete registry[canvasId];
+            await backupCanvasDocs();
+            await atomicWriteJson(CANVAS_DOCS_FILE, docs);
+            await writeRegistry(registry);
+            return true;
+          });
+          json(res, deleted ? 200 : 409, { code: deleted ? 0 : 409, msg: deleted ? 'ok' : '画布已有内容，已保留' });
+          return;
+        }
+        const ownedThreads = (await readChatThreads()).filter((thread) => thread.canvasId === canvasId);
+        for (const thread of ownedThreads) {
+          await stopThreadRuns(thread.id);
+          await deleteChatThread(thread.id);
+        }
         await withCanvasWriteLock(async () => {
           const registry = await readRegistry();
           const docs = await readCanvasDocs();
@@ -2005,6 +2038,7 @@ function readReferenceUrls(body: { referenceDataUrl?: unknown; referenceDataUrls
       if (pathname === '/api/canvases' && req.method === 'GET') {
         const registry = await readRegistry();
         const docs = await readCanvasDocs();
+        const chatCanvasIds = new Set((await readChatThreads()).filter((thread) => thread.messages.length > 0).map((thread) => thread.canvasId));
         const ids = new Set([...Object.keys(registry), ...Object.keys(docs)]);
         json(res, 200, {
           code: 0,
@@ -2014,6 +2048,7 @@ function readReferenceUrls(body: { referenceDataUrl?: unknown; referenceDataUrls
               return {
                 id,
                 name: doc?.name || registry[id] || '未命名画布',
+                hasChat: chatCanvasIds.has(id),
                 nodes: doc?.nodes || [],
                 edges: doc?.edges || [],
                 ...(doc?.viewport ? { viewport: doc.viewport } : {}),
@@ -2021,7 +2056,7 @@ function readReferenceUrls(body: { referenceDataUrl?: unknown; referenceDataUrls
               };
             })
             // 没有节点的画布只是草稿：可以留在 registry 供 MCP 继续使用，但不进历史列表。
-            .filter((doc) => doc.nodes.length > 0 || doc.edges.length > 0),
+            .filter((doc) => doc.nodes.length > 0 || doc.edges.length > 0 || doc.hasChat),
           msg: 'ok',
         });
         return;
@@ -2241,6 +2276,21 @@ function readReferenceUrls(body: { referenceDataUrl?: unknown; referenceDataUrls
         } catch (error) {
           if (!(error instanceof ChatConflictError)) throw error;
           json(res, 409, { code: 1, data: error.thread, msg: error.message });
+        }
+        return;
+      }
+      if (pathname.startsWith('/api/chat/threads/') && pathname.endsWith('/canvas') && req.method === 'PATCH') {
+        const threadId = decodeURIComponent(pathname.slice('/api/chat/threads/'.length, -'/canvas'.length));
+        const body = await readBody(req) as { canvasId?: string; revision?: number };
+        const docs = await readCanvasDocs();
+        const registry = await readRegistry();
+        await stopThreadRuns(threadId);
+        try {
+          const thread = await assignChatThreadCanvas(threadId, String(body.canvasId || ''), body.revision, new Set([...Object.keys(docs), ...Object.keys(registry)]));
+          json(res, thread ? 200 : 404, { code: thread ? 0 : 1, data: thread, msg: thread ? 'ok' : '对话或目标画布不存在' });
+        } catch (error) {
+          if (!(error instanceof ChatConflictError)) throw error;
+          json(res, 409, { code: 1, data: error.thread, msg: '对话归属已更新，请刷新后重试' });
         }
         return;
       }

@@ -9,6 +9,7 @@ const CONTENT_TYPES: Record<string, string> = {
   '.jpeg': 'image/jpeg',
   '.webp': 'image/webp',
   '.gif': 'image/gif',
+  '.svg': 'image/svg+xml',
   '.mp4': 'video/mp4',
   '.webm': 'video/webm',
   '.mov': 'video/quicktime',
@@ -70,7 +71,37 @@ export function imageExtensionOf(buffer: Buffer, hint = ''): string {
   if (buffer.subarray(0, 3).equals(Buffer.from([0xff, 0xd8, 0xff]))) return 'jpg';
   if (buffer.subarray(0, 6).toString('ascii') === 'GIF87a' || buffer.subarray(0, 6).toString('ascii') === 'GIF89a') return 'gif';
   if (buffer.subarray(0, 4).toString('ascii') === 'RIFF' && buffer.subarray(8, 12).toString('ascii') === 'WEBP') return 'webp';
-  return ['png', 'jpg', 'jpeg', 'webp', 'gif'].includes(normalized) ? (normalized === 'jpeg' ? 'jpg' : normalized) : 'png';
+  if (svgRootOf(buffer)) return 'svg';
+  return ['png', 'jpg', 'jpeg', 'webp', 'gif', 'svg'].includes(normalized) ? (normalized === 'jpeg' ? 'jpg' : normalized) : 'png';
+}
+
+function svgRootOf(buffer: Buffer): string | undefined {
+  const prefix = buffer.subarray(0, 65536).toString('utf8').replace(/^\uFEFF/, '');
+  return /^\s*(?:(?:<\?[\s\S]*?\?>|<!--[\s\S]*?-->|<!DOCTYPE\s+svg\b[^>]*>)\s*)*(<svg\b[^>]*>)/i.exec(prefix)?.[1];
+}
+
+function svgSizeOf(root: string): ImageSize | null {
+  const attributes = new Map([...root.matchAll(/\s([\w:-]+)\s*=\s*(["'])(.*?)\2/gs)]
+    .map((match) => [match[1], match[3]]));
+  const length = (value = '') => {
+    const match = /^\s*(\d*\.?\d+(?:e[+-]?\d+)?)\s*(px|in|cm|mm|pt|pc)?\s*$/i.exec(value);
+    const unitScale: Record<string, number> = { px: 1, in: 96, cm: 96 / 2.54, mm: 96 / 25.4, pt: 96 / 72, pc: 16 };
+    return match ? Number(match[1]) * (unitScale[(match[2] || 'px').toLowerCase()] || 1) : undefined;
+  };
+  const viewBox = attributes.get('viewBox')?.trim().split(/[\s,]+/).map(Number);
+  const aspect = viewBox?.length === 4 && viewBox.every(Number.isFinite) && viewBox[2] > 0 && viewBox[3] > 0
+    ? viewBox[2] / viewBox[3]
+    : undefined;
+  let width = length(attributes.get('width'));
+  let height = length(attributes.get('height'));
+  if (aspect) {
+    if (width === undefined && height === undefined) [width, height] = [viewBox![2], viewBox![3]];
+    else if (width === undefined) width = height! * aspect;
+    else if (height === undefined) height = width / aspect;
+  }
+  return Number.isFinite(width) && Number.isFinite(height) && width! > 0 && height! > 0
+    ? { width: Math.max(1, Math.round(width!)), height: Math.max(1, Math.round(height!)) }
+    : null;
 }
 
 /**
@@ -79,7 +110,10 @@ export function imageExtensionOf(buffer: Buffer, hint = ''): string {
  * `object-fit: cover` 裁掉，按请求尺寸排的落点也会互相重叠。
  */
 export function imageSizeOf(buffer: Buffer): ImageSize | null {
-  if (!Buffer.isBuffer(buffer) || buffer.length < 10) return null;
+  if (!Buffer.isBuffer(buffer)) return null;
+  const svg = svgRootOf(buffer);
+  if (svg) return svgSizeOf(svg);
+  if (buffer.length < 10) return null;
   const valid = (width: number, height: number): ImageSize | null => (
     Number.isFinite(width) && Number.isFinite(height) && width > 0 && height > 0
       ? { width: Math.round(width), height: Math.round(height) }

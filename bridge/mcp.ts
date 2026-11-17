@@ -29,6 +29,7 @@ import {
 import type { CanvasNodeRecord, CanvasDocRecord, InternalCanvasWriteOperation, InternalCanvasWriteResults } from './http.js';
 import { listEnabledPromptSkills, type PromptSkill } from './skills.js';
 import { PORT } from './paths.js';
+import { readChatThreads } from './chat.js';
 import { findVideoTaskByNode } from './videoTasks.js';
 import { readAgentSelection, type AgentSelectionRecord } from './agentSelection.js';
 import { estimateCanvasBox, layoutChatResultPositions } from './runs.js';
@@ -76,6 +77,7 @@ const QUALITY_VALUES = ['auto', 'low', 'medium', 'high', 'xhigh', 'max'] as cons
 export interface McpDeps {
   readSettings: typeof readSettings;
   readCanvasRegistry: typeof readCanvasRegistry;
+  readChatThreads?: typeof readChatThreads;
   readCanvasDoc: typeof readCanvasDoc;
   enhancePrompt: typeof enhancePromptDetailed;
   generateImages: typeof generateImages;
@@ -207,6 +209,7 @@ export function listMcpTools(): Array<Record<string, unknown>> {
           referenceUsage: { type: 'string', enum: ['edit', 'style'], description: '参考图用途：edit=图生图（严格保主体，等价 inputFidelity:high）；style=风格参考（放开束缚，等价 inputFidelity:low）' },
           inputFidelity: { type: 'string', enum: ['high', 'low'], description: 'GPT-image 参考图保真度，仅带参考图时生效：high=保留参考图细节，low=自由发挥' },
           quality: { type: 'string', enum: ['auto', 'low', 'medium', 'high', 'xhigh', 'max'], description: '图像质量档位（可选），与尺寸独立' },
+          outputFormat: { type: 'string', enum: ['png', 'gif', 'svg'], description: '输出格式，默认 PNG；GIF / SVG 需要生图供应商支持' },
           model: { type: 'string', description: '指定模型名（可选）。不传用当前生效配置里的默认模型' },
           profileId: { type: 'string', description: '指定哪一路生图配置（可选，来自 huiban_models 的 id）。多 Key / 多中转站时用它切换' },
           canvasId: { type: 'string', description: '目标画布 id（来自 huiban_canvases / huiban_canvas_create）。不传则只返回图片，不落画布' },
@@ -522,26 +525,26 @@ export async function callMcpTool(
       specWithReferences,  // ✅ 新增：有参考图时使用此版本
       enabledSkills: enabledSkills.map(({ name, description, content }) => ({ name, description, content })),
       referenceRules: {
-        style: '只迁移参考图的色系 / 光线 / 氛围 / 质感；主体与构图必须全新，inputFidelity=low',
-        edit: '保留参考图的主体与构图，只应用用户要求的改动，inputFidelity=high',
+        style: '按用户要求借鉴风格、主体或版式，不自动复刻无关内容；各图的具体作用写进最终prompt。整体模式style使用inputFidelity=low',
+        edit: '按用户要求修改指定内容，其余文字、Logo、UI、主体和背景默认保护，inputFidelity=high',
         autoDetect: '按措辞判断：「根据…风格 / 呼应 / 同样的感觉」→style；「基于这张图 / 把这张图改成 / 加上」→edit',
         directNote: directStyleNote('附带参考图编号', 'style'),
         fidelityByUsage: { style: fidelityForUsage('style'), edit: fidelityForUsage('edit') },
         // ✅ 新增：关键避坑指南
         commonMistakes: [
-          '风格参考时不要描述参考图的主体，只写氛围词（色系、光线、质感）',
+          '风格参考时提取视觉语言，并具体决定新画面的主体或视角；不要只写氛围词',
           '图生图时必须明确保留什么、改动什么',
-          '用户提示词已详细时只补必要维度，不大幅改写',
+          '区分业务文案完整与设计方案完整；保留已确定的设计，补齐缺失的视觉决策',
           '不使用在世艺术家姓名，用流派描述替代',
         ],
       },
       flow: 'huiban_prompt_guide 读规范 → 自己写提示词（或 huiban_optimize 让服务端优化）→ huiban_generate{prompt, canvasId}；带参考图时提示词里的用途要与 huiban_generate 的 referenceUsage 一致',
       // ✅ 新增：使用建议
       usageTips: {
-        withReferences: '有参考图时：先分析参考图（主体/风格/构图/细节），再根据用户意图判断用途（style/edit），最后生成提示词',
-        withoutReferences: '无参考图时：按描述结构（主体/场景/构图/光线/色彩/媒介/质感）补齐缺失维度',
-        shortPrompt: '提示词<10词时：补充构图、光线、质感等基础维度',
-        longPrompt: '提示词>50词时：只做轻度整理，保留原措辞',
+        withReferences: '只分析与本次用途有关的参考特征，各图作用写进最终prompt；编辑时保护用户未要求改动的内容',
+        withoutReferences: '按任务决定必要的视觉关系，不机械补齐摄影、光线或材质清单',
+        shortPrompt: '输入简短也可能约束完整，依据任务与缺失的设计决策处理，不按字数自动补词',
+        longPrompt: '区分业务内容长与设计完整；保护已有方案，补齐真正缺失的决定，不按词数限制优化',
       },
     });
   }
@@ -620,12 +623,13 @@ export async function callMcpTool(
       ok: true,
       prompt: result.prompt,
       usage: result.usage,
+      aspectRatio: result.aspectRatio,
       referenceRoles: result.referenceRoles || [],
       level,
       size: size || null,
       profile: { id: textProfile.id, name: textProfile.name },
       referenceCount: references.length,
-      nextStep: `把返回的 prompt 原样交给 huiban_generate；参考图配 referenceUsage:"${result.usage}"（inputFidelity:${fidelityForUsage(result.usage)}）`,
+      nextStep: `把返回的 prompt 原样交给 huiban_generate${result.aspectRatio ? `，同时设置 ratio:"${result.aspectRatio}"` : ''}；参考图配 referenceUsage:"${result.usage}"（inputFidelity:${fidelityForUsage(result.usage)}）`,
     });
   }
 
@@ -651,6 +655,7 @@ export async function callMcpTool(
 
   if (name === 'huiban_canvases') {
     const registry = await deps.readCanvasRegistry();
+    const chatCanvasIds = new Set((await deps.readChatThreads?.() || []).filter((thread) => thread.messages.length).map((thread) => thread.canvasId));
     const ids = Object.keys(registry);
     const canvases = (await Promise.all(ids.map(async (id) => {
       const doc = await deps.readCanvasDoc(id);
@@ -662,7 +667,7 @@ export async function callMcpTool(
       };
     })))
       // 空画布只是草稿：不进入历史列表；仍可直接拿 huiban_canvas_create 返回的 id 生成。
-      .filter((canvas) => canvas.nodeCount > 0);
+      .filter((canvas) => canvas.nodeCount > 0 || chatCanvasIds.has(canvas.id));
     return toolText(canvases);
   }
 
@@ -931,6 +936,7 @@ export async function callMcpTool(
             status: 'running',
             size,
             model: usedModel,
+            outputFormat: args.outputFormat,
             source: 'mcp',
             createdAt,
             runningDirect: true,
@@ -1021,6 +1027,9 @@ export async function callMcpTool(
     try {
       images = await deps.generateImages(profile, {
         prompt,
+        originalPrompt: pickString(args.prompt),
+        requestContext: { source: 'mcp', canvasId: canvasId || undefined, nodeId: placeholderNodes[0]?.id },
+        outputFormat: args.outputFormat as 'png' | 'gif' | 'svg' | undefined,
         apiMode,
         size,
         model: modelOverride || undefined,
@@ -1092,6 +1101,7 @@ export async function callMcpTool(
               ? { width: Number(image.width), height: Number(image.height) }
               : {}),
             model: usedModel,
+            outputFormat: args.outputFormat,
             source: 'mcp',
             createdAt,
             finishedAt,
@@ -1251,6 +1261,7 @@ async function internalCanvasWrite<T extends InternalCanvasWriteOperation>(opera
 
 export const defaultMcpDeps: McpDeps = {
   readSettings,
+  readChatThreads,
   readCanvasRegistry,
   readCanvasDoc,
   enhancePrompt: enhancePromptDetailed,

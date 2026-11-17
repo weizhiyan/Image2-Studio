@@ -50,8 +50,10 @@ describe('enhancePrompt 多图编号语义', () => {
     expect(text).toContain('参考图 1 = 第 1 张图');
     expect(text).toContain('参考图 2 = 第 2 张图');
     expect(text).toContain('不要按画面内容自行调换');
-    expect(text).toContain('风格参考');
-    expect(text).toContain('正面描述一个与参考图主体不同的全新场景');
+    expect(text).toContain('分别确定每张图的实际作用');
+    expect(text).toContain('每张图的用途必须写进prompt');
+    expect(text).toContain('明确指定的主体、布局和保留项仍须遵守');
+    expect(text).not.toContain('主体与构图必须全新');
 
     // 图片分段顺序必须与数组一致：第 1 张 = A（chips 上的图 1）
     const imageParts = userContent.filter((part) => part.type === 'image_url');
@@ -71,8 +73,28 @@ describe('enhancePrompt 多图编号语义', () => {
     const text = userContent.find((part) => part.type === 'text')?.text as string;
     expect(text).not.toContain('参考图 1 = 第 1 张图');
     expect(text).toContain('另附 1 张参考图');
-    expect(text).toContain('风格参考');
+    expect(text).toContain('若实际是修改原图，usage应返回edit并保护未要求修改的内容');
     expect(userContent.filter((part) => part.type === 'image_url')).toHaveLength(1);
+  });
+
+  it('编辑请求保留参考图文字和Logo，不混入强制全新主体或丢弃文字的规则', async () => {
+    const calls = mockFetchOk();
+    await enhancePrompt(profile, {
+      prompt: '把图1的背景换成深蓝色，保留标题、Logo和人物',
+      referenceDataUrls: [A],
+      usage: 'edit',
+      level: 'strict',
+      preferences: [],
+    });
+    const messages = calls[0].body.messages as Array<{ role: string; content: unknown }>;
+    const system = String(messages[0].content);
+    const userContent = messages[1].content as Array<Record<string, unknown>>;
+    const userText = String(userContent.find(part => part.type === 'text')?.text);
+    expect(system).toContain('原图编辑默认保护未要求修改的文字、Logo、UI、主体、构图和背景');
+    expect(system).toContain('用户明确要求改动某一项时按要求修改');
+    expect(userText).toContain('保留标题、Logo和人物');
+    expect(userText).toContain('各图用途与必要保留项写进prompt');
+    expect(`${system}\n${userText}`).not.toMatch(/文字、Logo、UI 元素一律不进|主体与构图必须全新|不要把参考图分析或说明文字写进/);
   });
 
   it('空图时保持纯文本 user 段', async () => {

@@ -43,4 +43,19 @@ describe('生成中节点视觉', () => {
       /\.image-node-running-border::before\s*\{[^}]*border-radius:\s*calc\(var\(--radius-lg\) \+ var\(--image-node-running-border-width\)\)[^}]*corner-shape:\s*var\(--corner-smooth\)/s,
     );
   });
+
+  it('智能生成矩阵铺满卡片并继承外层圆角形状', () => {
+    expect(MATRIX_CSS).toMatch(
+      /\.running-matrix\.is-inline\s*\{[^}]*inset:\s*0[^}]*corner-shape:\s*inherit/s,
+    );
+    expect(IMAGE_NODES).toMatch(
+      /\.image-node-composer-running\s*\{[^}]*corner-shape:\s*inherit/s,
+    );
+  });
+
+  it('AI 对话占位卡片沿用节点圆角，流光位于内容层之上', () => {
+    expect(IMAGE_NODES).toMatch(/\.image-node-body\s*\{[^}]*border-radius:\s*inherit[^}]*corner-shape:\s*inherit/s);
+    expect(IMAGE_NODES).toMatch(/\.image-node-placeholder\s*\{[^}]*border-radius:\s*inherit[^}]*corner-shape:\s*inherit/s);
+    expect(RUNNING_GLOW).toMatch(/\.image-node-running-border\s*\{[^}]*z-index:\s*6/s);
+  });
 });

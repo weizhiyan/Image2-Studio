@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as events from '@/lib/chatRunEvents';
 import type { ChatThread } from '@/types';
 import * as bridge from '@/lib/bridge';
@@ -50,6 +50,10 @@ describe('chat bridge recovery contract', () => {
   });
 });
 describe('client persistence ownership', () => {
+  beforeEach(async () => {
+    const { useChatStore } = await import('@/stores/chatStore');
+    useChatStore.setState({ pendingMetadata: {}, activeThreadByCanvas: {}, draftsByScope: {}, syncError: '' });
+  });
   it('does not push streamed assistant or run placeholders back to the server', async () => {
     vi.useFakeTimers();
     const fetcher = vi.fn(async () => new Response(JSON.stringify({ data: thread() }), { status: 200 }));
@@ -67,7 +71,7 @@ describe('client persistence ownership', () => {
     const fetcher = vi.fn(async (_url: string, _init?: RequestInit) => new Response(JSON.stringify({ data: { ...thread('server final'), revision: 2 } }), { status: 409 }));
     vi.stubGlobal('fetch', fetcher);
     const { useChatStore } = await import('@/stores/chatStore');
-    const local = thread('old');
+    const local = { ...thread('old'), revision: 1 };
     local.messages.push({ id: 'unsent', role: 'user', content: 'not accepted', createdAt: 'now' });
     useChatStore.setState({ threads: [local] });
     useChatStore.getState().renameThread('t', 'new title');
@@ -76,7 +80,9 @@ describe('client persistence ownership', () => {
     const merged = useChatStore.getState().threads[0];
     expect(merged.messages.find((m) => m.id === 'a')?.content).toBe('server final');
     expect(merged.messages.at(-1)?.id).toBe('unsent');
-    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(fetcher).toHaveBeenCalledTimes(4);
+    expect(useChatStore.getState().pendingMetadata.t).toEqual({ title: 'new title' });
+    expect(useChatStore.getState().syncError).toContain('尚未保存');
   });
   it('metadata acknowledgement never regresses a newer in-memory run message', async () => {
     const { useChatStore } = await import('@/stores/chatStore');

@@ -1,9 +1,14 @@
 import type { ModelProfile } from './settings.js';
-import { imageSizeOf, saveBuffer, type SavedFile } from './files.js';
-import { preprocessDirectPrompt, type ReferenceUsage } from './textApi.js';
+import { contentTypeOf, imageSizeOf, saveBuffer, type SavedFile } from './files.js';
+import { preprocessDirectPrompt } from './textApi.js';
+import { describeNetworkFailure, safeToRetryImageConnection } from './requestErrors.js';
 import { resolveResponseModel } from './imageRequestContext.js';
+import { fetchImageRequest, type ImageRequestContext } from './imageRequestLog.js';
 
 export interface GenerateParams {
+  originalPrompt?: string;
+  optimizedPrompt?: string;
+  requestContext?: ImageRequestContext;
   /** 同一生图供应商的 Responses 外层模型，与图像工具模型独立。 */
   responseModel?: string;
   signal?: AbortSignal;
@@ -13,6 +18,7 @@ export interface GenerateParams {
   /** Image API 直连或 Responses 兼容回退时使用的提示词。 */
   imagesPrompt?: string;
   size?: string;
+  outputFormat?: ImageOutputFormat;
   referenceDataUrl?: string;
   /**
    * 多张参考图（二次编辑：基准图 + 用户额外连过来的图）。
@@ -38,6 +44,14 @@ export interface GenerateParams {
   previousImageGenerationCallId?: string;
   /** Caller verified that the only supplied image is the unchanged base in this chain. */
   reusePreviousImage?: boolean;
+}
+
+export type ImageOutputFormat = 'png' | 'gif' | 'svg';
+
+export function imageOutputFormatOf(value: unknown): ImageOutputFormat | undefined {
+  if (value === undefined || value === null || value === '') return undefined;
+  if (value === 'png' || value === 'gif' || value === 'svg') return value;
+  throw new Error('输出格式只支持 PNG、GIF 或 SVG');
 }
 
 export interface GeneratedImage extends SavedFile {
@@ -112,7 +126,7 @@ function retryDelay(attempt: number): Promise<void> {
 function dataUrlToBuffer(dataUrl: string): { buffer: Buffer; extension: string } {
   const match = /^data:image\/([a-z0-9+]+);base64,(.*)$/i.exec(dataUrl);
   if (!match) throw new Error('参考图格式不支持，需要 base64 data URL');
-  return { buffer: Buffer.from(match[2], 'base64'), extension: match[1] === 'jpeg' ? 'jpg' : match[1] };
+  return { buffer: Buffer.from(match[2], 'base64'), extension: match[1] === 'jpeg' ? 'jpg' : match[1] === 'svg+xml' ? 'svg' : match[1] };
 }
 
 /**
@@ -146,20 +160,11 @@ async function generateWithImagesApi(profile: ModelProfile, params: GeneratePara
   const base = profile.baseUrl.replace(/\/+$/, '');
   const size = normalizeImageSize(params.size?.trim() || profile.defaultSize);
   const model = params.model?.trim() || profile.model;
-  let prompt = params.imagesPrompt?.trim() || params.prompt;
+  const prompt = preprocessDirectPrompt(params.imagesPrompt?.trim() || params.prompt);
   const headers = providerAuthHeaders(profile.apiKey);
 
   const n = Math.min(Math.max(Math.floor(Number(params.n)) || 1, 1), 8);
   const referenceUrls = referenceImages(params);
-
-  // ✅ 直连模式：如果没有经过语言模型优化（imagesPrompt为空），使用轻量级优化
-  if (!params.imagesPrompt && referenceUrls.length > 0) {
-    const usage: ReferenceUsage = params.inputFidelity === 'high' ? 'edit' : 'style';
-    prompt = preprocessDirectPrompt(prompt, size, usage, true);
-  } else if (!params.imagesPrompt && !referenceUrls.length) {
-    // 无参考图的情况也做基础优化
-    prompt = preprocessDirectPrompt(prompt, size, 'style', false);
-  }
 
   const request = async (): Promise<Response> => {
     if (referenceUrls.length > 0) {
@@ -168,23 +173,24 @@ async function generateWithImagesApi(profile: ModelProfile, params: GeneratePara
       form.append('prompt', prompt);
       form.append('size', size);
       form.append('n', String(n));
+      if (params.outputFormat) form.append('output_format', params.outputFormat);
       if (params.quality) form.append('quality', params.quality);
       // input_fidelity：风格参考(low)从机制上避免把参考图描出来；图生图(high)保住主体细节
       if (params.inputFidelity) form.append('input_fidelity', params.inputFidelity);
       const multi = referenceUrls.length > 1;
       referenceUrls.forEach((dataUrl, index) => {
         const { buffer, extension } = dataUrlToBuffer(dataUrl);
-        const blob = new Blob([new Uint8Array(buffer)], { type: `image/${extension}` });
+        const blob = new Blob([new Uint8Array(buffer)], { type: contentTypeOf(`reference.${extension}`) });
         // 单图走 image（兼容性最好），多图走 image[]（OpenAI 多图编辑）
         if (multi) form.append('image[]', blob, `reference-${index + 1}.${extension}`);
         else form.append('image', blob, `reference.${extension}`);
       });
-      return fetch(`${base}/images/edits`, { method: 'POST', headers, body: form, signal: params.signal });
+      return fetchImageRequest(profile, params, `${base}/images/edits`, { method: 'POST', headers, body: form, signal: params.signal });
     }
-    return fetch(`${base}/images/generations`, {
+    return fetchImageRequest(profile, params, `${base}/images/generations`, {
       method: 'POST',
       headers: { ...headers, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model, prompt, size, n, ...(params.quality ? { quality: params.quality } : {}) }),
+      body: JSON.stringify({ model, prompt, size, n, ...(params.quality ? { quality: params.quality } : {}), ...(params.outputFormat ? { output_format: params.outputFormat } : {}) }),
       signal: params.signal,
     });
   };
@@ -199,7 +205,7 @@ async function generateWithImagesApi(profile: ModelProfile, params: GeneratePara
       if (response.body) await response.body.cancel().catch(() => undefined);
     } catch (error) {
       networkError = error;
-      if (params.signal?.aborted || attempt === 1) throw error;
+      if (params.signal?.aborted || attempt === 1 || !safeToRetryImageConnection(error)) throw error;
     }
     await retryDelay(attempt);
   }
@@ -217,12 +223,17 @@ async function generateWithImagesApi(profile: ModelProfile, params: GeneratePara
   for (const item of items) {
     if (item.b64_json) {
       const buffer = Buffer.from(item.b64_json, 'base64');
-      saved.push({ ...(await saveGeneratedImage(buffer, 'png')), revisedPrompt: item.revised_prompt });
+      saved.push({ ...(await saveGeneratedImage(buffer, params.outputFormat || 'png')), revisedPrompt: item.revised_prompt });
     } else if (item.url) {
-      const fetched = await fetch(item.url);
-      if (!fetched.ok) throw new Error(`下载生成图失败：${fetched.status}`);
-      const buffer = Buffer.from(await fetched.arrayBuffer());
-      const extension = item.url.split('?')[0].split('.').pop() || 'png';
+      let buffer: Buffer;
+      try {
+        const fetched = await fetch(item.url, { signal: params.signal });
+        if (!fetched.ok) throw new Error(`下载生成图失败：${fetched.status}`);
+        buffer = Buffer.from(await fetched.arrayBuffer());
+      } catch (error) {
+        throw describeNetworkFailure(error, 'download') || error;
+      }
+      const extension = item.url.split('?')[0].split('.').pop() || params.outputFormat || 'png';
       saved.push({ ...(await saveGeneratedImage(buffer, extension)), revisedPrompt: item.revised_prompt });
     }
   }
@@ -303,6 +314,7 @@ async function callResponses(profile: ModelProfile, params: GenerateParams, prev
             ? (params.inputFidelity === 'high' ? 'edit' : 'auto')
             : 'generate',
         size,
+        ...(params.outputFormat ? { output_format: params.outputFormat } : {}),
         ...(params.quality ? { quality: params.quality } : {}),
       }],
     };
@@ -310,7 +322,7 @@ async function callResponses(profile: ModelProfile, params: GenerateParams, prev
     let error: unknown;
     for (let attempt = 0; attempt < 2; attempt += 1) {
       try {
-        response = await fetch(`${base}/responses`, {
+        response = await fetchImageRequest(profile, params, `${base}/responses`, {
           method: 'POST',
           headers: { ...providerAuthHeaders(profile.apiKey), 'Content-Type': 'application/json' },
           body: JSON.stringify(body),
@@ -322,7 +334,7 @@ async function callResponses(profile: ModelProfile, params: GenerateParams, prev
         if (response.body) await response.body.cancel().catch(() => undefined);
       } catch (caught) {
         error = caught;
-        if (params.signal?.aborted || attempt === 1) throw caught;
+        if (params.signal?.aborted || attempt === 1 || !safeToRetryImageConnection(caught)) throw caught;
       }
       await retryDelay(attempt);
     }
@@ -354,13 +366,14 @@ export const IMAGE_GENERATION_TIMEOUT_MS = 300_000;
 export const IMAGE_GENERATION_TIMEOUT_MESSAGE = '生图接口超过 5 分钟没有返回结果，已自动停止；请检查该模型的图生图接口或稍后重试';
 
 export async function generateImages(profile: ModelProfile, params: GenerateParams): Promise<GeneratedImage[]> {
+  const outputFormat = imageOutputFormatOf(params.outputFormat);
   const timeoutController = new AbortController();
   const timeoutTimer = setTimeout(() => timeoutController.abort(), IMAGE_GENERATION_TIMEOUT_MS);
   const signal = params.signal
     ? AbortSignal.any([params.signal, timeoutController.signal])
     : timeoutController.signal;
-  const boundedParams: GenerateParams = { ...params, signal };
-  const apiMode = boundedParams.apiMode || profile.imageApiMode || 'images';
+  const boundedParams: GenerateParams = { ...params, outputFormat, signal };
+  const apiMode = outputFormat && outputFormat !== 'png' ? 'images' : boundedParams.apiMode || profile.imageApiMode || 'images';
   try {
     if (apiMode !== 'responses') return await generateWithImagesApi(profile, boundedParams);
     if (!profile.apiKey) throw new Error(`尚未配置 API Key：请在绘板「生图设置」的「${profile.name}」里填写`);
@@ -381,7 +394,8 @@ export async function generateImages(profile: ModelProfile, params: GeneratePara
     if (timeoutController.signal.aborted) {
       throw new Error(IMAGE_GENERATION_TIMEOUT_MESSAGE);
     }
-    throw error;
+    if (params.signal?.aborted) throw error;
+    throw describeNetworkFailure(error, 'image') || error;
   } finally {
     clearTimeout(timeoutTimer);
   }

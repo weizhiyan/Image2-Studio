@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { ChatImageRef, ChatModelSelection, ChatRoleSnapshot, ChatThread } from '@/types';
-import { confirmChatRun, type ChatRunConfirmation } from '@/lib/bridge';
+import { assignChatThread, confirmChatRun, ensureCanvasDoc, putChatThread, type ChatRunConfirmation } from '@/lib/bridge';
 import { activeThreadOf, allThreads, useChatStore } from '@/stores/chatStore';
+import { useCanvasStore } from '@/stores/canvasStore';
 import ChatComposer from './ChatComposer';
 import ChatMessageList from './ChatMessageList';
 import ClarificationModal from './ClarificationModal';
@@ -48,6 +49,11 @@ export default function ChatPanel({
   const activeCanvasId = useChatStore((state) => state.activeCanvasId);
   const thread = useChatStore(activeThreadOf);
   const threads = useChatStore(allThreads);
+  const allHistory = useChatStore((state) => state.threads);
+  const canvases = useCanvasStore((state) => state.canvases);
+  const unassigned = allHistory.filter((item) => item.messages.length && (!item.canvasId || !canvases.some((canvas) => canvas.id === item.canvasId)));
+  const [assigning, setAssigning] = useState('');
+  const [assignmentError, setAssignmentError] = useState('');
   const activeRun = useChatStore((state) => state.activeRun);
   const threadRun = activeRun && activeRun.threadId === thread?.id ? activeRun : null;
   const pendingClarification = threadRun
@@ -57,6 +63,23 @@ export default function ChatPanel({
     : null;
 
   const [historyOpen, setHistoryOpen] = useState(false);
+  useEffect(() => { setHistoryOpen(false); setAssignmentError(''); }, [activeCanvasId]);
+
+  const assignHistory = async (item: ChatThread) => {
+    const canvas = canvases.find((entry) => entry.id === activeCanvasId);
+    if (!canvas || assigning) return;
+    setAssigning(item.id); setAssignmentError('');
+    try {
+      await ensureCanvasDoc(canvas);
+      const persisted = item.revision === undefined ? await putChatThread(item) : item;
+      const remote = await assignChatThread(item.id, canvas.id, persisted.revision);
+      const store = useChatStore.getState();
+      store.mergeRemoteThreads([remote]);
+      if (store.activeCanvasId === canvas.id) store.switchThread(item.id);
+      setHistoryOpen(false);
+    } catch (error) { setAssignmentError(error instanceof Error ? error.message : '归档失败，请重试'); }
+    finally { setAssigning(''); }
+  };
   const syncError = useChatStore((state) => state.syncError);
   const [renamingId, setRenamingId] = useState('');
   const [renameValue, setRenameValue] = useState('');
@@ -331,7 +354,7 @@ export default function ChatPanel({
               </button>
               <div className="hb-chat-thread-list">
                 {threadGroups.length === 0 ? (
-                  <p className="hb-chat-menu-empty">还没有历史对话，发一句话就自动开一条</p>
+                  <p className="hb-chat-menu-empty">当前画布还没有对话，发一句话开始</p>
                 ) : threadGroups.map((group) => (
                   <section key={group.label} className="hb-chat-thread-group" aria-label={group.label}>
                     <h3 className="hb-chat-thread-group-label">{group.label}</h3>
@@ -367,6 +390,14 @@ export default function ChatPanel({
                     ))}
                   </section>
                 ))}
+                {unassigned.length ? <section className="hb-chat-thread-group" aria-label="待归档对话">
+                  <h3 className="hb-chat-thread-group-label">待归档对话</h3>
+                  <p className="hb-chat-menu-empty">旧对话归属不明确，选择后归入当前画布，完整保留历史。</p>
+                  {unassigned.map((item) => <button type="button" className="hb-chat-thread-item-main" key={item.id} disabled={Boolean(assigning)} onClick={() => void assignHistory(item)} aria-label={`将对话「${item.title}」归入当前画布`}>
+                    <strong>{item.title}</strong><small>{assigning === item.id ? '归档中…' : '归入当前画布'}</small>
+                  </button>)}
+                </section> : null}
+                {assignmentError ? <p className="hb-chat-error" role="alert">{assignmentError}</p> : null}
               </div>
             </div>
           ) : null}
@@ -392,13 +423,17 @@ export default function ChatPanel({
         />
         {threadRun?.pendingConfirmation ? <ImageConfirmation key={`${threadRun.runId}:${threadRun.pendingConfirmation.callId}`} runId={threadRun.runId} confirmation={threadRun.pendingConfirmation} /> : pendingClarification && threadRun ? (
           <ClarificationModal
+            key={`${threadRun.runId}:${pendingClarification.callId}`}
+            draftKey={`${threadRun.runId}:${pendingClarification.callId}`}
             request={pendingClarification}
             onSubmit={(answers) => onAnswerClarification(threadRun.runId, pendingClarification.callId, answers)}
             onCancel={() => onAnswerClarification(threadRun.runId, pendingClarification.callId, null)}
           />
-        ) : (
-          <ChatComposer onSend={onSend} onStop={onStop} running={Boolean(activeRun)} submitting={submitting} />
-        )}
+        ) : null}
+        <ChatComposer key={`${activeCanvasId}:${thread?.id || 'new'}`} onSend={onSend} onStop={onStop}
+          running={Boolean(threadRun) && !pendingClarification && !threadRun?.pendingConfirmation} submitting={submitting}
+          awaitingInput={Boolean(pendingClarification || threadRun?.pendingConfirmation)}
+          blockedReason={activeRun && !threadRun ? '另一条对话仍在运行，完成后可发送；你可以先编辑草稿。' : ''} />
       </div>
     </aside>
   );

@@ -111,7 +111,7 @@ describe('MCP 工具面', () => {
     expect(payload.level).toBe('creative');
     expect(payload.levels.map((item: any) => item.level)).toEqual(['strict', 'balanced', 'creative']);
     // 规范就是 buildSystemSpec 的产物：结构与红线标记必须在
-    expect(payload.spec).toContain('你是图像生成模型的提示词工程师');
+    expect(payload.spec).toContain('你是生图需求整理助手，保留用户表达');
     expect(payload.spec).toContain('忠实性红线');
     expect(payload.spec).toContain('横向宽画幅'); // size=1536x1024 的画幅提示
     // 当前配置里的语言模型/档案如实呈现；测试桩里没有语言模型那一路
@@ -409,6 +409,18 @@ describe('MCP 工具面', () => {
 });
 
 describe('huiban_generate', () => {
+  it('把 SVG 输出格式传给供应商并保存到生成节点', async () => {
+    const deps = makeDeps({
+      generateImages: vi.fn(async () => [{
+        url: '/api/files/vector.svg', fileName: 'vector.svg', filePath: '/tmp/vector.svg', width: 1600, height: 900,
+      }]) as unknown as McpDeps['generateImages'],
+    });
+    await callMcpTool('huiban_generate', { prompt: '矢量图', canvasId: 'c1', outputFormat: 'svg' }, deps);
+    expect(deps.generateImages).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ outputFormat: 'svg' }));
+    const finalNodes = vi.mocked(deps.upsertCanvasNodes).mock.calls.at(-1)![1];
+    expect(finalNodes[0].data).toMatchObject({ status: 'done', fileName: 'vector.svg', outputFormat: 'svg', width: 1600, height: 900 });
+  });
+
   it('不传 canvasId 时只出图不落画布', async () => {
     const deps = makeDeps();
     const payload = textOf(await callMcpTool('huiban_generate', { prompt: '一只猫' }, deps));

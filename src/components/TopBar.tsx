@@ -35,7 +35,7 @@ export default function TopBar({
 }: TopBarProps) {
   const active = canvases.find((doc) => doc.id === activeId) || canvases[0];
   // 空画布是当前草稿，可以显示在标题上，但不进入“切换画布”历史。
-  const menuCanvases = canvases.filter((doc) => doc.nodes.length > 0 || doc.edges.length > 0);
+  const menuCanvases = canvases.filter((doc) => doc.nodes.length > 0 || doc.edges.length > 0 || doc.hasChat);
   const [menuOpen, setMenuOpen] = useState(false);
   const [editing, setEditing] = useState(false);
   const [nameDraft, setNameDraft] = useState(active?.name || '');
@@ -207,7 +207,7 @@ export default function TopBar({
             onMouseDown={(event) => event.stopPropagation()}
           >
             <strong id="canvas-delete-confirm-title">删除画布？</strong>
-            <p>「{deleteTarget.name}」中的节点、连线和生成记录会从当前工作区移除。</p>
+            <p>「{deleteTarget.name}」中的节点、连线、生成记录和该画布的全部 AI 对话会从当前工作区移除。</p>
             <div className="canvas-delete-confirm-actions">
               <button type="button" onClick={() => setDeleteTarget(null)}>取消</button>
               <button

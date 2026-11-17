@@ -9,21 +9,22 @@ import {
 } from '@/lib/aspect';
 import type { ImageModelOption } from '@/lib/imageModelOptions';
 import QuantitySegments from '@/components/QuantitySegments';
+import ModelOptionGroups from '@/components/ModelOptionGroups';
 import { AiGlyphIcon, ChevronGlyphIcon, ModelGlyphIcon, RatioGlyphIcon } from './NodeToolbarIcons';
 import './GenSettingsPopover.css';
 
 type OpenMenu = 'model' | 'gen' | null;
 
-/** 比例弹窗 Tab 档位（Figma 2665:1983 只收四档）：自动打头，其后手动档从宽到窄。
- *  lib 的 RATIO_TOOLBAR_OPTIONS 是旧九档全量清单，弹窗 UI 只展示这四档。 */
-const RATIO_TABS = [AUTO_RATIO, '1:1', '16:9', '9:16'] as const;
+const RATIO_TABS = [AUTO_RATIO, '1:1', '4:3', '3:4', '16:9', '9:16'] as const;
 
 /** 分段滑块位置：把「当前档索引 / 总档数」写进行内变量，CSS 的 ::after 滑块据此位移。
  *  变量在 CSS 里有兜底声明（见 GenSettingsPopover.css），不会触发幽灵 Token 守护。 */
-function segmentStyle(index: number, count: number): CSSProperties {
+function segmentStyle(index: number, count: number, columns = count): CSSProperties {
+  const selectedIndex = Math.max(index, 0);
   return {
-    '--gen-tab-index': String(index < 0 ? 0 : index),
-    '--gen-tab-count': String(count),
+    '--gen-tab-index': String(selectedIndex % columns),
+    '--gen-tab-count': String(columns),
+    '--gen-tab-row': String(Math.floor(selectedIndex / columns)),
   } as CSSProperties;
 }
 
@@ -34,6 +35,7 @@ export type ModelOption = ImageModelOption;
 export default function NodeGenerationToolbar({
   style,
   model,
+  profileId,
   modelOptions,
   ratio,
   prompt,
@@ -46,9 +48,12 @@ export default function NodeGenerationToolbar({
   onSelectResolution,
   imageCount,
   onSelectImageCount,
+  outputFormat = 'png',
+  onSelectOutputFormat,
 }: {
   style?: CSSProperties;
   model: string;
+  profileId?: string;
   modelOptions: ModelOption[];
   ratio: string;
   /** 当前提示词：「自动」比例档按它推导画幅（提示词显式写法 > 参考图 > 1:1）。 */
@@ -66,6 +71,8 @@ export default function NodeGenerationToolbar({
   /** 一次生成几张（1~4）。 */
   imageCount: number;
   onSelectImageCount: (count: number) => void;
+  outputFormat?: 'png' | 'gif' | 'svg';
+  onSelectOutputFormat?: (format: 'png' | 'gif' | 'svg') => void;
 }) {
   const [open, setOpen] = useState<OpenMenu>(null);
   const rootRef = useRef<HTMLDivElement>(null);
@@ -86,7 +93,7 @@ export default function NodeGenerationToolbar({
     setOpen((current) => (current === menu ? null : menu));
   };
 
-  const activeOption = modelOptions.find((option) => option.model === model);
+  const activeOption = modelOptions.find((option) => option.model === model && (!profileId || option.profileId === profileId));
   const modelLabel = model || '选择模型';
   const ratioLabel = ratio === AUTO_RATIO ? '自动' : ratio;
   // 「自动」档真正生效的比例要等生成时才按「提示词显式写法 > 参考图 > 1:1」推导出来
@@ -117,7 +124,7 @@ export default function NodeGenerationToolbar({
               <div className="image-model-empty">暂无可用的模型，请先在「模型设置」里勾选</div>
             ) : (
               <div className="image-model-options">
-                {modelOptions.map((option) => (
+                <ModelOptionGroups options={modelOptions}>{(option) => (
                   <button
                     key={option.key}
                     type="button"
@@ -131,7 +138,6 @@ export default function NodeGenerationToolbar({
                   >
                     <span className="image-model-option-text">
                       <strong>{option.model}</strong>
-                      <small>{option.profileName}</small>
                     </span>
                     {option.model === model && option.profileId === activeOption?.profileId ? (
                       <span className="image-model-option-check" aria-hidden="true">
@@ -141,7 +147,7 @@ export default function NodeGenerationToolbar({
                       </span>
                     ) : null}
                   </button>
-                ))}
+                )}</ModelOptionGroups>
               </div>
             )}
           </div>
@@ -176,10 +182,28 @@ export default function NodeGenerationToolbar({
       </button>
       {open === 'gen' ? (
         <div className="image-node-settings-popover gen-settings-popover nowheel" role="menu" aria-label="生成设置">
-          {/* 比例 / 画质 / 数量 三段平铺（Figma 2665:1983）：全部横向 Tab，不做纵向列表 */}
+          {onSelectOutputFormat ? (
+            <div className="gen-settings-block">
+              <span className="gen-settings-block-title">输出格式</span>
+              <div className="gen-settings-tabs" style={segmentStyle(['png', 'gif', 'svg'].indexOf(outputFormat), 3)}>
+                {(['png', 'gif', 'svg'] as const).map((format) => (
+                  <button
+                    key={format}
+                    type="button"
+                    role="menuitemradio"
+                    aria-label={`输出格式 ${format === 'png' ? '默认' : format.toUpperCase()}`}
+                    title={format === 'png' ? '默认格式（PNG）' : format.toUpperCase()}
+                    aria-checked={outputFormat === format}
+                    className={`gen-settings-tab ${outputFormat === format ? 'active' : ''}`}
+                    onClick={() => onSelectOutputFormat(format)}
+                  >{format === 'png' ? '默认' : format.toUpperCase()}</button>
+                ))}
+              </div>
+            </div>
+          ) : null}
           <div className="gen-settings-block">
             <span className="gen-settings-block-title">比例</span>
-            <div className="gen-settings-tabs" style={segmentStyle(RATIO_TABS.findIndex((item) => item === ratio), RATIO_TABS.length)}>
+            <div className="gen-settings-tabs gen-settings-ratio-tabs" style={segmentStyle(RATIO_TABS.findIndex((item) => item === ratio), RATIO_TABS.length, 4)}>
               {RATIO_TABS.map((item) => {
                 const isAuto = item === AUTO_RATIO;
                 const active = item === ratio;

@@ -1,6 +1,6 @@
 import fs from 'node:fs/promises';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { generateImages, IMAGE_GENERATION_TIMEOUT_MS, normalizeImageSize } from '../bridge/imageApi';
+import { generateImages, imageOutputFormatOf, IMAGE_GENERATION_TIMEOUT_MS, normalizeImageSize } from '../bridge/imageApi';
 import type { ModelProfile } from '../bridge/settings';
 
 const profile: ModelProfile = {
@@ -23,7 +23,85 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
+describe('生图连接失败诊断', () => {
+  it.each(['images', 'responses'] as const)('%s 连接中断后不重复提交可能已受理的付费请求', async (apiMode) => {
+    const failure = Object.assign(new TypeError('fetch failed'), { cause: { code: 'ECONNRESET' } });
+    const fetchMock = vi.fn().mockRejectedValue(failure);
+    vi.stubGlobal('fetch', fetchMock);
+    await expect(generateImages(profile, { prompt: 'test', apiMode })).rejects.toThrow('无法确认上游是否已完成（ECONNRESET）');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([{ cause: { code: 'UND_ERR_SOCKET' } }, { code: 'UND_ERR_SOCKET' }])('图片下载中断分别报告且不被外层覆盖：%j', async (details) => {
+    const failure = Object.assign(new TypeError('terminated'), details);
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ data: [{ url: 'https://images.test/output.png' }] }) })
+      .mockRejectedValueOnce(failure);
+    vi.stubGlobal('fetch', fetchMock);
+    await expect(generateImages(profile, { prompt: 'test', apiMode: 'images' })).rejects.toThrow('上游已返回图片地址，但下载图片时连接中断（UND_ERR_SOCKET）');
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock.mock.calls[1][1].signal).toBe(fetchMock.mock.calls[0][1].signal);
+  });
+});
+
 describe('normalizeImageSize', () => {
+  it('拒绝非法格式，缺省不改动已有请求', () => {
+    expect(imageOutputFormatOf(undefined)).toBeUndefined();
+    expect(imageOutputFormatOf('gif')).toBe('gif');
+    expect(() => imageOutputFormatOf('html')).toThrow('输出格式只支持');
+  });
+
+  it.each(['gif', 'svg'] as const)('文生图请求 %s 并保存原始格式及尺寸', async (outputFormat) => {
+    const buffer = outputFormat === 'svg'
+      ? Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" width="640" height="480"></svg>')
+      : Buffer.from('R0lGODlhgALgAQ==', 'base64');
+    const fetchMock = vi.fn(async (_url: string, _init: RequestInit) => ({
+      ok: true, status: 200, json: async () => ({ data: [{ b64_json: buffer.toString('base64') }] }),
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+    const [image] = await generateImages(profile, { prompt: 'test', outputFormat });
+    try {
+      expect(fetchMock.mock.calls[0][0]).toBe('https://example.com/v1/images/generations');
+      expect(JSON.parse(String(fetchMock.mock.calls[0][1].body))).toMatchObject({ output_format: outputFormat });
+      expect(image.fileName).toMatch(new RegExp(`\\.${outputFormat}$`));
+      expect(image).toMatchObject({ width: 640, height: 480 });
+      expect(await fs.readFile(image.filePath)).toEqual(buffer);
+    } finally { await fs.unlink(image.filePath); }
+  });
+
+  it('编辑请求传递 output_format，保留 SVG 引用的 MIME 类型', async () => {
+    const svg = '<svg viewBox="0 0 1600 900"></svg>';
+    const fetchMock = vi.fn(async (_url: string, _init: RequestInit) => ({
+      ok: true, status: 200, json: async () => ({ data: [{ b64_json: Buffer.from(svg).toString('base64') }] }),
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+    const [image] = await generateImages(profile, {
+      prompt: '修改颜色', outputFormat: 'svg',
+      referenceDataUrl: `data:image/svg+xml;base64,${Buffer.from(svg).toString('base64')}`,
+    });
+    try {
+      expect(fetchMock.mock.calls[0][0]).toBe('https://example.com/v1/images/edits');
+      const form = fetchMock.mock.calls[0][1].body as FormData;
+      expect(form.get('output_format')).toBe('svg');
+      expect((form.get('image') as File).type).toBe('image/svg+xml');
+      expect(image.fileName).toMatch(/\.svg$/);
+      expect(image).toMatchObject({ width: 1600, height: 900 });
+    } finally { await fs.unlink(image.filePath); }
+  });
+
+  it('下载 URL 即使后缀为 PNG 也按实际 SVG 内容保存', async () => {
+    const svg = '<svg viewBox="0 0 900 1600"></svg>';
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ data: [{ url: 'https://example.test/result.png' }] }) })
+      .mockResolvedValueOnce({ ok: true, arrayBuffer: async () => Buffer.from(svg) });
+    vi.stubGlobal('fetch', fetchMock);
+    const [image] = await generateImages(profile, { prompt: 'test', outputFormat: 'svg' });
+    try {
+      expect(image.fileName).toMatch(/\.svg$/);
+      expect(image).toMatchObject({ width: 900, height: 1600 });
+    } finally { await fs.unlink(image.filePath); }
+  });
+
   it('保留 auto 并回落非法输入', () => {
     expect(normalizeImageSize('auto')).toBe('auto');
     expect(normalizeImageSize('not-a-size')).toBe('1024x1024');

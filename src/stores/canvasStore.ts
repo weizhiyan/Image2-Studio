@@ -10,6 +10,7 @@ interface CanvasState {
   activeId: string;
   cursor: { x: number; y: number };
   createCanvas: (name?: string) => string;
+  markCanvasChat: (id: string) => void;
   /** 删除尚未写入任何节点的空草稿；它不属于历史画布。 */
   discardEmptyCanvas: (id: string) => void;
   renameCanvas: (id: string, name: string) => void;
@@ -537,6 +538,10 @@ export const useCanvasStore = create<CanvasState>()(
       canvases: [emptyCanvas('默认画布')],
       activeId: '',
       cursor: { x: 80, y: 80 },
+      markCanvasChat: (id) => {
+        if (get().canvases.find((doc) => doc.id === id)?.hasChat) return;
+        set({ canvases: get().canvases.map((doc) => doc.id === id ? { ...doc, hasChat: true } : doc) });
+      },
 
       createCanvas: (name) => {
         const state = get();
@@ -546,6 +551,7 @@ export const useCanvasStore = create<CanvasState>()(
           canvas.id !== state.activeId
           || canvas.nodes.length > 0
           || canvas.edges.length > 0
+          || canvas.hasChat
         ));
         set({ canvases: [...canvases, doc], activeId: doc.id });
         return doc.id;
@@ -553,7 +559,7 @@ export const useCanvasStore = create<CanvasState>()(
 
       discardEmptyCanvas: (id) => set((state) => {
         const target = state.canvases.find((doc) => doc.id === id);
-        if (!target || target.nodes.length > 0 || target.edges.length > 0) return state;
+        if (!target || target.nodes.length > 0 || target.edges.length > 0 || target.hasChat) return state;
         const canvases = state.canvases.filter((doc) => doc.id !== id);
         if (canvases.length === 0) return state;
         return {
@@ -581,9 +587,9 @@ export const useCanvasStore = create<CanvasState>()(
       },
 
       setActive: (id) => set((state) => {
-        if (id === state.activeId) return state;
+        if (id === state.activeId || !state.canvases.some((doc) => doc.id === id)) return state;
         const current = state.canvases.find((doc) => doc.id === state.activeId);
-        const canvases = current && current.nodes.length === 0 && current.edges.length === 0
+        const canvases = current && !current.hasChat && current.nodes.length === 0 && current.edges.length === 0
           ? state.canvases.filter((doc) => doc.id !== current.id)
           : state.canvases;
         return { canvases, activeId: id };
@@ -686,6 +692,7 @@ export const useCanvasStore = create<CanvasState>()(
           merged[index] = normalizeCanvasDoc(protectImageTerminalNodes(remoteNewer
             ? protectVideoTerminalNodes(doc, local)
             : protectVideoTerminalNodes(local, doc), remoteNewer ? local : doc));
+          merged[index].hasChat = Boolean(doc.hasChat || local.hasChat);
         }
         return {
           canvases: merged,

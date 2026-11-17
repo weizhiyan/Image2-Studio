@@ -1,4 +1,5 @@
 import type { CanvasNode, CanvasNodeData } from '@/types';
+import { promptAspectRatio } from '../../bridge/imagePlanning';
 
 export const SIZE_PRESETS = ['1024x1024', '1024x1536', '1536x1024'] as const;
 
@@ -61,16 +62,7 @@ export function ratioToNumber(label: string): number {
 
 /** 提示词里显式写了画幅就返回它的高度/宽度比例，没写返回 0（交给节点设置兜底）。 */
 export function detectPromptRatio(prompt: string): number {
-  const text = String(prompt || '');
-  const ratio = /\b(\d{1,2})\s*[:：]\s*(\d{1,2})\b/.exec(text);
-  if (ratio) {
-    const width = Number(ratio[1]);
-    const height = Number(ratio[2]);
-    if (width > 0 && height > 0) return formatRatio(height / width);
-  }
-  if (/竖|portrait|竖构图/.test(text)) return formatRatio(4 / 3);
-  if (/横|landscape|横构图|宽幅/.test(text)) return formatRatio(3 / 4);
-  return 0;
+  return ratioToNumber(promptAspectRatio(prompt) || '');
 }
 
 /** 工具栏比例新选项：自动（按参考图推导）打头，其后是手动档（按用户习惯从宽到窄排）。 */

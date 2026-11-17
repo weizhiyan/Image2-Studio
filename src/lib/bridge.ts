@@ -255,10 +255,11 @@ export function hasCanvasGraphChanges(changes: CanvasGraphChanges): boolean {
 export async function getCanvases(): Promise<CanvasDoc[]> {
   const res = await fetch('/api/canvases');
   if (!res.ok) throw new Error('读取画布失败');
-  const body = await res.json() as { data?: Array<{ id: string; name: string; nodes?: CanvasDoc['nodes']; edges?: CanvasDoc['edges']; viewport?: CanvasDoc['viewport']; updatedAt?: string }> };
+  const body = await res.json() as { data?: Array<{ id: string; name: string; hasChat?: boolean; nodes?: CanvasDoc['nodes']; edges?: CanvasDoc['edges']; viewport?: CanvasDoc['viewport']; updatedAt?: string }> };
   return (body.data || []).map((item) => ({
     id: item.id,
     name: item.name,
+    hasChat: Boolean(item.hasChat),
     nodes: item.nodes || [],
     edges: item.edges || [],
     ...(item.viewport ? { viewport: item.viewport } : {}),
@@ -340,9 +341,11 @@ export async function ensureCanvasDoc(doc: Pick<CanvasDoc, 'id' | 'name'>): Prom
   if (!response.ok) throw new Error(`画布建档失败（HTTP ${response.status}）`);
 }
 
-export async function deleteCanvasDoc(canvasId: string): Promise<void> {
+export async function deleteCanvasDoc(canvasId: string, options: { onlyIfEmpty?: boolean } = {}): Promise<void> {
+  const suffix = options.onlyIfEmpty ? '?onlyIfEmpty=1' : '';
+  const response = await fetch(`/api/canvases/${encodeURIComponent(canvasId)}${suffix}`, { method: 'DELETE' });
+  if (!response.ok) throw new Error(`删除画布失败（HTTP ${response.status}）`);
   canvasBaselines.delete(canvasId);
-  await fetch(`/api/canvases/${encodeURIComponent(canvasId)}`, { method: 'DELETE' }).catch(() => undefined);
 }
 
 /** 把浏览器图片落到 bridge 媒体目录，画布只保存轻量 /api/files 引用。 */
@@ -403,12 +406,18 @@ async function chatRequest<T>(url: string, init?: RequestInit): Promise<T> {
 }
 
 /** Explicit metadata/legacy writes only. Run output must never be sent back as a snapshot. */
-export async function putChatThread(thread: ChatThread, options: { metadataOnly?: boolean } = {}): Promise<ChatThread> {
+export async function putChatThread(thread: ChatThread, options: { metadataOnly?: boolean; metadata?: Partial<Pick<ChatThread, 'title' | 'textProfileId' | 'textModel' | 'imageProfileId' | 'imageModel'>> } = {}): Promise<ChatThread> {
   const { messages, memory: _memory, ...metadata } = thread;
   return chatRequest<ChatThread>('/api/chat/threads', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ ...metadata, messages: options.metadataOnly ? [] : messages, ...(options.metadataOnly ? { metadataOnly: true } : {}) }),
+    body: JSON.stringify({ ...(options.metadata && thread.revision !== undefined ? { id: thread.id, revision: thread.revision, generation: thread.generation, ...options.metadata } : metadata), messages: options.metadataOnly ? [] : messages, ...(options.metadataOnly ? { metadataOnly: true } : {}), ...(thread.revision === undefined && !options.metadataOnly && _memory ? { memory: _memory } : {}) }),
+  });
+}
+
+export function assignChatThread(threadId: string, canvasId: string, revision?: number): Promise<ChatThread> {
+  return chatRequest<ChatThread>(`/api/chat/threads/${encodeURIComponent(threadId)}/canvas`, {
+    method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ canvasId, revision }),
   });
 }
 
@@ -627,6 +636,7 @@ export async function testConnection(input: {
 
 export interface GenerateRequest {
   prompt: string;
+  outputFormat?: 'png' | 'gif' | 'svg';
   /** 关闭智能生成 = Image API；开启智能生成 = Responses API。 */
   apiMode?: ImageApiMode;
   /** 语言模型优化前的原始提示词：随生成记录一起落盘，灯箱里两份都看得到。 */
@@ -659,11 +669,13 @@ export interface GenerateRequest {
 export async function enhancePromptApi(input: {
   prompt: string;
   size?: string;
+  aspectRatio?: string;
+  referenceSize?: string;
   referenceDataUrl?: string;
   referenceDataUrls?: string[];
   profileId?: string;
   usage?: 'style' | 'edit';
-}): Promise<{ prompt: string; usage?: 'style' | 'edit' }> {
+}): Promise<{ prompt: string; usage?: 'style' | 'edit'; aspectRatio?: string }> {
   const res = await fetch('/api/enhance', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -674,9 +686,9 @@ export async function enhancePromptApi(input: {
         : (input.referenceDataUrl ? [input.referenceDataUrl] : [])),
     }),
   });
-  const body = await res.json().catch(() => null) as { data?: { prompt: string; usage?: 'style' | 'edit' }; msg?: string } | null;
+  const body = await res.json().catch(() => null) as { data?: { prompt: string; usage?: 'style' | 'edit'; aspectRatio?: string }; msg?: string } | null;
   if (!res.ok || !body?.data) throw new Error(body?.msg || `提示词优化失败（HTTP ${res.status}）`);
-  return { prompt: String(body.data.prompt || ''), usage: body.data.usage };
+  return { prompt: String(body.data.prompt || ''), usage: body.data.usage, aspectRatio: body.data.aspectRatio };
 }
 
 export async function enhanceVideoPromptApi(input: {
@@ -1069,6 +1081,7 @@ export function subscribeCanvasUpdated(canvasId: string, onUpdate: (event: Canva
 
 export interface PushedLocateEvent {
   type: 'locate';
+  chatThreadId?: string;
   canvasId: string;
   nodeId: string;
   at: string;
@@ -1273,8 +1286,8 @@ export async function answerChatRun(
     body: JSON.stringify(answers
       ? { callId, answers, ...continuation }
       : { callId, cancel: true }),
-  }).catch(() => null);
-  if (!res) return false;
-  const body = await res.json().catch(() => null) as { data?: { answered?: boolean } } | null;
+  });
+  const body = await res.json().catch(() => null) as { data?: { answered?: boolean }; msg?: string } | null;
+  if (!res.ok) throw new Error(body?.msg || `答案保存失败（HTTP ${res.status}），请重试`);
   return Boolean(body?.data?.answered);
 }

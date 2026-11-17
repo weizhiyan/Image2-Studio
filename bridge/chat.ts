@@ -542,6 +542,7 @@ export async function writeClientThread(raw: unknown, expectedRevision?: number)
       return created;
     }
     assertRevision(previous, expectedRevision === undefined ? raw.revision : expectedRevision);
+    if (Object.hasOwn(raw, 'canvasId') && normalized.canvasId !== previous.canvasId) throw new ChatConflictError(previous);
     // A stale generation must never be accepted even if a caller copies a newer revision.
     if ((raw.generation ?? 0) !== previous.generation) throw new ChatConflictError(previous);
     const updated = nextThread(previous);
@@ -553,13 +554,27 @@ export async function writeClientThread(raw: unknown, expectedRevision?: number)
     }).map((message) => message.role === 'assistant' ? clientPlaceholder(message) : message);
     updated.messages = [...previous.messages, ...additions].slice(-MAX_MESSAGES_PER_THREAD);
     if (Object.hasOwn(raw, 'title')) updated.title = normalized.title;
-    for (const key of ['canvasId', 'textProfileId', 'textModel', 'imageProfileId', 'imageModel'] as const) {
+    for (const key of ['textProfileId', 'textModel', 'imageProfileId', 'imageModel'] as const) {
       if (!Object.hasOwn(raw, key)) continue;
       const value = normalized[key];
       if (value) updated[key] = value;
       else delete updated[key];
     }
     docs.threads[updated.id] = updated;
+    await writeChatDocs(docs);
+    return updated;
+  });
+}
+
+export async function assignChatThreadCanvas(threadId: string, canvasId: string, expectedRevision: number | undefined, existingCanvasIds: Set<string>): Promise<ChatThreadRecord | null> {
+  return withChatWriteLock(async () => {
+    const docs = await readChatDocs();
+    const previous = docs.threads[threadId];
+    if (!previous || docs.tombstones[threadId] || !existingCanvasIds.has(canvasId)) return null;
+    assertRevision(previous, expectedRevision);
+    if (previous.canvasId && existingCanvasIds.has(previous.canvasId)) throw new ChatConflictError(previous);
+    const updated = { ...nextThread(previous), canvasId };
+    docs.threads[threadId] = updated;
     await writeChatDocs(docs);
     return updated;
   });
@@ -583,8 +598,6 @@ export async function writeRunThread(raw: unknown, options: RunThreadWriteOption
     const owned = new Set(options.messageIds);
     const incoming = new Map(normalized.messages.filter((message) => owned.has(String(message.id)) && message.role === 'assistant').map((message) => [message.id, message]));
     const updated = nextThread(previous);
-    // raw is a server-owned run snapshot here; a run may select its result canvas.
-    if (normalized.canvasId) updated.canvasId = normalized.canvasId;
     updated.messages = previous.messages.map((message) => {
       const update = incoming.get(message.id);
       incoming.delete(message.id);

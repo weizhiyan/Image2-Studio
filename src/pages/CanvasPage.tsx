@@ -38,6 +38,7 @@ import { useCanvasViewControls } from '@/components/canvas/useCanvasViewControls
 import { DEFAULT_CANVAS_VIEWPORT, isNodeBoxVisible } from '@/lib/canvasViewport';
 import { applyFinalDraggedPositions } from '@/lib/canvasDrag';
 import { placeNodeToolbar } from '@/lib/nodeOverlayPlacement';
+import { planImageGeneration, resolvePlannedImageSize } from '@/lib/imageGenerationPlan';
 import {
   absoluteNodePosition,
   CANVAS_GROUP_HEADER_HEIGHT,
@@ -108,14 +109,10 @@ import {
   MIN_COMPOSER_NODE_HEIGHT,
   MIN_COMPOSER_NODE_WIDTH,
   composerWidthForRatio,
-  detectPromptRatio,
   imageNodeFlowBox,
   nodeBoxFor,
   nodeWidthFor,
-  parseSizeRatio,
-  pickSizeForResolution,
   clampImageCount,
-  resolveAutoRatio,
   ratioToNumber,
   AUTO_RATIO,
 } from '@/lib/aspect';
@@ -179,6 +176,8 @@ interface SelectedNodeOverlayMetrics {
   id: string;
   width: number;
   height: number;
+  toolbarWidth: number;
+  toolbarHeight: number;
   topSafe: number;
   containerWidth: number;
 }
@@ -1914,7 +1913,6 @@ function CanvasWorkspace() {
     // 对话面板可能长时间未关闭：发送前刷新 Bridge 配置，避免旧线程继续携带已删除或停用的模型 id。
     chatRunStartingRef.current = true;
     setChatRunStarting(true);
-    await loadSettings();
     // 生成结果必须有画布落点；初始化或切换画布的瞬间没有 activeId 时，自动创建一张工作画布，
     // 避免用户点击发送后静默丢失消息。
     const targetCanvasId = activeId || useCanvasStore.getState().activeId || useCanvasStore.getState().createCanvas('对话结果');
@@ -1923,8 +1921,31 @@ function CanvasWorkspace() {
       showToast('暂时没有可用画布，请稍后再试');
       return;
     }
+    const store = useChatStore.getState();
+    store.setActiveCanvas(targetCanvasId);
+    const selectedThread = useChatStore.getState().threads.find((item) => item.id === useChatStore.getState().activeThreadId && item.canvasId === targetCanvasId);
+    const threadId = selectedThread?.id || store.createThread(targetCanvasId, { preserveDraft: true });
+    const current = useChatStore.getState().threads.find((item) => item.id === threadId);
+    const draftState = useChatStore.getState();
+    const submittedDraft = { draft: draftState.draft, draftAttachments: draftState.draftAttachments, draftBase: draftState.draftBase };
+    const base = replay.base !== undefined ? replay.base : submittedDraft.draftBase;
+    const selectedRefs = selectedImageRefsFor(targetCanvasId);
+    useCanvasStore.getState().markCanvasChat(targetCanvasId);
+    try {
+      await loadSettings();
+      if (!await store.flushThreadMetadata(threadId)) throw new Error('模型选择尚未保存，请检查服务后重新发送');
+    } catch (error) {
+      chatRunStartingRef.current = false; setChatRunStarting(false);
+      showToast(error instanceof Error ? error.message : '加载模型失败');
+      return;
+    }
     // 空草稿还没有 bridge 文档；对话结果要写进去，先显式建一张空文档（不会进历史列表）。
     const targetDoc = useCanvasStore.getState().canvases.find((doc) => doc.id === targetCanvasId);
+    if (!targetDoc) {
+      chatRunStartingRef.current = false; setChatRunStarting(false);
+      showToast('原画布已删除，本次未发送');
+      return;
+    }
     if (targetDoc) {
       try {
         if (targetDoc.nodes.length === 0 && targetDoc.edges.length === 0) {
@@ -1939,20 +1960,12 @@ function CanvasWorkspace() {
         return;
       }
     }
-    const store = useChatStore.getState();
-    // 线程是全局实体；没有活跃线程时才创建，当前画布只决定本次结果落点。
-    const current = store.threads.find((item) => item.id === store.activeThreadId);
-    const threadId = current
-      ? current.id
-      : store.createThread(targetCanvasId);
     if (!threadId) { chatRunStartingRef.current = false; setChatRunStarting(false); return; }
     // 用户在画布上选中的图片即使没手动加进草稿，也作为本轮参考一起发送。
-    const selectedRefs = selectedImageRefsFor(targetCanvasId);
     const refsWithSelection = [...refs, ...selectedRefs].filter((ref, index, all) => (
       all.findIndex((candidate) => draftKeyOf(candidate) === draftKeyOf(ref)) === index
     ));
     // 「继续编辑」钉的基准图排在本轮引用第一位（图 1），同时作为续接源
-    const base = replay.base !== undefined ? replay.base : store.draftBase;
     const effectiveRefs: ChatImageRef[] = base
       ? [base, ...refsWithSelection.filter((ref) => draftKeyOf(ref) !== draftKeyOf(base))]
       : refsWithSelection;
@@ -1998,7 +2011,6 @@ function CanvasWorkspace() {
     const modelSelection: ChatModelSelection = {
       imageProfileId,
       imageModel,
-      // 线程一旦开始对话就锁定语言模型；请求里带了失效 id 时回落到线程保存的那一路。
       textProfileId,
       textModel,
     };
@@ -2052,8 +2064,7 @@ function CanvasWorkspace() {
       store.patchMessage(threadId, messageId, { runId });
       store.setActiveRun({ runId, threadId, messageId, seq: 0 });
       flushChatPersistence();
-      store.clearDraft();
-      store.setDraftBase(null);
+      store.consumeThreadDraft(threadId, submittedDraft);
     } catch (err) {
       if (err instanceof ChatConflictError) {
         // 被拒的 request 从未被服务端接管；先采用冲突返回的权威线程，再清掉本地占位，
@@ -2061,7 +2072,6 @@ function CanvasWorkspace() {
         if (err.current) store.mergeRemoteThreads([err.current]);
         const live = useChatStore.getState();
         live.discardRequest(threadId, requestId);
-        if (!live.draft.trim()) live.setDraft(prompt);
         showToast(err.message || '对话已被其他操作更新，请重新发送');
       } else {
         useChatStore.getState().patchMessage(threadId, messageId, {
@@ -2077,13 +2087,13 @@ function CanvasWorkspace() {
   }, [activeId, lastMediaVersionOf, loadSettings, selectedImageRefsFor, showToast]);
 
   /** The server responds only after the terminal persistence fence. Keep the lock meanwhile. */
-  const stopChatRunFlow = useCallback(() => {
+  const stopChatRunFlow = useCallback(async (): Promise<boolean> => {
     const run = useChatStore.getState().activeRun;
-    if (!run) return;
+    if (!run) return false;
     chatRunCleanupRef.current?.flush();
     flushChatPersistence();
-    void (async () => {
-      if (!await stopChatRun(run.runId)) { showToast('停止未确认，仍保留任务连接，请重试'); return; }
+    try {
+      if (!await stopChatRun(run.runId)) { showToast('停止未确认，仍保留任务连接，请重试'); return false; }
       try {
         const snapshot = await getChatRun(run.runId);
         if (snapshot && useChatStore.getState().activeRun?.runId === run.runId) {
@@ -2091,7 +2101,11 @@ function CanvasWorkspace() {
         }
       } catch { showToast('任务已停止，最终内容将在重新连接后恢复'); }
       flushChatPersistence();
-    })();
+      return true;
+    } catch {
+      showToast('停止未确认，仍保留任务连接，请重试');
+      return false;
+    }
   }, [showToast]);
 
   const answerChatClarification = useCallback(async (
@@ -2107,6 +2121,7 @@ function CanvasWorkspace() {
     const pending = thread?.messages
       .find((message) => message.id === activeRun?.messageId)
       ?.clarifications?.find((item) => item.callId === callId && item.status === 'awaiting_input');
+    if (!thread || !pending || thread.id !== store.activeThreadId || thread.canvasId !== store.activeCanvasId) return false;
     const currentAssistantId = activeRun?.messageId || '';
     const response: ChatAskResponseSummary | null = answers && pending ? {
       title: '补充几个信息',
@@ -2131,8 +2146,7 @@ function CanvasWorkspace() {
       status: 'running' as const,
     } : undefined;
     if (!answers) {
-      stopChatRunFlow();
-      return true;
+      return stopChatRunFlow();
     }
     const source = thread ? retrySourceForMessage(thread, currentAssistantId) : undefined;
     const inherited = source ? { modelSelection: source.modelSelection, agentRole: source.agentRole, retrySource: { ...source, answers } } : {};
@@ -2140,7 +2154,7 @@ function CanvasWorkspace() {
       userMessage: { ...userMessage, ...inherited },
       assistantMessage: { ...assistantMessage, ...inherited },
     } : undefined);
-    if (!accepted) showToast('这个问题已经失效，请重新发送消息');
+    if (!accepted) showToast('回答未被接纳，答案已保留，请重试或查看任务状态');
     // The server emits a snapshot containing both continuation messages. No local append race.
     return accepted;
   }, [showToast, stopChatRunFlow]);
@@ -2286,7 +2300,11 @@ function CanvasWorkspace() {
         const store = useChatStore.getState();
         const gap = store.applyRunEvents(run.threadId, events);
         for (const event of events) {
-          if (event.type === 'image_completed') locateChatRefRef.current?.({ canvasId: event.media.canvasId || '', nodeId: event.media.nodeId, versionId: event.media.versionId });
+          if (event.type === 'image_completed') {
+            const canvasId = event.media.canvasId || store.threads.find((item) => item.id === run.threadId)?.canvasId || '';
+            if (store.activeThreadId === run.threadId && useCanvasStore.getState().activeId === canvasId) locateChatRefRef.current?.({ canvasId, nodeId: event.media.nodeId, versionId: event.media.versionId });
+            else store.markUnread();
+          }
         }
         if (!useChatStore.getState().activeRun && !store.open) store.markUnread();
         return gap;
@@ -2415,15 +2433,6 @@ function CanvasWorkspace() {
     // 存它而不是空串，历史面板、版本链、二次编辑回填才有东西可看
     const effectivePrompt = prompt || composedPrompt;
 
-    // 画幅优先级（对齐灵枢）：提示词里写明 > 工具栏选的预设 > 设置里的默认尺寸
-    // 「自动」档：提示词没写时按参考图比例推导，再不行退回 1:1
-    const promptRatio = detectPromptRatio(prompt);
-    const presetRaw = String(composer.data.ratio || '');
-    const presetRatio = presetRaw === AUTO_RATIO
-      ? resolveAutoRatio({ prompt, references: orderedReferences })
-      : ratioToNumber(presetRaw);
-    const ratio = promptRatio > 0 ? promptRatio : (presetRatio > 0 ? presetRatio : parseSizeRatio(profile.defaultSize));
-    const size = options.sizeOverride || pickSizeForResolution(ratio, String(composer.data.resolution || '1K'));
     const imageCount = clampImageCount(composer.data.imageCount);
     const createdAt = new Date().toISOString();
 
@@ -2437,6 +2446,17 @@ function CanvasWorkspace() {
     // 兼容只支持 Image API 的中转站，避免智能开关把它强行送到 /responses。
     const apiMode = direct || profile.imageApiMode !== 'responses' ? 'images' : 'responses';
     const enhancePrompt = shouldEnhancePrompt(settings, direct);
+    const generationPlan = planImageGeneration({
+      prompt: prompt || referenceTexts.join('\n'),
+      ratio: String(composer.data.ratio || ''),
+      resolution: String(composer.data.resolution || '1K'),
+      defaultSize: profile.defaultSize,
+      sizeOverride: options.sizeOverride,
+      references: orderedReferences,
+      editingSize: hasEditingBase ? baseVersion?.size || composer.data.size : undefined,
+      optimize: enhancePrompt,
+    });
+    let size = generationPlan.size;
 
     // 与灵枢一致：composer 就地转成运行态——动画、尺寸、计时都长在同一张卡片上
     patchNode(nodeId, {
@@ -2484,11 +2504,14 @@ function CanvasWorkspace() {
             const result = await enhancePromptApi({
               prompt: composedPrompt,
               size,
+              aspectRatio: generationPlan.automatic ? AUTO_RATIO : undefined,
+              referenceSize: generationPlan.referenceSize,
               referenceDataUrls,
               profileId: textProfile.id,
               // 二次编辑已经钉住了基准图，不能让提示词模型把它降级成风格参考。
               usage: options.referenceUsage || (hasEditingBase ? 'edit' : undefined),
             });
+            size = resolvePlannedImageSize(generationPlan, result);
             usedPrompt = result.prompt;
             enhancedPrompt = result.prompt;
             referenceUsage = options.referenceUsage || (hasEditingBase ? 'edit' : result.usage);
@@ -2503,7 +2526,7 @@ function CanvasWorkspace() {
         }
       }
       if (enhanceNote) showToast(enhanceNote);
-      patchNode(nodeId, { stage: 'generate', enhancedPrompt, enhanceFailed, error: enhanceNote });
+      patchNode(nodeId, { stage: 'generate', size, enhancedPrompt, enhanceFailed, error: enhanceNote });
     }
 
     // 对话上下文链：上一轮结果或二次编辑基准。与 bridge 共用 outer/tool 校验，
@@ -2536,6 +2559,7 @@ function CanvasWorkspace() {
     // 阶段二：生图模型出图
     const outcome = await generate({
       prompt: usedPrompt,
+      outputFormat: composer.data.outputFormat,
       apiMode,
       originalPrompt: composedPrompt,
       model: String(composer.data.model || profile.model),
@@ -3532,12 +3556,15 @@ function CanvasWorkspace() {
   const applyLocateRequest = useCallback((request: PushedLocateEvent) => {
     const targetId = String(request.nodeId || '');
     const targetCanvas = String(request.canvasId || '');
+    const mayLocate = () => !request.chatThreadId || (useCanvasStore.getState().activeId === targetCanvas && useChatStore.getState().activeThreadId === request.chatThreadId);
+    if (!mayLocate()) return;
     if (!targetId) return;
     // 生成后的自动定位不打断已看得到的视口；显式 huiban_locate 不带字段，一律归位
     const onlyIfOffscreen = request.onlyIfOffscreen === true;
     const focusWhenReady = () => {
       let frames = 0;
       const step = () => {
+        if (!mayLocate()) return;
         if (nodesRef.current.some((node) => node.id === targetId)) {
           revealResultNode(targetId, { onlyIfOffscreen });
           return;
@@ -3567,6 +3594,7 @@ function CanvasWorkspace() {
     void (async () => {
       try {
         const merged = await mergeRemoteCanvasNodes(targetCanvas);
+        if (!mayLocate()) return;
         if (!merged && !useCanvasStore.getState().canvases.some((doc) => doc.id === targetCanvas)) {
           showToast('定位失败：bridge 上找不到这张画布');
           return;
@@ -3954,9 +3982,13 @@ function CanvasWorkspace() {
       // remote 提到 try 外：清理占位画布那段在 finally 之后还要用
       let remote: CanvasDoc[] = [];
       try {
+        for (const thread of useChatStore.getState().threads) {
+          if (thread.canvasId && thread.messages.length) useCanvasStore.getState().markCanvasChat(thread.canvasId);
+        }
         remote = await getCanvases();
         const store = useCanvasStore.getState();
         const localPristine = store.canvases.length === 1
+          && !store.canvases[0].hasChat
           && store.canvases[0].nodes.length === 0
           && store.canvases[0].edges.length === 0;
         if (remote.length > 0 && localPristine) {
@@ -3998,8 +4030,9 @@ function CanvasWorkspace() {
       // 只认"默认画布"这个自动占位名（用户新建的叫「画布 N」），空 = 0 节点 0 边。
       // 这里**不能**加"本地独占"条件：空占位早就被浏览器回推 bridge 了，那样永远清不掉。
       const merged = useCanvasStore.getState();
-      const hasContent = merged.canvases.some((doc) => doc.nodes.length > 0 || doc.edges.length > 0);
+      const hasContent = merged.canvases.some((doc) => doc.nodes.length > 0 || doc.edges.length > 0 || doc.hasChat);
       const isPlaceholderDoc = (doc: CanvasDoc) => doc.name === '默认画布'
+        && !doc.hasChat
         && doc.nodes.length === 0
         && doc.edges.length === 0;
       if (hasContent) {
@@ -4007,15 +4040,18 @@ function CanvasWorkspace() {
         const active = merged.canvases.find((doc) => doc.id === merged.activeId);
         if (active && isPlaceholderDoc(active)) {
           const target = merged.canvases
-            .filter((doc) => doc.nodes.length > 0 || doc.edges.length > 0)
+            .filter((doc) => doc.nodes.length > 0 || doc.edges.length > 0 || doc.hasChat)
             .sort((a, b) => Date.parse(b.updatedAt || '') - Date.parse(a.updatedAt || ''))[0];
           if (target) merged.setActive(target.id);
         }
         const settled = useCanvasStore.getState();
         for (const doc of settled.canvases) {
           if (!isPlaceholderDoc(doc) || doc.id === settled.activeId) continue;
-          useCanvasStore.getState().deleteCanvas(doc.id);
-          void deleteCanvasDoc(doc.id);
+          void deleteCanvasDoc(doc.id, { onlyIfEmpty: true }).then(() => {
+            const latest = useCanvasStore.getState();
+            const candidate = latest.canvases.find((item) => item.id === doc.id);
+            if (candidate && candidate.id !== latest.activeId && isPlaceholderDoc(candidate)) latest.deleteCanvas(doc.id);
+          }).catch(() => undefined);
         }
       }
       void loadSettings();
@@ -4517,6 +4553,7 @@ function CanvasWorkspace() {
     let resizeObserver: ResizeObserver | null = null;
     let observedNode: HTMLElement | null = null;
     let observedTopbar: HTMLElement | null = null;
+    let observedToolbar: HTMLElement | null = null;
 
     const measure = () => {
       if (disposed) return;
@@ -4527,10 +4564,15 @@ function CanvasWorkspace() {
       const hostRect = host.getBoundingClientRect();
       const nodeRect = nodeElement.getBoundingClientRect();
       const topbarRect = host.querySelector<HTMLElement>('.hb-topbar')?.getBoundingClientRect();
+      const toolbarElement = host.querySelector<HTMLElement>('.image-selection-toolbar, .image-node-toolbar');
       const next: SelectedNodeOverlayMetrics = {
         id: overlaySelectedId,
         width: nodeElement.offsetWidth || nodeRect.width / zoom,
         height: nodeElement.offsetHeight || nodeRect.height / zoom,
+        // 工具栏宽度会随按钮组合、模型名和字体变化，不能按类型写死；否则换机器或
+        // 窄窗口下贴边计算会偏，节点上方看起来就像“飘”到了别处。
+        toolbarWidth: toolbarElement?.offsetWidth || 0,
+        toolbarHeight: toolbarElement?.offsetHeight || 0,
         topSafe: topbarRect ? Math.max(0, topbarRect.bottom - hostRect.top + 8) : 72,
         containerWidth: host.clientWidth || window.innerWidth,
       };
@@ -4539,6 +4581,8 @@ function CanvasWorkspace() {
         && current.id === next.id
         && Math.abs(current.width - next.width) < 0.5
         && Math.abs(current.height - next.height) < 0.5
+        && Math.abs(current.toolbarWidth - next.toolbarWidth) < 0.5
+        && Math.abs(current.toolbarHeight - next.toolbarHeight) < 0.5
         && Math.abs(current.topSafe - next.topSafe) < 0.5
         && Math.abs(current.containerWidth - next.containerWidth) < 0.5
           ? current
@@ -4551,10 +4595,12 @@ function CanvasWorkspace() {
     observedNode = Array.from(host.querySelectorAll<HTMLElement>('.react-flow__node'))
       .find((element) => element.dataset.id === overlaySelectedId) || null;
     observedTopbar = host.querySelector<HTMLElement>('.hb-topbar');
+    observedToolbar = host.querySelector<HTMLElement>('.image-selection-toolbar, .image-node-toolbar');
     if (typeof ResizeObserver !== 'undefined') {
       resizeObserver = new ResizeObserver(measure);
       if (observedNode) resizeObserver.observe(observedNode);
       if (observedTopbar) resizeObserver.observe(observedTopbar);
+      if (observedToolbar) resizeObserver.observe(observedToolbar);
       resizeObserver.observe(host);
     }
     window.addEventListener('resize', measure);
@@ -4569,12 +4615,15 @@ function CanvasWorkspace() {
     overlaySelectedNode?.data.kind,
     overlaySelectedNode?.data.imageUrl,
     overlaySelectedNode?.data.videoUrl,
+    overlaySelectedNode?.data.status,
     overlaySelectedNode?.data.videoStatus,
     overlaySelectedNode?.data.cardWidth,
     overlaySelectedNode?.data.nodeHeight,
     overlaySelectedNode?.data.nodeHeightManual,
     overlaySelectedNode?.data.ratio,
     overlaySelectedNode?.data.videoRatio,
+    selectedGenerator?.id,
+    selectedImageNode?.id,
     viewControls.flowViewport.zoom,
   ]);
 
@@ -4596,15 +4645,19 @@ function CanvasWorkspace() {
 
   const toolbarPlacement = useMemo(() => {
     if (!overlaySelectedNode || !overlayNodeBounds) return null;
-    const toolbarWidth = selectedGenerator
+    const fallbackToolbarWidth = selectedGenerator
       ? (selectedGenerator.data.kind === 'video' ? 528 : 360)
       : (overlaySelectedNode.data.kind === 'image' ? 360 : (overlaySelectedNode.data.kind === 'video' ? 96 : 174));
+    const metrics = overlayMetrics?.id === overlaySelectedNode.id ? overlayMetrics : null;
+    const toolbarWidth = metrics?.toolbarWidth || fallbackToolbarWidth;
+    const toolbarHeight = metrics?.toolbarHeight || undefined;
     return placeNodeToolbar(overlayNodeBounds, {
       containerWidth: overlayNodeBounds.containerWidth,
       topSafe: overlayNodeBounds.topSafe,
       toolbarWidth,
+      toolbarHeight,
     });
-  }, [overlaySelectedNode, overlayNodeBounds, selectedGenerator]);
+  }, [overlaySelectedNode, overlayNodeBounds, overlayMetrics, selectedGenerator]);
 
   const toolbarStyle = useMemo<CSSProperties | undefined>(() => (
     selectedGenerator && toolbarPlacement
@@ -4701,9 +4754,9 @@ function CanvasWorkspace() {
           onSwitch={(id) => {
             const state = useCanvasStore.getState();
             const current = state.canvases.find((doc) => doc.id === state.activeId);
-            if (current && current.id !== id && current.nodes.length === 0 && current.edges.length === 0) {
+            if (current && !current.hasChat && current.id !== id && current.nodes.length === 0 && current.edges.length === 0) {
               state.discardEmptyCanvas(current.id);
-              void deleteCanvasDoc(current.id);
+              void deleteCanvasDoc(current.id, { onlyIfEmpty: true }).catch(() => undefined);
             }
             setActive(id);
             playEntry();
@@ -4711,16 +4764,19 @@ function CanvasWorkspace() {
           onCreate={() => {
             const state = useCanvasStore.getState();
             const current = state.canvases.find((doc) => doc.id === state.activeId);
-            if (current && current.nodes.length === 0 && current.edges.length === 0) {
-              void deleteCanvasDoc(current.id);
+            if (current && !current.hasChat && current.nodes.length === 0 && current.edges.length === 0) {
+              void deleteCanvasDoc(current.id, { onlyIfEmpty: true }).catch(() => undefined);
             }
             createCanvas();
             playEntry();
           }}
           onRename={(id, name) => renameCanvas(id, name)}
           onDelete={(id) => {
-            deleteCanvas(id);
-            void deleteCanvasDoc(id);
+            if (useCanvasStore.getState().canvases.length <= 1) return;
+            void deleteCanvasDoc(id).then(() => {
+              useChatStore.getState().removeCanvasThreads(id);
+              deleteCanvas(id);
+            }).catch(() => showToast('删除画布失败，请重试'));
           }}
           onToggleSettings={() => setSettingsOpen((open) => !open)}
         />
@@ -5254,6 +5310,7 @@ function CanvasWorkspace() {
             // 节点自己没选过模型时，工具栏显示当前生效那一路的名字（生成也是走它）：
             // 老画布的节点因此不再显示「选择模型」占位，与新节点一致（Figma 2664:1903）
             model={String(selectedGenerator.data.model || activeProfileOf(settings)?.model || '')}
+            profileId={String(selectedGenerator.data.profileId || activeProfileOf(settings)?.id || '')}
             modelOptions={toolbarModelOptions}
             ratio={String(selectedGenerator.data.ratio || '1:1')}
             prompt={String(selectedGenerator.data.prompt || '')}
@@ -5264,12 +5321,19 @@ function CanvasWorkspace() {
               ratio: label,
               // 「自动」档没有固定比例：卡片宽度先按 1:1 给，生成时再按参考图收敛
               cardWidth: label === AUTO_RATIO ? 320 : composerWidthForRatio(ratioToNumber(label)),
+              nodeHeight: undefined,
+              nodeHeightManual: undefined,
+              width: undefined,
+              height: undefined,
+              size: undefined,
             })}
             resolution={String(selectedGenerator.data.resolution || '1K')}
             onSelectResolution={(label) => patchNode(selectedGenerator.id, {
               resolution: label === '1K' ? undefined : (label as '2K' | '4K'),
             })}
             imageCount={clampImageCount(selectedGenerator.data.imageCount)}
+            outputFormat={selectedGenerator.data.outputFormat || 'png'}
+            onSelectOutputFormat={(outputFormat) => patchNode(selectedGenerator.id, { outputFormat })}
             onSelectImageCount={(count) => patchNode(selectedGenerator.id, {
               imageCount: count > 1 ? count : undefined,
             })}

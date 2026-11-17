@@ -5,6 +5,7 @@ release
 *.local
 .DS_Store
 logs
+.runtime
 .workbuddy
 .env
 .env.*

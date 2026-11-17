@@ -149,6 +149,18 @@ describe('图片节点工具栏', () => {
 });
 
 describe('图片节点原始尺寸', () => {
+  it.each([
+    ['1:1', 320, 320],
+    ['4:3', 320, 240],
+    ['3:4', 320, 425.6],
+    ['16:9', 400, 224],
+    ['9:16', 280, 498.4],
+  ])('输入态的 %s 卡片同时应用宽度和比例高度', (ratio, cardWidth, height) => {
+    const html = renderImageNode({ kind: 'composer', label: '', ratio, cardWidth } as CanvasNodeData);
+    expect(html).toContain(`--image-node-width:${cardWidth}px`);
+    expect(Number(html.match(/--image-node-height:([\d.]+)px/)?.[1])).toBeCloseTo(Number(height), 5);
+  });
+
   it('生成图显示原始像素尺寸，并可通过键盘聚焦图片区域', () => {
     const html = renderImageNode({
       kind: 'image',

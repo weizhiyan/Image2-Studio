@@ -23,8 +23,9 @@ describe('澄清问题协议', () => {
   it('JSON 协议同样优先直接生图，不为可补足的细节追问', () => {
     const spec = jsonProtocolSpec();
     expect(spec).toContain('直接输出 generate_image 动作，不附带需求复述、方案或确认提问');
-    expect(spec).toContain('可用合理默认值补足的普通歧义不追问');
-    expect(spec).toContain('无法合理确定的关键信息时才使用 ask_user');
+    expect(spec).toContain('没写风格不等于必须反问');
+    expect(spec).toContain('无法合理确定的必要事实');
+    expect(spec).toContain('只是讨论不获得新增生图授权');
   });
 
   it('开放输入接受空 options、保留 optional，并不误判为多选', () => {
@@ -33,8 +34,8 @@ describe('澄清问题协议', () => {
       { id: 'style', title: '风格？', type: 'multiple', options: ['简约', '写实'], optional: false },
       { id: 'bad', title: '无选项单选', type: 'single' },
     ])).toEqual([
-      { id: 'copy', title: '画面上的精确文案？', type: 'text', optional: true, multiple: false, options: [] },
-      { id: 'style', title: '风格？', type: 'multiple', optional: false, multiple: true, options: [{ label: '简约', value: '简约' }, { label: '写实', value: '写实' }] },
+      { id: 'copy', title: '画面上的精确文案？', purpose: 'clarification', type: 'text', optional: true, multiple: false, options: [] },
+      { id: 'style', title: '风格？', purpose: 'clarification', type: 'multiple', optional: false, multiple: true, options: [{ label: '简约', value: '简约' }, { label: '写实', value: '写实' }] },
     ]);
   });
 
@@ -45,7 +46,8 @@ describe('澄清问题协议', () => {
     expect(question.properties.optional.type).toBe('boolean');
     expect(question.required).toEqual(['title']);
     expect(question.properties.options.minItems).toBeUndefined();
-    expect(askUserToolDef().description).toContain('自然语言');
+    expect(askUserToolDef().description).toContain('type=text 可开放输入');
+    expect(question.properties.purpose.enum).toEqual(['clarification', 'creative']);
   });
 });
 

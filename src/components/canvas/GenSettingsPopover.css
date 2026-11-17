@@ -104,6 +104,7 @@
   isolation: isolate;
   --gen-tab-index: 0;
   --gen-tab-count: 1;
+  --gen-tab-row: 0;
   --gen-tab-gap: 2px;
   --gen-tab-pad: 2px;
   display: flex;
@@ -127,6 +128,21 @@
   box-shadow: var(--segment-thumb-shadow);
   transform: translateX(calc(var(--gen-tab-index) * (100% + var(--gen-tab-gap))));
   transition: transform var(--motion-normal) var(--ease-emphasized);
+}
+
+.gen-settings-ratio-tabs {
+  --gen-tab-height: 56px;
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.gen-settings-ratio-tabs::after {
+  bottom: auto;
+  height: var(--gen-tab-height);
+  transform: translate(
+    calc(var(--gen-tab-index) * (100% + var(--gen-tab-gap))),
+    calc(var(--gen-tab-row) * (var(--gen-tab-height) + var(--gen-tab-gap)))
+  );
 }
 
 /* ── Tab 项：画质 / 数量是纯文字，比例带形状缩略（tab-stack 纵排）── */
@@ -183,7 +199,7 @@
   justify-content: center;
   gap: var(--spacing-1);
   height: 56px;
-  padding: var(--spacing-2);
+  padding: var(--spacing-2) var(--spacing-1);
   font-size: var(--font-size-xs);
 }
 
@@ -191,8 +207,6 @@
   flex: 0 0 auto;
 }
 
-/* 比例形状缩略：外层固定 20×20 的占位盒（和「自动」档那个 20px 图标齐平，四个 Tab 的图标
-   外框因此一样大），里面用 ::before 画宽窄不一的矩形，视觉重心仍在同一基线上。 */
 .gen-settings-shape {
   display: inline-flex;
   align-items: center;
@@ -204,14 +218,24 @@
 .gen-settings-shape::before {
   content: '';
   display: block;
-  border: 1.5px solid var(--color-text-tertiary);
-  border-radius: var(--radius-2xs);
-  opacity: 0.4;
+  box-sizing: border-box;
+  border: 1.5px solid currentColor;
+  border-radius: calc(var(--radius-2xs) / 3);
 }
 
 .gen-settings-shape[data-shape="1:1"]::before {
   width: 14px;
   height: 14px;
+}
+
+.gen-settings-shape[data-shape="4:3"]::before {
+  width: 16px;
+  height: 12px;
+}
+
+.gen-settings-shape[data-shape="3:4"]::before {
+  width: 12px;
+  height: 16px;
 }
 
 .gen-settings-shape[data-shape="16:9"]::before {
@@ -222,11 +246,6 @@
 .gen-settings-shape[data-shape="9:16"]::before {
   width: 10px;
   height: 18px;
-}
-
-.gen-settings-tab.active .gen-settings-shape {
-  border-color: var(--color-text-primary);
-  opacity: 1;
 }
 
 /* ── 工具栏防挤压（2026-09-26 修）：Figma 图标 20px 比原手写 16px 大，
@@ -368,4 +387,14 @@
 .video-param-required {
   color: var(--color-accent-red);
   font-style: normal;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .gen-settings-tabs::after {
+    transition: none;
+  }
+
+  .gen-settings-tab.active > * {
+    animation: none;
+  }
 }

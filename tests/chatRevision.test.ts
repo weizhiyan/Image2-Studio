@@ -58,9 +58,9 @@ describe('chat revisions and sanitized snapshots', () => {
 
   it('client appends user/empty assistant without overwriting authoritative messages, role or memory', async () => {
     const created = await chat.writeClientThread(thread({ memory: { summary: '服务端记忆' }, messages: [user(), { ...assistant('a1', '真实回复'), agentRole: role }] }));
-    const updated = await chat.writeClientThread({ ...created!, title: '改名', textModel: 'text-new', canvasId: 'untrusted-canvas', memory: { summary: '旧记忆' }, messages: [{ ...user(), content: '篡改历史' }, { ...assistant('a1', '旧回复'), agentRole: { ...role, name: '别的角色' } }, user('u2'), { ...assistant('a2', '伪造输出'), toolCalls: [{ id: 'c', status: 'done' }], media: [{ nodeId: 'n', url: '/api/files/a.png' }], memory: { summary: '伪造' } }] }, created!.revision);
+    const updated = await chat.writeClientThread({ ...created!, title: '改名', textModel: 'text-new', memory: { summary: '旧记忆' }, messages: [{ ...user(), content: '篡改历史' }, { ...assistant('a1', '旧回复'), agentRole: { ...role, name: '别的角色' } }, user('u2'), { ...assistant('a2', '伪造输出'), toolCalls: [{ id: 'c', status: 'done' }], media: [{ nodeId: 'n', url: '/api/files/a.png' }], memory: { summary: '伪造' } }] }, created!.revision);
     expect(updated).toMatchObject({ title: '改名', textModel: 'text-new', revision: 2, memory: { summary: '服务端记忆' } });
-    expect(updated).toHaveProperty('canvasId', 'untrusted-canvas');
+    expect(updated?.canvasId).toBe(created?.canvasId);
     expect(updated?.messages).toHaveLength(4);
     expect(updated?.messages[0].content).toBe('画咖啡杯');
     expect(updated?.messages[1]).toMatchObject({ content: '真实回复', agentRole: { name: '设计师' } });
@@ -92,12 +92,28 @@ describe('chat revisions and sanitized snapshots', () => {
     expect(saved?.messages[3]).toMatchObject({ id: 'a2', runId: 'run-1' });
   });
 
-  it('accepts explicit client landing canvas metadata and a trusted run canvas update', async () => {
+  it('keeps the canvas owner stable for client metadata and late run snapshots', async () => {
     const created = await chat.writeClientThread(thread({ canvasId: 'canvas-1' }));
-    const selected = await chat.writeClientThread({ id: 't1', revision: created!.revision, canvasId: 'canvas-2', messages: [] });
-    expect(selected).toMatchObject({ canvasId: 'canvas-2' });
+    await expect(chat.writeClientThread({ id: 't1', revision: created!.revision, canvasId: 'canvas-2', messages: [] })).rejects.toBeInstanceOf(chat.ChatConflictError);
     const saved = await chat.writeRunThread({ ...created!, canvasId: 'canvas-3' }, { generation: 0, messageIds: ['a1'] });
-    expect(saved).toMatchObject({ canvasId: 'canvas-3' });
+    expect(saved).toMatchObject({ canvasId: 'canvas-1' });
+  });
+
+  it('explicitly assigns orphan history once without changing messages or memory', async () => {
+    const created = await chat.writeClientThread(thread({ canvasId: 'missing', memory: { summary: '保留记忆' } }));
+    const assigned = await chat.assignChatThreadCanvas('t1', 'canvas-1', created!.revision, new Set(['canvas-1', 'canvas-2']));
+    expect(assigned?.canvasId).toBe('canvas-1');
+    expect(assigned?.messages).toEqual(created?.messages);
+    expect(assigned?.memory).toEqual(created?.memory);
+    await expect(chat.assignChatThreadCanvas('t1', 'canvas-2', assigned!.revision, new Set(['canvas-1', 'canvas-2']))).rejects.toBeInstanceOf(chat.ChatConflictError);
+  });
+
+  it('model changes persist through late run updates while message model snapshots remain unchanged', async () => {
+    const created = await chat.writeClientThread(thread({ canvasId: 'canvas-1', textModel: 'old', messages: [user(), { ...assistant(), modelSelection: { textModel: 'old' } }] }));
+    await chat.writeClientThread({ id: 't1', revision: created!.revision, textModel: 'new', messages: [] });
+    const saved = await chat.writeRunThread({ ...created!, messages: [{ ...assistant('a1', '完成'), modelSelection: { textModel: 'new' } }] }, { generation: 0, messageIds: ['a1'] });
+    expect(saved?.textModel).toBe('new');
+    expect(saved?.messages[1].modelSelection).toEqual({ textModel: 'old' });
   });
 
   it('memory edits use their own CAS and old run summaries cannot overwrite them', async () => {

@@ -52,4 +52,16 @@ describe('空画布草稿不进入历史', () => {
     useCanvasStore.getState().setActive('next');
     expect(useCanvasStore.getState().canvases.map((canvas) => canvas.id)).toEqual(['filled', 'next']);
   });
+
+  it('只聊天的画布可以新建、切换和刷新合并而不被当作空草稿清理', () => {
+    useCanvasStore.getState().markCanvasChat('empty');
+    const next = useCanvasStore.getState().createCanvas('下一张');
+    useCanvasStore.getState().markCanvasChat(next);
+    useCanvasStore.getState().setActive('empty');
+    useCanvasStore.getState().setActive(next);
+    useCanvasStore.getState().discardEmptyCanvas('empty');
+    expect(useCanvasStore.getState().canvases.some((canvas) => canvas.id === 'empty')).toBe(true);
+    useCanvasStore.getState().mergeCanvases([{ ...doc('empty', '默认画布'), updatedAt: '2099-01-01T00:00:00Z' }]);
+    expect(useCanvasStore.getState().canvases.find((canvas) => canvas.id === 'empty')?.hasChat).toBe(true);
+  });
 });

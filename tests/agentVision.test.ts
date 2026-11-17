@@ -74,6 +74,25 @@ describe('Responses JSON 对话的图像输入', () => {
 });
 
 describe('三协议统一视觉上下文', () => {
+  it.each(['chat', 'responses'] as const)('%s 保留 SVG 文件标识但不发送不受支持的矢量视觉附件', async (textFormat) => {
+    let requestBody = '';
+    vi.stubGlobal('fetch', vi.fn(async (_url: string, init: RequestInit) => {
+      requestBody = String(init.body);
+      return textFormat === 'chat'
+        ? new Response('data: {"choices":[{"delta":{"content":"已生成"}}]}\n\ndata: [DONE]\n\n')
+        : new Response(JSON.stringify({ output_text: '已生成' }));
+    }));
+    const vector = 'data:image/svg+xml;base64,PHN2Zy8+';
+    await callAgentModel({ ...profile, textFormat }, {
+      systemSpec: '', tools: [], messages: [{ role: 'user', content: '生成 SVG' }],
+      visualContext: [{ id: 'svg-result', label: 'SVG 候选 1', url: vector }],
+    });
+    expect(requestBody).not.toContain(vector);
+    expect(requestBody).toContain('svg-result');
+    expect(requestBody).toContain('未作为视觉附件发送');
+    expect(requestBody).not.toContain('请实际查看图片内容');
+  });
+
   const visualContext = [
     { id: 'reference-node', label: '用户引用图 1', url: imageA },
     { id: 'batch-a/call-b/2/node-c/version-d', label: '本批生成候选 2（默认编辑基准）', url: imageB },
